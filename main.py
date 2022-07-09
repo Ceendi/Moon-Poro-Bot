@@ -25,7 +25,7 @@ class Bot(commands.Bot):
 
     async def on_message(self, message):
         if "bu" in message.content.lower():
-            await message.channel.send("Waa")
+            await message.channel.send("Waaa")
         if "jd" in message.content.lower():
             jd = discord.utils.get(message.guild.roles, name="JD")
             await message.author.add_roles(jd)
