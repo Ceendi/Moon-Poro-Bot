@@ -21,7 +21,7 @@ class Warn(commands.Cog):
             if role not in member.roles:
                 await member.add_roles(role)
 
-    @tasks.loop(minutes=1.0)
+    @tasks.loop(hours=12.0)
     async def czysc_warny(self):
         guild = self.bot.get_guild(config.guild_id)
         channel = guild.get_channel(config.warn_channel_id)

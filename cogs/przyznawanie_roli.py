@@ -196,7 +196,7 @@ class Przyciski(discord.ui.View):
             await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając inne role z lola.", ephemeral=True)
 
 
-class Role(commands.Cog):
+class Przyznawanie_Roli(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         bot.add_view(Przyciski())
@@ -215,4 +215,4 @@ class Role(commands.Cog):
             raise error
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Role(bot), guild = discord.Object(id = config.guild_id))
+    await bot.add_cog(Przyznawanie_Roli(bot), guild = discord.Object(id = config.guild_id))
