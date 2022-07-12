@@ -1,3 +1,4 @@
+from tracemalloc import start
 import discord
 from discord import app_commands
 from discord.utils import get
@@ -15,7 +16,7 @@ class Warn(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        data = await self.bot.pool.fetch("SELECT * FROM warn WHERE id = $1;", member.id)
+        data = await self.bot.pool.fetch("SELECT * FROM warn WHERE id=$1;", member.id)
         if data:
             role = get(member.guild.roles, name=warns[data[0]["typ"]])
             if role not in member.roles:
@@ -26,7 +27,7 @@ class Warn(commands.Cog):
         guild = self.bot.get_guild(config.guild_id)
         channel = guild.get_channel(config.warn_channel_id)
         async with self.bot.pool.acquire() as con:
-            datas = await con.fetch("SELECT * FROM warn WHERE NOW() > koniec;")
+            datas = await con.fetch("SELECT * FROM warn WHERE NOW() > koniec AND active=$1;", True)
             for data in datas:
                 role = get(guild.roles, name=warns[data["typ"]])
                 uzytkownik = guild.get_member(data["id"])
@@ -68,7 +69,7 @@ class Warn(commands.Cog):
             return
 
         warn_channel = interaction.guild.get_channel(config.warn_channel_id)
-        data = await self.bot.pool.fetch('SELECT * FROM warn WHERE id=$1;', uzytkownik.id)
+        data = await self.bot.pool.fetch('SELECT * FROM warn WHERE id=$1 AND active=$2;', uzytkownik.id, True)
         powod = str(powod)
         if dodatkowy_powod:
             powod = powod + '/' + str(dodatkowy_powod)
@@ -82,7 +83,8 @@ class Warn(commands.Cog):
                 warn_type = "TIMEOUT"
             old_warn_role = get(interaction.guild.roles, name=warns[data["typ"]])
             warn_role = get(interaction.guild.roles, name=warn_type)
-            end_date = datetime.datetime.utcnow().replace(microsecond=0) + datetime.timedelta(days=warn_days[str(warn_role)])
+            now = datetime.datetime.utcnow().replace(microsecond=0)
+            end_date = now + datetime.timedelta(days=warn_days[str(warn_role)])
             start_date = data["start"]
             new_powod = powod
             powod = data["powod"] + '/' + powod
@@ -97,7 +99,10 @@ class Warn(commands.Cog):
                 embed.add_field(name="Mod", value="<@"+str(autor)+">")
             message = warn_channel.get_partial_message(data["message_id"])
             await message.edit(embed=embed)
-            await self.bot.pool.execute('UPDATE warn SET typ=$1, powod=$2, koniec=$3, autorzy=$4 WHERE id=$5;', typ, powod, end_date, autorzy, uzytkownik.id)
+            async with self.bot.pool.acquire() as con:
+                await con.execute("DELETE FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, False)
+                await con.execute('UPDATE warn SET active=$1 WHERE id=$2;', False, uzytkownik.id)
+                await con.execute("INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8);", uzytkownik.id, typ, powod, start_date, end_date, message.id, autorzy, True)
             await uzytkownik.remove_roles(old_warn_role)
             await uzytkownik.add_roles(warn_role)
             await interaction.response.send_message(uzytkownik.mention + " otrzymał **" + str(warn_role) + "** za " + str(new_powod) + " punkt regulaminu.")
@@ -112,7 +117,7 @@ class Warn(commands.Cog):
             embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
             embed.add_field(name="Modzi", value=interaction.user.mention, inline=True)
             message = await warn_channel.send(embed=embed)
-            await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id])
+            await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id], True)
             await uzytkownik.add_roles(warn_role)
             await interaction.response.send_message(uzytkownik.mention + " otrzymał **" + str(warn_role) + "** za " + str(powod) + " punkt regulaminu.")
 

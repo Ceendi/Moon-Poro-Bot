@@ -18,7 +18,7 @@ class Bot(commands.Bot):
         extensions = ['przyznawanie_roli', 'warn', 'role']
         for ext in extensions:
             await self.load_extension(f"cogs.{ext}")
-        #await self.tree.sync(guild = discord.Object(id = config.guild_id))
+        await self.tree.sync(guild = discord.Object(id = config.guild_id))
     
     async def on_ready(self):
         print(f"Zalogowano jako {self.user}!")
