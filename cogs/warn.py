@@ -1,4 +1,3 @@
-from tracemalloc import start
 import discord
 from discord import app_commands
 from discord.utils import get
@@ -8,6 +7,7 @@ from typing import Optional
 import config
 from config import warns, warn_days
 import datetime
+
 
 class Warn(commands.Cog):
     def __init__(self, bot: commands.Bot):
