@@ -5,6 +5,7 @@ import asyncpg
 import asyncio
 import logging
 import logging.handlers
+from cogs.weryfikacja import Weryfikacja
 
 
 class Bot(commands.Bot):
@@ -15,7 +16,7 @@ class Bot(commands.Bot):
             )
 
     async def setup_hook(self):
-        extensions = ['przyznawanie_roli', 'warn', 'role', 'ticket']
+        extensions = ['przyznawanie_roli', 'warn', 'role', 'ticket', 'weryfikacja']
         for ext in extensions:
             await self.load_extension(f"cogs.{ext}")
         await self.tree.sync(guild = discord.Object(id = config.guild_id))
@@ -24,7 +25,7 @@ class Bot(commands.Bot):
         print(f"Zalogowano jako {self.user}!")
 
     async def on_message(self, message):
-        if "bu" in message.content.lower():
+        if "buu" in message.content.lower():
             await message.channel.send("Waaa")
         if "jd" in message.content.lower():
             jd = discord.utils.get(message.guild.roles, name="JD")

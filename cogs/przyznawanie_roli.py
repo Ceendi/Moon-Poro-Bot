@@ -4,7 +4,14 @@ from discord.ext import commands
 import config
 from discord.utils import get
 from functions import has_rank_roles, has_server_roles, has_other_roles
+from cogs.weryfikacja import Weryfikacja
 
+class ButtonOnCooldown(commands.CommandError):
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+
+def key(interaction: discord.Interaction):
+    return interaction.user
 
 async def give_other_roles(interaction: discord.Interaction, button: discord.ui.Button):
     role = get(interaction.guild.roles, name=button.label)
@@ -42,7 +49,6 @@ async def give_rank_role(interaction: discord.Interaction, select: discord.ui.Se
         return
 
     role = get(interaction.guild.roles, name=select.values[0])
-    print(123)
     previous_rank_role = None
     for r in interaction.user.roles:
         if str(r) in config.lol_ranks:
@@ -75,8 +81,11 @@ async def give_uzytkownik(interaction: discord.Interaction):
 
 
 class Przyciski(discord.ui.View):
-    def __init__(self):
+    def __init__(self, bot):
         super().__init__(timeout=None)
+        self.value = 0
+        self.cd = commands.CooldownMapping.from_cooldown(1.0, 10.0, key) #zmien czas na 420 sekund
+        self.bot = bot
 
     @discord.ui.select(
         max_values=1,
@@ -127,7 +136,10 @@ class Przyciski(discord.ui.View):
         ]
     )
     async def ranks(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await give_rank_role(interaction, select)
+        if "Zweryfikowany" not in str(interaction.user.roles):
+            await give_rank_role(interaction, select)
+        else:
+            await interaction.response.send_message("Posiadasz rolę **Zweryfikowany**, która automatycznie ci aktualizuje rolę co 24h!", ephemeral=True)
 
     @discord.ui.button(label="EUNE", style=discord.ButtonStyle.red, custom_id="eune", row=1)
     async def eune(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -163,7 +175,14 @@ class Przyciski(discord.ui.View):
 
     @discord.ui.button(label="Weryfikacja", style=discord.ButtonStyle.blurple, custom_id="weryfikacja", row=3)
     async def weryfikacja(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message('Tu bedzie weryfikacja :)', ephemeral=True)
+        retry_after = self.cd.update_rate_limit(interaction)
+        if retry_after:
+            raise ButtonOnCooldown(retry_after)
+        else:
+            if "Weryfikacja" not in str(interaction.user.roles):
+                await interaction.response.send_modal(Weryfikacja(self.bot))
+            else:
+                await interaction.response.send_message("Już jesteś zweryfikowany, żeby zmienić konto użyj komendy **/usun_weryfikacje**", ephemeral=True)
 
     @discord.ui.button(label="Szukam gry", style=discord.ButtonStyle.blurple, custom_id="szukam_gry", row=3)
     async def szukam_gry(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -195,17 +214,23 @@ class Przyciski(discord.ui.View):
         else:
             await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając inne role z lola.", ephemeral=True)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+        if isinstance(error, ButtonOnCooldown):
+            seconds = int(error.retry_after)
+            await interaction.response.send_message(f"Spróbuj ponownie za {seconds}s!", ephemeral=True)
+        else:
+            await super().on_error(interaction, error, item)
 
 class Przyznawanie_Roli(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        bot.add_view(Przyciski())
+        bot.add_view(Przyciski(self.bot))
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="przyznawanie_roli", description="Wysyła przyciski do przyznawania roli.")
     async def przyznawanie_roli(self, interaction: discord.Interaction):
-        await interaction.response.send_message(view=Przyciski())
+        await interaction.response.send_message(view=Przyciski(self.bot))
 
     @przyznawanie_roli.error
     async def przyznawanie_roliError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
