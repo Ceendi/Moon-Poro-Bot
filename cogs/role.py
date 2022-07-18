@@ -66,7 +66,6 @@ class Role(commands.Cog):
     )
     async def usun_role(self, interaction: discord.Interaction, uzytkownik: discord.Member, role1: discord.Role,
     role2: Optional[discord.Role], role3: Optional[discord.Role], role4: Optional[discord.Role], role5: Optional[discord.Role]):
-        warn_values = {"Warn": 1, "Warn 2": 2, "TIMEOUT": 3}
         roles = [role1, role2, role3, role4, role5]
         failed_roles = []
         succesful_roles = []
@@ -92,7 +91,7 @@ class Role(commands.Cog):
 
     @app_commands.checks.has_any_role('Administracja', 'Moderacja')
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="cofnij_warna", description="Cofa warna do poprzedniego.")
+    @app_commands.command(name="cofnij_warna", description="Cofa warna do poprzedniego, w przypadku gdy nie było poprzedniego to go usuwa.")
     @app_commands.describe(uzytkownik="Osoba, której cofasz warna.")
     async def cofnij_warna(self, interaction: discord.Interaction, uzytkownik: discord.Member):
         async with self.bot.pool.acquire() as con:

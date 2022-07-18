@@ -23,7 +23,7 @@ async def give_other_roles(interaction: discord.Interaction, button: discord.ui.
             await interaction.user.remove_roles(dyskusje)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Otrzymałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**", ephemeral=True)
 
 
 async def give_league_roles(interaction: discord.Interaction, button: discord.ui.Button):
@@ -38,7 +38,7 @@ async def give_league_roles(interaction: discord.Interaction, button: discord.ui
         await interaction.response.send_message(f"Usunąłeś rolę **{str(role)}**", ephemeral=True)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Otrzymałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**", ephemeral=True)
 
     await give_uzytkownik(interaction)
 
@@ -54,14 +54,18 @@ async def give_rank_role(interaction: discord.Interaction, select: discord.ui.Se
         if str(r) in config.lol_ranks:
             previous_rank_role = get(interaction.guild.roles, name=str(r))
             break
+    
+    if previous_rank_role == role:
+        await interaction.response.send_message(f"Już posiadasz rolę **{role}**", ephemeral=True)
+        return
 
     if previous_rank_role:
         await interaction.user.remove_roles(previous_rank_role)
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Otrzymałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Zmieniłeś rolę **{str(previous_rank_role)}** na **{str(role)}**", ephemeral=True)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Otrzymałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Wybrałeś rolę **{str(role)}**", ephemeral=True)
 
     await give_uzytkownik(interaction)
 

@@ -77,6 +77,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
     nick = discord.ui.TextInput(label='Nick na lolu', required=True)
     server = discord.ui.Select(
         max_values=1,
+        placeholder='Wybierz region konta...',
         options = [
             discord.SelectOption(label='EUNE', value="EUN1"),
             discord.SelectOption(label='EUW', value="EUW1"),
@@ -141,25 +142,26 @@ class WeryfikacjaCog(commands.Cog):
         for data in datas:
             guild = self.bot.get_guild(config.guild_id)
             member = guild.get_member(data['id'])
-            for old_role in member.roles:
-                if str(old_role) in lol_ranks:
-                    break
-        
-            lol_rank = 'UNRANKED'
-            leagues = lol_watcher.league.by_summoner(data['server'], data['lol_id'])
-            if leagues:
-                for league in leagues:
-                    if league['queueType'] == 'RANKED_SOLO_5x5':
-                        lol_rank = league['tier']
+            if member:
+                for old_role in member.roles:
+                    if str(old_role) in lol_ranks:
                         break
-            if lol_rank == "GRANDMASTER":
-                new_role = get(member.guild.roles, name='GrandMaster')
-            else:
-                new_role = get(member.guild.roles, name=lol_rank.capitalize())
+            
+                lol_rank = 'UNRANKED'
+                leagues = lol_watcher.league.by_summoner(data['server'], data['lol_id'])
+                if leagues:
+                    for league in leagues:
+                        if league['queueType'] == 'RANKED_SOLO_5x5':
+                            lol_rank = league['tier']
+                            break
+                if lol_rank == "GRANDMASTER":
+                    new_role = get(member.guild.roles, name='GrandMaster')
+                else:
+                    new_role = get(member.guild.roles, name=lol_rank.capitalize())
 
-            if new_role != old_role:
-                await member.remove_roles(old_role)
-                await member.add_roles(new_role)
+                if new_role != old_role:
+                    await member.remove_roles(old_role)
+                    await member.add_roles(new_role)
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):

@@ -1,8 +1,10 @@
+from datetime import datetime
 import discord
 from discord.ext import commands
 import config
 import asyncpg
 import asyncio
+import datetime
 import logging
 import logging.handlers
 from cogs.weryfikacja import Weryfikacja
@@ -24,12 +26,22 @@ class Bot(commands.Bot):
     async def on_ready(self):
         print(f"Zalogowano jako {self.user}!")
 
-    async def on_message(self, message):
+    async def on_message(self, message: discord.Message):
+        if '@everyone' in message.content.lower() and "Administracja" not in str(message.author.roles) and "Moderacja" not in str(message.author.roles):
+            await message.author.ban(delete_message_days=1, reason='spam(ping everyone)')
         if "buu" in message.content.lower():
             await message.channel.send("Waaa")
         if "jd" in message.content.lower():
             jd = discord.utils.get(message.guild.roles, name="JD")
             await message.author.add_roles(jd)
+        if message.channel.id == config.szukanie_gry_channel_id and 'clash' in message.content.lower():
+            await message.delete()
+
+    async def on_member_join(self, member: discord.Member):
+        if member.created_at + datetime.timedelta(hours=2) > datetime.datetime.now(datetime.timezone.utc):
+            await member.ban(reason="Multikonto")
+            channel = member.guild.get_channel(config.komendy_botowe_channel_id)
+            await channel.send(f"Zbanowano {member.mention} za multikonto!")
 
 """ERROR HANDLER"""
 logger = logging.getLogger('discord')
