@@ -183,7 +183,7 @@ class Przyciski(discord.ui.View):
         if retry_after:
             raise ButtonOnCooldown(retry_after)
         else:
-            if "Weryfikacja" not in str(interaction.user.roles):
+            if "Zweryfikowany" not in str(interaction.user.roles):
                 await interaction.response.send_modal(Weryfikacja(self.bot))
             else:
                 await interaction.response.send_message("Już jesteś zweryfikowany, żeby zmienić konto użyj komendy **/usun_weryfikacje**", ephemeral=True)

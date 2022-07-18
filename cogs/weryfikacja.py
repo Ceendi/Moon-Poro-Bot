@@ -23,7 +23,7 @@ class Zweryfikuj(discord.ui.View):
     
     @discord.ui.button(label="\u200b", style=discord.ButtonStyle.green)
     async def zweryfikuj(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if "Zweryfikowany" in interaction.user.roles:
+        if "Zweryfikowany" in str(interaction.user.roles):
             await interaction.response.send_message("Już jesteś zweryfikowany!", ephemeral=True)
             return
         try:
@@ -173,6 +173,7 @@ class WeryfikacjaCog(commands.Cog):
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", interaction.user.id)
         if not data:
             await interaction.response.send_message("Nie jesteś na liście zweryfikowanych!", ephemeral=True)
+            return
         zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
         channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
         message = channel.get_partial_message(data[0]['message_id'])
