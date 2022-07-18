@@ -17,13 +17,19 @@ async def give_other_roles(interaction: discord.Interaction, button: discord.ui.
     role = get(interaction.guild.roles, name=button.label)
     if role in interaction.user.roles:
         await interaction.user.remove_roles(role)
-        await interaction.response.send_message(f"Usunąłeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Usunąłeś rolę **{str(role)}**.", ephemeral=True)
+        if str(role) == "Nie posiadam konta w lolu":
+            uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+            await interaction.user.remove_roles(uzytkownik)
         if "Dyskusje" in str(interaction.user.roles) and str(role) == "Nie posiadam konta w lolu":
             dyskusje = get(interaction.guild.roles, name="Dyskusje")
             await interaction.user.remove_roles(dyskusje)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**.", ephemeral=True)
+        if str(role) == "Nie posiadam konta w lolu":
+            uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+            await interaction.user.add_roles(uzytkownik)
 
 
 async def give_league_roles(interaction: discord.Interaction, button: discord.ui.Button):
@@ -35,17 +41,17 @@ async def give_league_roles(interaction: discord.Interaction, button: discord.ui
 
     if role in interaction.user.roles:
         await interaction.user.remove_roles(role)
-        await interaction.response.send_message(f"Usunąłeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Usunąłeś rolę **{str(role)}**.", ephemeral=True)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Dodałeś rolę **{str(role)}**.", ephemeral=True)
 
     await give_uzytkownik(interaction)
 
 
 async def give_rank_role(interaction: discord.Interaction, select: discord.ui.Select):
     if "Nie posiadam konta w lolu" in str(interaction.user.roles):
-        await interaction.response.send_message(f"Nie możesz dostać roli ligowej posiadając rolę **Nie posiadam konta w lolu**.", ephemeral=True)
+        await interaction.response.send_message(f"Nie możesz dostać roli ligowej posiadając rolę **Nie posiadam konta w lolu.**", ephemeral=True)
         return
 
     role = get(interaction.guild.roles, name=select.values[0])
@@ -56,16 +62,16 @@ async def give_rank_role(interaction: discord.Interaction, select: discord.ui.Se
             break
     
     if previous_rank_role == role:
-        await interaction.response.send_message(f"Już posiadasz rolę **{role}**", ephemeral=True)
+        await interaction.response.send_message(f"Już posiadasz rolę **{role}**.", ephemeral=True)
         return
 
     if previous_rank_role:
         await interaction.user.remove_roles(previous_rank_role)
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Zmieniłeś rolę **{str(previous_rank_role)}** na **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Zmieniłeś rolę **{str(previous_rank_role)}** na **{str(role)}**.", ephemeral=True)
     else:
         await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"Wybrałeś rolę **{str(role)}**", ephemeral=True)
+        await interaction.response.send_message(f"Wybrałeś rolę **{str(role)}**.", ephemeral=True)
 
     await give_uzytkownik(interaction)
 
@@ -143,7 +149,7 @@ class Przyciski(discord.ui.View):
         if "Zweryfikowany" not in str(interaction.user.roles):
             await give_rank_role(interaction, select)
         else:
-            await interaction.response.send_message("Posiadasz rolę **Zweryfikowany**, która automatycznie ci aktualizuje rolę co 24h!", ephemeral=True)
+            await interaction.response.send_message("Posiadasz rolę **Zweryfikowany**, która automatycznie aktualizuje Ci rolę co 24h! Jeśli chcesz zmienić konto to użyj komendy /usun_weryfikacje.", ephemeral=True)
 
     @discord.ui.button(label="EUNE", style=discord.ButtonStyle.red, custom_id="eune", row=1)
     async def eune(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -186,7 +192,7 @@ class Przyciski(discord.ui.View):
             if "Zweryfikowany" not in str(interaction.user.roles):
                 await interaction.response.send_modal(Weryfikacja(self.bot))
             else:
-                await interaction.response.send_message("Już jesteś zweryfikowany, żeby zmienić konto użyj komendy **/usun_weryfikacje**", ephemeral=True)
+                await interaction.response.send_message("**Już jesteś zweryfikowany.** Jeśli chcesz zmienić konto, użyj komendy */usun_weryfikacje*.", ephemeral=True)
 
     @discord.ui.button(label="Szukam gry", style=discord.ButtonStyle.blurple, custom_id="szukam_gry", row=3)
     async def szukam_gry(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -209,14 +215,14 @@ class Przyciski(discord.ui.View):
         if "Użytkownik" in str(interaction.user.roles) or "Nie posiadam konta w lolu" in str(interaction.user.roles):
             await give_other_roles(interaction, button)
         else:
-            await interaction.response.send_message("Żeby mieć rolę **Dyskusje**, potrzebujesz roli rangowej + serwerowej lub **Nie posiadam konta w lolu**.", ephemeral=True)
+            await interaction.response.send_message("Możesz nadać sobie rolę **Dyskusje** tylko, jeśli masz rolę Użytkownik.", ephemeral=True)
 
     @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl", row=4)
     async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not (has_rank_roles(interaction.user) or has_server_roles(interaction.user) or has_other_roles(interaction.user)):
             await give_other_roles(interaction, button)
         else:
-            await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając inne role z lola.", ephemeral=True)
+            await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając role ligowe. Zdejmij je i spróbuj ponownie.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
         if isinstance(error, ButtonOnCooldown):
@@ -239,7 +245,7 @@ class Przyznawanie_Roli(commands.Cog):
     @przyznawanie_roli.error
     async def przyznawanie_roliError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
-            await interaction.response.send_message("Nie posiadasz permisji do używania tej komendy!", ephemeral=True)
+            await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
 

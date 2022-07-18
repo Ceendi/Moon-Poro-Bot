@@ -124,7 +124,7 @@ class Warn(commands.Cog):
     @warn.error
     async def warnError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do używania tej komendy!", ephemeral=True)
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
 

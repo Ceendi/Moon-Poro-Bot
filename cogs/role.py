@@ -49,7 +49,7 @@ class Role(commands.Cog):
     @daj_role.error
     async def daj_roleError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do używania tej komendy!", ephemeral=True)
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
 
@@ -85,7 +85,7 @@ class Role(commands.Cog):
     @usun_role.error
     async def usun_roleError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do używania tej komendy!", ephemeral=True)
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
 
@@ -135,7 +135,7 @@ class Role(commands.Cog):
     @cofnij_warna.error
     async def cofnij_warnaError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do używania tej komendy!", ephemeral=True)
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
 
