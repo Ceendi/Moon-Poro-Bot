@@ -1,3 +1,4 @@
+from os import remove
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -89,6 +90,27 @@ async def give_uzytkownik(interaction: discord.Interaction):
             dyskusje = get(interaction.guild.roles, name="Dyskusje")
             await user.remove_roles(dyskusje)
 
+
+class Usun_role(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Usuń wszystkie role", style=discord.ButtonStyle.gray, custom_id="usun_w_role")
+    async def usun_w_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        all_roles = config.lol_other + config.lol_ranks + config.lol_servers + ["TFT", "LOR", "Valorant", "Dyskusje", "Użytkownik", "Nie posiadam konta w lolu"]
+        remove_roles = []
+        for role in interaction.user.roles:
+            if str(role) in all_roles:
+                remove_roles.append(role)
+        await interaction.user.remove_roles(*remove_roles)
+        await interaction.response.send_message("Usunąłeś wszystkie role z przyznawania ról!", ephemeral=True)
+
+    @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl")
+    async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (has_rank_roles(interaction.user) or has_server_roles(interaction.user) or has_other_roles(interaction.user)):
+            await give_other_roles(interaction, button)
+        else:
+            await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając role ligowe. Zdejmij je i spróbuj ponownie.", ephemeral=True)
 
 class Przyciski(discord.ui.View):
     def __init__(self, bot):
@@ -210,6 +232,10 @@ class Przyciski(discord.ui.View):
     async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
+    @discord.ui.button(label="Wild rift", style=discord.ButtonStyle.gray, custom_id="wild_rift", row=4)
+    async def wild_rift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await give_other_roles(interaction, button)
+
     @discord.ui.button(label="Dyskusje", style=discord.ButtonStyle.gray, custom_id="dyskusje", row=4)
     async def dyskusje(self, interaction: discord.Interaction, button: discord.ui.Button):
         if "Użytkownik" in str(interaction.user.roles) or "Nie posiadam konta w lolu" in str(interaction.user.roles):
@@ -217,12 +243,7 @@ class Przyciski(discord.ui.View):
         else:
             await interaction.response.send_message("Możesz nadać sobie rolę **Dyskusje** tylko, jeśli masz rolę Użytkownik.", ephemeral=True)
 
-    @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl", row=4)
-    async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (has_rank_roles(interaction.user) or has_server_roles(interaction.user) or has_other_roles(interaction.user)):
-            await give_other_roles(interaction, button)
-        else:
-            await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając role ligowe. Zdejmij je i spróbuj ponownie.", ephemeral=True)
+
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
         if isinstance(error, ButtonOnCooldown):
@@ -235,12 +256,14 @@ class Przyznawanie_Roli(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         bot.add_view(Przyciski(self.bot))
+        bot.add_view(Usun_role())
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="przyznawanie_roli", description="Wysyła przyciski do przyznawania roli.")
     async def przyznawanie_roli(self, interaction: discord.Interaction):
         await interaction.response.send_message(view=Przyciski(self.bot))
+        await interaction.channel.send(content="Czyszczenie Roli", view=Usun_role())
 
     @przyznawanie_roli.error
     async def przyznawanie_roliError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):

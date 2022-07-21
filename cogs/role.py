@@ -14,7 +14,7 @@ class Role(commands.Cog):
 
     @app_commands.checks.has_any_role("Administracja", 'Moderacja')
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="dodaj_role", description="Dodaje rolę dla danego użytkownika.")
+    @app_commands.command(name="dr", description="Dodaje rolę dla danego użytkownika.")
     @app_commands.describe(
         uzytkownik = "Osoba, której dodajesz rolę.",
         role1 = "Rola, którą chcesz dodać.",
@@ -41,9 +41,9 @@ class Role(commands.Cog):
             elif role:
                 failed_roles.append("**"+str(role)+"**")
         if not failed_roles:
-            await interaction.response.send_message("Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles))
+            await interaction.response.send_message("Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles)) + "."
         else:
-            message = "Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles) + ".\nNie udało się dodać (brak uprawnień): " + ', '.join(failed_roles)
+            message = "Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles) + ".\nNie udało się dodać (brak uprawnień): " + ', '.join(failed_roles) + "."
             await interaction.response.send_message(message)
 
     @daj_role.error
@@ -55,7 +55,7 @@ class Role(commands.Cog):
 
     @app_commands.checks.has_any_role("Administracja", 'Moderacja')
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="usun_role", description="Usuwa rolę dla danego użytkownika.")
+    @app_commands.command(name="ur", description="Usuwa rolę dla danego użytkownika.")
     @app_commands.describe(
         uzytkownik = "Osoba, której usuwasz rolę.",
         role1 = "Rola, którą chcesz usunąć.",
@@ -77,9 +77,9 @@ class Role(commands.Cog):
             elif role:
                 failed_roles.append("**"+str(role)+"**")
         if not failed_roles:
-            await interaction.response.send_message('Dla ' + uzytkownik.mention + ' usunięto role: ' + ', '.join(succesful_roles))
+            await interaction.response.send_message('Dla ' + uzytkownik.mention + ' usunięto role: ' + ', '.join(succesful_roles)) + "."
         else:
-            message = "Dla " + uzytkownik.mention + " usunięto role: " + ', '.join(succesful_roles) + ".\nNie udało się usunąć(brak uprawnień lub błąd w przypadku warna): " + ', '.join(failed_roles)
+            message = "Dla " + uzytkownik.mention + " usunięto role: " + ', '.join(succesful_roles) + ".\nNie udało się usunąć(brak uprawnień lub błąd w przypadku warna): " + ', '.join(failed_roles) + "."
             await interaction.response.send_message(message)
 
     @usun_role.error
@@ -91,7 +91,7 @@ class Role(commands.Cog):
 
     @app_commands.checks.has_any_role('Administracja', 'Moderacja')
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="cofnij_warna", description="Cofa warna do poprzedniego, w przypadku gdy nie było poprzedniego to go usuwa.")
+    @app_commands.command(name="cw", description="Cofa warny do uprzedniego stanu.")
     @app_commands.describe(uzytkownik="Osoba, której cofasz warna.")
     async def cofnij_warna(self, interaction: discord.Interaction, uzytkownik: discord.Member):
         async with self.bot.pool.acquire() as con:
@@ -127,7 +127,7 @@ class Role(commands.Cog):
                     await message.delete()
                     await con.execute("DELETE FROM warn WHERE id=$1;", uzytkownik.id)
                     await uzytkownik.remove_roles(warn_role)
-                    await interaction.response.send_message(f"Pomyślnie usunięto role warnowe dla {uzytkownik.mention}")
+                    await interaction.response.send_message(f"Pomyślnie usunięto role warn dla {uzytkownik.mention}.")
             else:
                 await interaction.response.send_message("Użytkownik nie ma warna.", ephemeral=True)
 

@@ -20,12 +20,12 @@ class Ticket(commands.Cog):
         self.bot = bot
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="ticket", description="Wysyła zgłoszenie do moderacji.")
+    @app_commands.command(name="skarga", description="Wysyła skargę do moderacji.")
     @app_commands.describe(powod = "Jaką rzecz chcesz zgłosić moderacji?")
     async def ticket(self, interaction: discord.Interaction, powod: str):
         channel = interaction.guild.get_channel(config.ticket_channel_id)
-        await channel.send(f"{interaction.user.mention}: {powod}", view=Przyjmij())
-        await interaction.response.send_message("Wysłano ticket!", ephemeral=True)
+        await channel.send(f"@here\n{interaction.user.mention}: {powod}", view=Przyjmij())
+        await interaction.response.send_message("Pomyślnie wysłano zgłoszenie!", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Ticket(bot), guild = discord.Object(id = config.guild_id))

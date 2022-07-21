@@ -49,7 +49,7 @@ class Warn(commands.Cog):
 
     @app_commands.checks.has_any_role("Moderacja", "Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="warn", description="Warnuje użytkownika")
+    @app_commands.command(name="w", description="Warnuje użytkownika")
     @app_commands.describe(
         uzytkownik = "Osoba, której dajesz warna",
         typ = "Typ warna",
@@ -63,7 +63,7 @@ class Warn(commands.Cog):
             Choice(name = "TIMEOUT", value = 3),
         ]
     )
-    async def warn(self, interaction: discord.Interaction, uzytkownik: discord.Member, typ: int, powod: app_commands.Range[int, 1, 13], dodatkowy_powod: Optional[app_commands.Range[int, 1, 13]]):
+    async def warn(self, interaction: discord.Interaction, typ: int, uzytkownik: discord.Member, powod: app_commands.Range[int, 1, 13], dodatkowy_powod: Optional[app_commands.Range[int, 1, 13]]):
         if "TIMEOUT" in str(uzytkownik.roles):
             await interaction.response.send_message("Ten użytkownik ma już rolę **TIMEOUT**.", ephemeral=True)
             return

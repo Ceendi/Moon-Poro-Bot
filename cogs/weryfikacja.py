@@ -64,9 +64,9 @@ class Zweryfikuj(discord.ui.View):
             zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
             await interaction.user.add_roles(discord_new_rank)
             await interaction.user.add_roles(zweryfikowany)
-            await interaction.response.send_message("Udało ci się przejść weryfikację!", ephemeral=True)
+            await interaction.response.send_message("Udało Ci się przejść weryfikację!", ephemeral=True)
         else:
-            await interaction.response.send_message("Nie udało ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
+            await interaction.response.send_message("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
 
 
 class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
@@ -87,7 +87,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            icon = lol_watcher.summoner.by_name(self.server.values[0], self.nick)['profileIconId']
+            summoner = lol_watcher.summoner.by_name(self.server.values[0], self.nick)
         except ApiError as error:
             if error.response.status_code == 429:
                 await interaction.response.send_message(f"Spróbuj ponownie za {error.headers['Retry-After']}")
@@ -97,14 +97,18 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
                 return
             else:
                 raise error
-        random_icon_id = randrange(0, 28)
-        while icon == random_icon_id:
+        data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE lol_id = $1;", summoner['id'])
+        if not data:
             random_icon_id = randrange(0, 28)
-        icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
-        embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.nick}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
-        embed.set_image(url=icon_url)
-        view = Zweryfikuj(random_icon_id, self.nick, self.server.values[0], self.bot)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            while summoner['profileIconId'] == random_icon_id:
+                random_icon_id = randrange(0, 28)
+            icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
+            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.nick}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
+            embed.set_image(url=icon_url)
+            view = Zweryfikuj(random_icon_id, self.nick, self.server.values[0], self.bot)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message("To konto w lolu już jest przypisane do innego użytkownika!", ephemeral=True)
 
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -119,6 +123,7 @@ class WeryfikacjaCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", member.id)
+        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if data:
             lol_rank = 'UNRANKED'
             leagues = lol_watcher.league.by_summoner(data[0]['server'], data[0]['lol_id'])
@@ -132,9 +137,14 @@ class WeryfikacjaCog(commands.Cog):
             else:
                 rank_role = get(member.guild.roles, name=lol_rank.capitalize())
 
-            role = get(member.guild.roles, name='Zweryfikowany')
-            await member.add_roles(role)
-            await member.add_roles(rank_role)
+            zweryfikowany = get(member.guild.roles, name='Zweryfikowany')
+            uzytkownik = get(member.guild.roles, name='Użytkownik')
+            server = get(member.guild.roles, name=server_translation[data[0]['server']])
+            await member.add_roles(*[server, uzytkownik, zweryfikowany, rank_role])
+            try:
+                await member.send("Byłeś zweryfikowany, więc bot automatycznie przyznał Ci role, jeśli chcesz usunąć weryfikację użyj komendy /usun_weryfikacje.")
+            except discord.errors.Forbidden:
+                pass
 
     @tasks.loop(hours=24.0)
     async def sprawdz_zweryfikowanych(self):
@@ -180,7 +190,7 @@ class WeryfikacjaCog(commands.Cog):
         await message.delete()
         await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE id=$1;", interaction.user.id)
         await interaction.user.remove_roles(zweryfikowany)
-        await interaction.response.send_message("Pomyślnie usunięto ciebie z listy zweryfikowanych!", ephemeral=True)
+        await interaction.response.send_message("Pomyślnie usunięto Cię z listy zweryfikowanych!", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
