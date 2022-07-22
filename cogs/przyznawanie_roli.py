@@ -224,7 +224,10 @@ class Not_lol(discord.ui.View):
     @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl", row=0)
     async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not (has_rank_roles(interaction.user) or has_server_roles(interaction.user) or has_other_roles(interaction.user)):
-            await give_other_roles(interaction, button)
+            if "Zweryfikowany" in str(interaction.user.roles):
+                interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając rolę Zweryfikowany!", ephemeral=True)
+            else:
+                await give_other_roles(interaction, button)
         else:
             await interaction.response.send_message("Nie możesz dostać roli **Nie posiadam konta w lolu** posiadając role ligowe. Zdejmij je i spróbuj ponownie.", ephemeral=True)
     
