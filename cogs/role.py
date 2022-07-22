@@ -29,7 +29,7 @@ class Role(commands.Cog):
         failed_roles = []
         succesful_roles = []
         for role in roles:
-            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT"]):
+            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT", "Wild Rift", "Ogłoszenia", "Lol Newsy"]):
                 if role not in uzytkownik.roles:
                     if str(role) in config.lol_ranks and functions.has_rank_roles(uzytkownik):
                         for rank_role in uzytkownik.roles:
@@ -70,7 +70,7 @@ class Role(commands.Cog):
         failed_roles = []
         succesful_roles = []
         for role in roles:
-            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT"]):
+            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT", "Wild Rift", "Ogłoszenia", "Lol Newsy"]):
                 if role in uzytkownik.roles:
                     await uzytkownik.remove_roles(role)
                     succesful_roles.append("**"+str(role)+"**")
