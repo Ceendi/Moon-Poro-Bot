@@ -6,7 +6,7 @@ import config
 
 class Przyjmij(discord.ui.View):
     def __init__(self):
-        super().__init__()
+        super().__init__(timeout=43200)
 
     @discord.ui.button(label="Przyjmij", style=discord.ButtonStyle.green)
     async def przyjmij(self, interaction: discord.Interaction, button: discord.ui.Button):

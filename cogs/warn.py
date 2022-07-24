@@ -16,7 +16,7 @@ class Warn(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        data = await self.bot.pool.fetch("SELECT * FROM warn WHERE id=$1;", member.id)
+        data = await self.bot.pool.fetch("SELECT * FROM warn WHERE id=$1 AND active=$2;", member.id, True)
         if data:
             role = get(member.guild.roles, name=warns[data[0]["typ"]])
             if role not in member.roles:

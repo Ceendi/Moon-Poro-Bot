@@ -87,7 +87,7 @@ class Rangowe(discord.ui.View):
 
     @discord.ui.select(
         max_values=1,
-        placeholder="Wybierz swoją rangę...",
+        placeholder="Wybierz swoją rangę na solo/duo...",
         custom_id="ranks",
         row=0,
         options=[
