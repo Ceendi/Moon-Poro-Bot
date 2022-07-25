@@ -5,13 +5,18 @@ import config
 
 
 class Przyjmij(discord.ui.View):
-    def __init__(self):
+    def __init__(self, author):
         super().__init__(timeout=43200)
+        self.author: discord.Member = author
 
     @discord.ui.button(label="Przyjmij", style=discord.ButtonStyle.green)
     async def przyjmij(self, interaction: discord.Interaction, button: discord.ui.Button):
         new_content = interaction.message.content + f"\n{interaction.user.mention} przyjął to zgłoszenie!"
         await interaction.message.edit(content=new_content, view=None)
+        try:
+            await self.author.send(f"Twoje zgłoszenie zostało przyjęte przez moda. Odpowiednie działania zostały podjęte.")
+        except discord.errors.Forbidden:
+            pass
         await interaction.response.send_message("Przyjąłeś zgłoszenie!", ephemeral=True)
 
 
@@ -24,7 +29,7 @@ class Ticket(commands.Cog):
     @app_commands.describe(powod = "Jaką rzecz chcesz zgłosić moderacji?")
     async def ticket(self, interaction: discord.Interaction, powod: str):
         channel = interaction.guild.get_channel(config.ticket_channel_id)
-        await channel.send(f"@here\n{interaction.user.mention}: {powod}", view=Przyjmij())
+        await channel.send(f"@here\n{interaction.user.mention}: {powod}", view=Przyjmij(interaction.user))
         await interaction.response.send_message("Pomyślnie wysłano zgłoszenie!", ephemeral=True)
 
 async def setup(bot: commands.Bot):

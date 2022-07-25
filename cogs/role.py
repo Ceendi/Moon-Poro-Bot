@@ -113,6 +113,8 @@ class Role(commands.Cog):
                     embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
                     for autor in data_not_active["autorzy"]:
                         embed.add_field(name="Mod", value="<@"+str(autor)+">")
+                    if data_not_active["opis"]:
+                        embed.add_field(name="Opis", value=data_not_active["opis"], inline=False)
                     await message.edit(embed=embed)
                     await con.execute("DELETE FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, True)
                     await con.execute("UPDATE warn SET active=$1 WHERE id=$2;", True, uzytkownik.id)
@@ -131,7 +133,6 @@ class Role(commands.Cog):
             else:
                 await interaction.response.send_message("Użytkownik nie ma warna.", ephemeral=True)
 
-
     @cofnij_warna.error
     async def cofnij_warnaError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
@@ -139,6 +140,65 @@ class Role(commands.Cog):
         else:
             raise error
 
+    @app_commands.checks.has_any_role("Administracja", "Moderacja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="pokaz_zbugowanych", description="Pokazuje osoby ze zbugowanymi rolami.")
+    async def pokaz_zbugowanych(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+        npkwl = get(interaction.guild.roles, name="Nie posiadam konta w lolu")
+        members_bugged = []
+        for member in interaction.guild.members:
+            if functions.has_rank_roles(member) and functions.has_server_roles(member) and uzytkownik not in member.roles:
+                members_bugged.append(member.mention)
+            elif npkwl in member.roles and (functions.has_rank_roles(member) or functions.has_server_roles(member) or functions.has_other_roles(member)):
+                members_bugged.append(member.mention)
+            elif npkwl in member.roles and uzytkownik not in member.roles:
+                members_bugged.append(member.mention)
+            elif uzytkownik in member.roles and (not functions.has_rank_roles(member) or not functions.has_server_roles(member)) and npkwl not in member.roles:
+                members_bugged.append(member.mention)
+            if len(members_bugged) > 30:
+                message = ', '.join(members_bugged)
+                await interaction.followup.send(message)
+                members_bugged = []
+        if members_bugged:
+            message = ', '.join(members_bugged)
+            await interaction.followup.send(message)
+        await interaction.followup.send("Skończono sprawdzanie roli.")
+            
+
+    @pokaz_zbugowanych.error
+    async def pokaz_zbugowanychError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingAnyRole):
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
+        else:
+            raise error
+
+    @app_commands.checks.has_any_role("Administracja", "Moderacja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="usun_zbugowane", description="Naprawia role osób ze zbugowanymi rolami.")
+    async def napraw_zbugowane(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+        npkwl = get(interaction.guild.roles, name="Nie posiadam konta w lolu")
+        for member in interaction.guild.members:
+            if functions.has_rank_roles(member) and functions.has_server_roles(member) and uzytkownik not in member.roles:
+                await member.add_roles(uzytkownik)
+            elif npkwl in member.roles and (functions.has_rank_roles(member) or functions.has_server_roles(member) or functions.has_other_roles(member)):
+                await member.remove_roles(npkwl)
+            elif npkwl in member.roles and uzytkownik not in member.roles:
+                await member.add_roles(uzytkownik)
+            elif uzytkownik in member.roles and (not functions.has_rank_roles(member) or not functions.has_server_roles(member)) and npkwl not in member.roles:
+                await member.remove_roles(uzytkownik)
+        await interaction.followup.send("Skończono naprawianie roli.")
+            
+
+    @napraw_zbugowane.error
+    async def napraw_zbugowaneError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingAnyRole):
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
+        else:
+            raise error
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Role(bot), guild = discord.Object(id = config.guild_id))

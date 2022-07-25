@@ -23,6 +23,7 @@ class Zweryfikuj(discord.ui.View):
     
     @discord.ui.button(label="\u200b", style=discord.ButtonStyle.green)
     async def zweryfikuj(self, interaction: discord.Interaction, button: discord.ui.Button):
+        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if "Zweryfikowany" in str(interaction.user.roles):
             await interaction.response.send_message("Już jesteś zweryfikowany!", ephemeral=True)
             return
@@ -62,8 +63,9 @@ class Zweryfikuj(discord.ui.View):
             message = await channel.send(embed=embed)
             await self.bot.pool.execute("INSERT INTO zweryfikowani VALUES($1, $2, $3, $4);", interaction.user.id, message.id, summoner['id'], self.server)
             zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
-            await interaction.user.add_roles(discord_new_rank)
-            await interaction.user.add_roles(zweryfikowany)
+            server_role = get(interaction.guild.roles, name=server_translation[self.server])
+            uzytkownik_role = get(interaction.guild.roles, name="Użytkownik")
+            await interaction.user.add_roles(*[discord_new_rank, server_role, uzytkownik_role, zweryfikowany])
             await interaction.response.send_message("Udało Ci się przejść weryfikację!", ephemeral=True)
         else:
             await interaction.response.send_message("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)

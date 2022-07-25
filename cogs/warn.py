@@ -38,6 +38,8 @@ class Warn(commands.Cog):
                 embed.add_field(name="Użytkownik", value="<@"+str(data["id"])+">", inline=False)
                 for autor in data["autorzy"]:
                     embed.add_field(name="Mod", value="<@"+str(autor)+">", inline=True)
+                if data["opis"]:
+                    embed.add_field(name="Opis", value=data["opis"])
                 await message.edit(embed=embed)
                 if uzytkownik:
                     await uzytkownik.remove_roles(role)
@@ -54,7 +56,8 @@ class Warn(commands.Cog):
         uzytkownik = "Osoba, której dajesz warna",
         typ = "Typ warna",
         powod = "Powód warna",
-        dodatkowy_powod = "Opcjonalny powód warna"
+        dodatkowy_powod = "Opcjonalny powód warna",
+        opis = 'Opcjonalny opis warna'
     )
     @app_commands.choices(
         typ = [
@@ -63,7 +66,7 @@ class Warn(commands.Cog):
             Choice(name = "TIMEOUT", value = 3),
         ]
     )
-    async def warn(self, interaction: discord.Interaction, typ: int, uzytkownik: discord.Member, powod: app_commands.Range[int, 1, 13], dodatkowy_powod: Optional[app_commands.Range[int, 1, 13]]):
+    async def warn(self, interaction: discord.Interaction, typ: int, uzytkownik: discord.Member, powod: app_commands.Range[int, 1, 13], dodatkowy_powod: Optional[app_commands.Range[int, 1, 13]], opis: Optional[str]):
         if "TIMEOUT" in str(uzytkownik.roles):
             await interaction.response.send_message("Ten użytkownik ma już rolę **TIMEOUT**.", ephemeral=True)
             return
@@ -89,6 +92,10 @@ class Warn(commands.Cog):
             new_powod = powod
             powod = data["powod"] + '/' + powod
             autorzy = data["autorzy"]
+            if data["opis"] and opis:
+                opis = data["opis"] + "\n" + opis
+            elif data["opis"]:
+                opis = data["opis"]
             embed = discord.Embed(title=str(warn_role), description=powod + " punkt regulaminu", colour=discord.Colour.red())
             embed.add_field(name="Data otrzymania", value="<t:"+str(start_date.timestamp())[:-2]+":F>")
             embed.add_field(name="Data zakończenia", value="<t:"+str(end_date.timestamp())[:-2]+":F>")
@@ -97,12 +104,14 @@ class Warn(commands.Cog):
                 autorzy.append(interaction.user.id)
             for autor in autorzy:
                 embed.add_field(name="Mod", value="<@"+str(autor)+">")
+            if opis:
+                embed.add_field(name="Opis", value=opis, inline=False)
             message = warn_channel.get_partial_message(data["message_id"])
             await message.edit(embed=embed)
             async with self.bot.pool.acquire() as con:
                 await con.execute("DELETE FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, False)
                 await con.execute('UPDATE warn SET active=$1 WHERE id=$2;', False, uzytkownik.id)
-                await con.execute("INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8);", uzytkownik.id, typ, powod, start_date, end_date, message.id, autorzy, True)
+                await con.execute("INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9);", uzytkownik.id, typ, powod, start_date, end_date, message.id, autorzy, True, opis)
             await uzytkownik.remove_roles(old_warn_role)
             await uzytkownik.add_roles(warn_role)
             await interaction.response.send_message(uzytkownik.mention + " otrzymał **" + str(warn_role) + "** za " + str(new_powod) + " punkt regulaminu.")
@@ -116,8 +125,10 @@ class Warn(commands.Cog):
             embed.add_field(name="Data zakończenia", value="<t:"+str(end_date.timestamp())[:-2]+":F>")
             embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
             embed.add_field(name="Modzi", value=interaction.user.mention, inline=True)
+            if opis:
+                embed.add_field(name="Opis", value=opis, inline=False)
             message = await warn_channel.send(embed=embed)
-            await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id], True)
+            await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id], True, opis)
             await uzytkownik.add_roles(warn_role)
             await interaction.response.send_message(uzytkownik.mention + " otrzymał **" + str(warn_role) + "** za " + str(powod) + " punkt regulaminu.")
 

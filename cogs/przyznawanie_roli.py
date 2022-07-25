@@ -273,8 +273,13 @@ class Przyznawanie_Roli(commands.Cog):
         await interaction.channel.send(content="Region:", view=Serwerowe())
         await interaction.channel.send(content="»»————-\n**Role opcjonalne**", view=Opcjonalne())
         await interaction.channel.send(content='»»————-', view=Not_lol())
-        await interaction.channel.send(content='»»————-\n**Weryfikacja konta w lolu**\nPrzypisuje twoje konto do discorda i automatyczne aktualizuje role wraz ze zmianą dywizji! Nikt nie widzi twojego nicku (w tym moderacja).__Moderacja zastrzega sobie prawo do wymagania weryfikacji od danego użytkownika.__', view=WerPrzycisk(self.bot))
         await interaction.channel.send(content="»»————-")
+
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="weryfikacja", description="Wysyła przycisk do weryfikacji.")
+    async def weryfikacja(self, interaction: discord.Interaction):
+        await interaction.response.send_message(view=WerPrzycisk(self.bot))
 
     @przyznawanie_roli.error
     async def przyznawanie_roliError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
