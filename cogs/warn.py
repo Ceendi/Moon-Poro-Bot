@@ -97,6 +97,8 @@ class Warn(commands.Cog):
             elif data["opis"]:
                 opis = data["opis"]
             embed = discord.Embed(title=str(warn_role), description=powod + " punkt regulaminu", colour=discord.Colour.red())
+            if opis:
+                embed.add_field(name="Opis", value=opis, inline=False)            
             embed.add_field(name="Data otrzymania", value="<t:"+str(start_date.timestamp())[:-2]+":F>")
             embed.add_field(name="Data zakończenia", value="<t:"+str(end_date.timestamp())[:-2]+":F>")
             embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
@@ -104,8 +106,6 @@ class Warn(commands.Cog):
                 autorzy.append(interaction.user.id)
             for autor in autorzy:
                 embed.add_field(name="Mod", value="<@"+str(autor)+">")
-            if opis:
-                embed.add_field(name="Opis", value=opis, inline=False)
             message = warn_channel.get_partial_message(data["message_id"])
             await message.edit(embed=embed)
             async with self.bot.pool.acquire() as con:
@@ -121,12 +121,12 @@ class Warn(commands.Cog):
             now = datetime.datetime.utcnow().replace(microsecond=0)
             end_date = now + datetime.timedelta(days=warn_days[str(warn_role)])
             embed = discord.Embed(title=str(warn_role), description=powod + " punkt regulaminu", colour=discord.Colour.red())
+            if opis:
+                embed.add_field(name="Opis", value=opis, inline=False)            
             embed.add_field(name="Data otrzymania", value="<t:"+str(now.timestamp())[:-2]+":F>")
             embed.add_field(name="Data zakończenia", value="<t:"+str(end_date.timestamp())[:-2]+":F>")
             embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
             embed.add_field(name="Modzi", value=interaction.user.mention, inline=True)
-            if opis:
-                embed.add_field(name="Opis", value=opis, inline=False)
             message = await warn_channel.send(embed=embed)
             await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id], True, opis)
             await uzytkownik.add_roles(warn_role)
