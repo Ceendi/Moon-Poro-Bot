@@ -288,5 +288,12 @@ class Przyznawanie_Roli(commands.Cog):
         else:
             raise error
 
+    @weryfikacja.error
+    async def weryfikacjaError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingAnyRole):
+            await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
+        else:
+            raise error
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(Przyznawanie_Roli(bot), guild = discord.Object(id = config.guild_id))
