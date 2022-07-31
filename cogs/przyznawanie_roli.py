@@ -213,13 +213,20 @@ class Not_lol(discord.ui.View):
 
     @discord.ui.button(label="Usuń wszystkie role", style=discord.ButtonStyle.gray, custom_id="usun_w_role", row=1)
     async def usun_w_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        all_roles = config.lol_other + config.lol_ranks + config.lol_servers + ["TFT", "LOR", "Valorant", "Dyskusje", "Użytkownik", "Nie posiadam konta w lolu"]
+        all_roles = config.lol_other + config.lol_ranks + config.lol_servers + ["TFT", "LOR", "Valorant", "Dyskusje", "Użytkownik", "Nie posiadam konta w lolu", "Lol Newsy", "Ogłoszenia", "Wild Rift"]
         remove_roles = []
-        for role in interaction.user.roles:
-            if str(role) in all_roles:
-                remove_roles.append(role)
-        await interaction.user.remove_roles(*remove_roles)
-        await interaction.response.send_message("Usunąłeś wszystkie role z przyznawania ról!", ephemeral=True)
+        if "Zweryfikowany" in str(interaction.user.roles):
+            for role in interaction.user.roles:
+                if str(role) in config.lol_other or str(role) in ["TFT", "LOR", "Valorant", "Dyskusje", "Lol Newsy", "Ogłoszenia", "Wild Rift"]:
+                    remove_roles.append(role)
+            await interaction.user.remove_roles(*remove_roles)
+            await interaction.response.send_message("Jesteś zweryfikowany. Bot usunął wszystkie role poza dywizją i regionem.", ephemeral=True)
+        else:
+            for role in interaction.user.roles:
+                if str(role) in all_roles:
+                    remove_roles.append(role)
+            await interaction.user.remove_roles(*remove_roles)
+            await interaction.response.send_message("Usunąłeś wszystkie role z przyznawania ról!", ephemeral=True)
 
     @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl", row=0)
     async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):

@@ -51,7 +51,7 @@ class Zweryfikuj(discord.ui.View):
     
     @discord.ui.button(label="\u200b", style=discord.ButtonStyle.green)
     async def zweryfikuj(self, interaction: discord.Interaction, button: discord.ui.Button):
-        server_translation = {'eun1': 'EUNE', 'euw1': 'EUW', 'na1': 'NA'}
+        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if "Zweryfikowany" in str(interaction.user.roles):
             await interaction.response.send_message("Już jesteś zweryfikowany!", ephemeral=True)
             return
@@ -102,9 +102,9 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         max_values=1,
         placeholder='Wybierz region konta...',
         options = [
-            discord.SelectOption(label='EUNE', value="eun1"),
-            discord.SelectOption(label='EUW', value="euw1"),
-            discord.SelectOption(label='NA', value='na1')
+            discord.SelectOption(label='EUNE', value="EUN1"),
+            discord.SelectOption(label='EUW', value="EUW1"),
+            discord.SelectOption(label='NA', value='NA1')
         ]
     )
 
@@ -140,7 +140,7 @@ class WeryfikacjaCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", member.id)
-        server_translation = {'eun1': 'EUNE', 'euw1': 'EUW', 'na1': 'NA'}
+        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if data:
             lol_rank = 'UNRANKED'
             leagues = await lol.SummonerLeague(summoner_id=data[0]["lol_id"], platform=data[0]["server"]).get()
