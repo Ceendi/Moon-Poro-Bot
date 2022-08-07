@@ -51,14 +51,15 @@ class Zweryfikuj(discord.ui.View):
     
     @discord.ui.button(label="\u200b", style=discord.ButtonStyle.green)
     async def zweryfikuj(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if "Zweryfikowany" in str(interaction.user.roles):
-            await interaction.response.send_message("Już jesteś zweryfikowany!", ephemeral=True)
+            await interaction.followup.send("Już jesteś zweryfikowany!", ephemeral=True)
             return
         try:
             summoner = await lol.Summoner(platform=self.server, name=self.nick).get()
         except NotFound:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.nick}**!", ephemeral=True)
+            await interaction.followup.send(f"Nie znaleziono osoby o nicku **{self.nick}**!", ephemeral=True)
             return
         if summoner.profile_icon_id == self.icon_id:
             if has_rank_roles(interaction.user):
@@ -87,9 +88,9 @@ class Zweryfikuj(discord.ui.View):
             server_role = get(interaction.guild.roles, name=server_translation[self.server])
             uzytkownik_role = get(interaction.guild.roles, name="Użytkownik")
             await interaction.user.add_roles(*[discord_new_rank, server_role, uzytkownik_role, zweryfikowany])
-            await interaction.response.send_message("Udało Ci się przejść weryfikację!", ephemeral=True)
+            await interaction.followup.send("Udało Ci się przejść weryfikację!", ephemeral=True)
         else:
-            await interaction.response.send_message("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
+            await interaction.followup.send("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
 
 
 class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):

@@ -213,6 +213,7 @@ class Not_lol(discord.ui.View):
 
     @discord.ui.button(label="Usuń wszystkie role", style=discord.ButtonStyle.gray, custom_id="usun_w_role", row=1)
     async def usun_w_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         all_roles = config.lol_other + config.lol_ranks + config.lol_servers + ["TFT", "LOR", "Valorant", "Dyskusje", "Użytkownik", "Nie posiadam konta w lolu", "Lol Newsy", "Ogłoszenia", "Wild Rift"]
         remove_roles = []
         if "Zweryfikowany" in str(interaction.user.roles):
@@ -220,13 +221,13 @@ class Not_lol(discord.ui.View):
                 if str(role) in config.lol_other or str(role) in ["TFT", "LOR", "Valorant", "Dyskusje", "Lol Newsy", "Ogłoszenia", "Wild Rift"]:
                     remove_roles.append(role)
             await interaction.user.remove_roles(*remove_roles)
-            await interaction.response.send_message("Jesteś zweryfikowany. Bot usunął wszystkie role poza dywizją i regionem.", ephemeral=True)
+            await interaction.followup.send("Jesteś zweryfikowany. Bot usunął wszystkie role poza dywizją i regionem.", ephemeral=True)
         else:
             for role in interaction.user.roles:
                 if str(role) in all_roles:
                     remove_roles.append(role)
             await interaction.user.remove_roles(*remove_roles)
-            await interaction.response.send_message("Usunąłeś wszystkie role z przyznawania ról!", ephemeral=True)
+            await interaction.followup.send("Usunąłeś wszystkie role z przyznawania ról!", ephemeral=True)
 
     @discord.ui.button(label="Nie posiadam konta w lolu", style=discord.ButtonStyle.gray, custom_id="npkwl", row=0)
     async def npkwl(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -288,6 +289,14 @@ class Przyznawanie_Roli(commands.Cog):
     async def weryfikacja(self, interaction: discord.Interaction):
         await interaction.response.send_message(view=WerPrzycisk(self.bot))
 
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="start", description="Wysyła przyciski start.")
+    async def start(self, interaction: discord.Interaction):
+        await interaction.response.send_message(content='**Role Obowiązkowe**\nDywizja:', view=Rangowe())
+        await interaction.channel.send(content="Region:", view=Serwerowe())
+        await interaction.channel.send(content='»»————-')
+
     @przyznawanie_roli.error
     async def przyznawanie_roliError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
@@ -297,6 +306,13 @@ class Przyznawanie_Roli(commands.Cog):
 
     @weryfikacja.error
     async def weryfikacjaError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingAnyRole):
+            await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
+        else:
+            raise error
+
+    @start.error
+    async def startError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingAnyRole):
             await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
