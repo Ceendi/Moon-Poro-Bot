@@ -29,7 +29,7 @@ class ZgloszenieModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(config.ticket_channel_id)
-        await channel.send(content=f"@here\n{interaction.user.mention}: **{self.title}**\n{self.powod}", view=Przyjmij(interaction.user))
+        await channel.send(content=f"@here\n**{self.title}**\n{interaction.user.mention}: {self.powod}", view=Przyjmij(interaction.user))
         await interaction.response.send_message("Pomyślnie wysłano zgłoszenie.", ephemeral=True)
 
 
