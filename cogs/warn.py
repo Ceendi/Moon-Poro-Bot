@@ -33,13 +33,13 @@ class Warn(commands.Cog):
                 uzytkownik = guild.get_member(data["id"])
                 message = channel.get_partial_message(data["message_id"])
                 embed = discord.Embed(title=str(role), description=data["powod"] + " punkt regulaminu", colour=discord.Colour.dark_gray())
+                if data["opis"]:
+                    embed.add_field(name="Opis", value=data["opis"])
                 embed.add_field(name="Data otrzymania", value="<t:"+str(data["start"].timestamp())[:-2]+":F>")
                 embed.add_field(name="Data zakończenia", value="<t:"+str(data["koniec"].timestamp())[:-2]+":F>")
                 embed.add_field(name="Użytkownik", value="<@"+str(data["id"])+">", inline=False)
                 for autor in data["autorzy"]:
                     embed.add_field(name="Mod", value="<@"+str(autor)+">", inline=True)
-                if data["opis"]:
-                    embed.add_field(name="Opis", value=data["opis"])
                 await message.edit(embed=embed)
                 if uzytkownik:
                     await uzytkownik.remove_roles(role)
