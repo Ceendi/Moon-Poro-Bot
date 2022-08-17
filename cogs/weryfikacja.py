@@ -99,13 +99,13 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         self.bot = bot
 
     nick = discord.ui.TextInput(label='Nick', required=True, placeholder='Twój nick..')
-    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta..')
+    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..')
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return str(self.server).lower() in ['eune', 'euw', 'na']
 
     async def on_submit(self, interaction: discord.Interaction):
         servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
-        if str(self.server).lower() not in ['eune', 'euw', 'na']:
-            await interaction.response.send_message("Zły serwer, upewnij się, że wybrałeś serwer z listy EUNE, EUW lub NA!", ephemeral=True)
-            return
         self.server = servers[str(self.server).lower()]
         try:
             summoner = await lol.Summoner(platform=self.server, name=self.nick).get()
