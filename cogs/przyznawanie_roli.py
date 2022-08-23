@@ -296,7 +296,7 @@ class Przyznawanie_Roli(commands.Cog):
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="weryfikacja", description="Wysyła przycisk do weryfikacji.")
     async def weryfikacja(self, interaction: discord.Interaction):
-        await interaction.response.send_message(view=WerPrzycisk(self.bot))
+        await interaction.response.send_message(content="»»————-\n**Weryfikacja konta w lolu**\nPrzypisuje twoje konto do discorda i automatyczne aktualizuje role wraz ze zmianą dywizji! Nikt nie widzi twojego nicku (w tym moderacja).\nWymagana by brać udział we wszelkich konkursach/giveaway'ach/turniejach oraz w rekrutacji.\n__Moderacja zastrzega sobie prawo do wymagania weryfikacji od danego użytkownika.__\n»»————-", view=WerPrzycisk(self.bot))
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
