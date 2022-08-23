@@ -94,7 +94,7 @@ class Rangowe(discord.ui.View):
 
     @discord.ui.select(
         max_values=1,
-        placeholder="Wybierz swoją rangę na solo/duo...",
+        placeholder="Aktualna dywizja solo/duo (najwyższa)",
         custom_id="ranks",
         row=0,
         options=[
