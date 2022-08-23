@@ -255,7 +255,7 @@ class WerPrzycisk(discord.ui.View):
         self.cd = commands.CooldownMapping.from_cooldown(1.0, 420.0, key)
         self.bot = bot
 
-    @discord.ui.button(label="Weryfikacja", style=discord.ButtonStyle.blurple, custom_id="weryfikacja")
+    @discord.ui.button(label="Weryfikacja", style=discord.ButtonStyle.red, custom_id="weryfikacja")
     async def weryfikacja(self, interaction: discord.Interaction, button: discord.ui.Button):
         retry_after = self.cd.update_rate_limit(interaction)
         if retry_after:
