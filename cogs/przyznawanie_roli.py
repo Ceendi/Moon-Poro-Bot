@@ -30,10 +30,17 @@ async def give_other_roles(interaction: discord.Interaction, button: discord.ui.
             await interaction.user.add_roles(uzytkownik)
 
 
-async def give_league_roles(interaction: discord.Interaction, button: discord.ui.Button):
+async def give_league_roles(interaction: discord.Interaction, button: discord.ui.Button, bot):
     if "Nie posiadam konta w lolu" in str(interaction.user.roles):
         await interaction.response.send_message(f"Nie możesz dostać roli ligowej posiadając rolę **Nie posiadam konta w lolu**.", ephemeral=True)
         return
+    if "Zweryfikowany" in str(interaction.user.roles) and button.label in ["EUNE", "EUW", "NA"]:
+        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
+        server = await bot.pool.fetch('SELECT server FROM zweryfikowani WHERE id=$1;', interaction.user.id)
+        server = server_translation[server[0][0]]
+        if server == button.label:
+            await interaction.response.send_message("Masz zweryfikowane konto na tym regionie, nie możesz usunąć tej roli.", ephemeral=True)
+            return
     role = get(interaction.guild.roles, name=button.label)
     if role in interaction.user.roles:
         await interaction.user.remove_roles(role)
@@ -140,44 +147,46 @@ class Rangowe(discord.ui.View):
             await interaction.response.send_message("Posiadasz rolę **Zweryfikowany**, która automatycznie aktualizuje Ci rolę co 24h! Jeśli chcesz zmienić konto to użyj komendy /usun_weryfikacje.", ephemeral=True)
 
 class Serwerowe(discord.ui.View):
-    def __init__(self):
+    def __init__(self, bot):
         super().__init__(timeout=None)
+        self.bot = bot
 
     @discord.ui.button(label="EUNE", style=discord.ButtonStyle.red, custom_id="eune", row=0)
     async def eune(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="EUW", style=discord.ButtonStyle.red, custom_id="euw", row=0)
     async def euw(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="NA", style=discord.ButtonStyle.red, custom_id="na", row=0)
     async def na(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
 class Opcjonalne(discord.ui.View):
-    def __init__(self):
+    def __init__(self, bot):
         super().__init__(timeout=None)
+        self.bot = bot
 
     @discord.ui.button(label="Top", style=discord.ButtonStyle.green, custom_id="top", row=0)
     async def top(self, interaction: discord.Interaction, button: discord.ui.Button):
-       await give_league_roles(interaction, button)
+       await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="Jungle", style=discord.ButtonStyle.green, custom_id="jungle", row=0)
     async def jungle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="Mid", style=discord.ButtonStyle.green, custom_id="mid", row=0)
     async def mid(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="ADC", style=discord.ButtonStyle.green, custom_id="adc", row=0)
     async def adc(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="Support", style=discord.ButtonStyle.green, custom_id="support", row=0)
     async def support(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="TFT", style=discord.ButtonStyle.gray, custom_id="tft", row=1)
     async def tft(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -197,7 +206,7 @@ class Opcjonalne(discord.ui.View):
 
     @discord.ui.button(label="Szukam gry", style=discord.ButtonStyle.blurple, custom_id="szukam_gry", row=2)
     async def szukam_gry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button)
+        await give_league_roles(interaction, button, self.bot)
 
     @discord.ui.button(label="Ogłoszenia", style=discord.ButtonStyle.gray, custom_id="ogloszenia", row=3)
     async def ogloszenia(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -267,9 +276,9 @@ class WerPrzycisk(discord.ui.View):
 class Przyznawanie_Roli(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        bot.add_view(Opcjonalne())
+        bot.add_view(Opcjonalne(self.bot))
         bot.add_view(Rangowe())
-        bot.add_view(Serwerowe())
+        bot.add_view(Serwerowe(self.bot))
         bot.add_view(Not_lol())
         bot.add_view(WerPrzycisk(self.bot))
 
@@ -278,8 +287,8 @@ class Przyznawanie_Roli(commands.Cog):
     @app_commands.command(name="przyznawanie_roli", description="Wysyła przyciski do przyznawania roli.")
     async def przyznawanie_roli(self, interaction: discord.Interaction):
         await interaction.response.send_message(content='**Role Obowiązkowe**\nDywizja:', view=Rangowe())
-        await interaction.channel.send(content="Region:", view=Serwerowe())
-        await interaction.channel.send(content="»»————-\n**Role opcjonalne**", view=Opcjonalne())
+        await interaction.channel.send(content="Region:", view=Serwerowe(self.bot))
+        await interaction.channel.send(content="»»————-\n**Role opcjonalne**", view=Opcjonalne(self.bot))
         await interaction.channel.send(content='»»————-', view=Not_lol())
         await interaction.channel.send(content="»»————-")
 
@@ -294,7 +303,7 @@ class Przyznawanie_Roli(commands.Cog):
     @app_commands.command(name="start", description="Wysyła przyciski start.")
     async def start(self, interaction: discord.Interaction):
         await interaction.response.send_message(content='**Role Obowiązkowe**\nDywizja:', view=Rangowe())
-        await interaction.channel.send(content="Region:", view=Serwerowe())
+        await interaction.channel.send(content="Region:", view=Serwerowe(self.bot))
         await interaction.channel.send(content='»»————-')
 
     @przyznawanie_roli.error
