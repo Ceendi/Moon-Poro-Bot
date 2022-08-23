@@ -70,10 +70,10 @@ class Ticket(commands.Cog):
         ranga.add_item(Zgloszenie('Ranga'))
         inne = discord.ui.View(timeout=None)
         inne.add_item(Zgloszenie('Inne'))
-        await interaction.response.send_message(content="**Toksyczne zachowanie**\nZgłoszenie odnośnie nieodpowiedniego zachowania na kanale głosowym, bądź tekstowym. Podaj odnośnie jakiego tyczy się użytkownika oraz na jakim kanale ma miejsce. Czym więcej informacji tym lepiej.", view=toxic)
-        await interaction.channel.send(content="\n**Odwołanie do kary i skargi na modów**\nZgłoszenie odnośnie nieodpowiedniego potraktowania przez moderatora. Napisz co miało miejsce oraz czemu czujesz się niesprawiedliwie potraktowany. Administrator skontaktuje się z tobą oraz wyjaśni sytuację.", view=odwolania)
-        await interaction.channel.send(content="\n**Nieprawdziwa ranga**\nZgłoszenie odnośnie użytkownika z nieprawidłowo ustawionymi rolami. Jeśli ktoś ma nieprawdziwą dywizję na serwerze to podaj jego nick na discordzie wraz z tagiem, bądź ID, resztą zajmie się moderacja.", view=ranga)
-        await interaction.channel.send(content="\n**Inne**\nWszelkie inne zgłoszenie, które nie podpadają pod powyższe kategorie.", view=inne)
+        await interaction.response.send_message(content="**Toksyczne zachowanie**\nZgłoszenie odnośnie nieodpowiedniego zachowania na kanale głosowym, bądź tekstowym. Podaj odnośnie __jakiego tyczy się użytkownika__ oraz __na jakim kanale ma miejsce.__ Czym więcej informacji tym lepiej.", view=toxic)
+        await interaction.channel.send(content="\n**Odwołanie do kary i skargi na moderację**\nZgłoszenie odnośnie nieodpowiedniego potraktowania przez moderatora. Napisz co miało miejsce oraz czemu czujesz się niesprawiedliwie potraktowany. Administrator skontaktuje się z tobą oraz wyjaśni sytuację.", view=odwolania)
+        await interaction.channel.send(content="\n**Nieprawdziwa ranga**\nZgłoszenie odnośnie użytkownika z nieprawidłowo ustawionymi rolami. Jeśli ktoś ma nieprawdziwą dywizję na serwerze to __podaj jego nick na discordzie wraz z tagiem, bądź ID__, resztą zajmie się moderacja.", view=ranga)
+        await interaction.channel.send(content="\n**Inne**\nWszelkie inne zgłoszenie, które nie podpadają pod powyższe kategorie. ", view=inne)
         
 
     @skargi.error

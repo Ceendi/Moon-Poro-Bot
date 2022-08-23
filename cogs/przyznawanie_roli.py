@@ -188,31 +188,27 @@ class Opcjonalne(discord.ui.View):
     async def support(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_league_roles(interaction, button, self.bot)
 
-    @discord.ui.button(label="TFT", style=discord.ButtonStyle.gray, custom_id="tft", row=1)
+    @discord.ui.button(label="TFT", style=discord.ButtonStyle.blurple, custom_id="tft", row=1)
     async def tft(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
-    @discord.ui.button(label="LOR", style=discord.ButtonStyle.gray, custom_id="lor", row=1)
+    @discord.ui.button(label="LOR", style=discord.ButtonStyle.blurple, custom_id="lor", row=1)
     async def lor(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
-    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.gray, custom_id="valorant", row=1)
+    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.blurple, custom_id="valorant", row=1)
     async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
-    @discord.ui.button(label="Wild Rift", style=discord.ButtonStyle.gray, custom_id="wild_rift", row=1)
+    @discord.ui.button(label="Wild Rift", style=discord.ButtonStyle.blurple, custom_id="wild_rift", row=1)
     async def wild_rift(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
-    @discord.ui.button(label="Szukam gry", style=discord.ButtonStyle.blurple, custom_id="szukam_gry", row=2)
-    async def szukam_gry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await give_league_roles(interaction, button, self.bot)
-
-    @discord.ui.button(label="Ogłoszenia", style=discord.ButtonStyle.gray, custom_id="ogloszenia", row=3)
+    @discord.ui.button(label="Ogłoszenia", style=discord.ButtonStyle.gray, custom_id="ogloszenia", row=2)
     async def ogloszenia(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
-    @discord.ui.button(label="Lol Newsy", style=discord.ButtonStyle.gray, custom_id="lolkowe_newsy", row=3)
+    @discord.ui.button(label="Lol Newsy", style=discord.ButtonStyle.gray, custom_id="lolkowe_newsy", row=2)
     async def lolkowe_newsy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await give_other_roles(interaction, button)
 
