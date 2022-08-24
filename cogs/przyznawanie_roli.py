@@ -300,6 +300,7 @@ class Przyznawanie_Roli(commands.Cog):
     async def start(self, interaction: discord.Interaction):
         await interaction.response.send_message(content='**Role Obowiązkowe**\nDywizja:', view=Rangowe())
         await interaction.channel.send(content="Region:", view=Serwerowe(self.bot))
+        await interaction.channel.send(content='»»————-', view=Not_lol())
         await interaction.channel.send(content='»»————-')
 
     @przyznawanie_roli.error
