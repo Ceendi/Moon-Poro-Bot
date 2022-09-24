@@ -30,13 +30,13 @@ class Sponsors(commands.Cog):
         await interaction.response.send_message("Zabrano dostęp tym osobom!", ephemeral=True)
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="vunban", description="Cofa usunięty dostęp do wbijania na kanał drzez.")
+    @app_commands.command(name="vuban", description="Cofa usunięty dostęp do wbijania na kanał drzez.")
     @app_commands.describe(
         uzytkownik = "Osoba, której oddajesz dostęp."
     )
     async def vunban(self, interaction: discord.Interaction, uzytkownik: discord.Member):
         channel = interaction.guild.get_channel(1005927253605093427)
-        await channel.set_permissions(uzytkownik, connect=None)
+        await channel.set_permissions(uzytkownik, connect=True)
         await interaction.response.send_message("Oddano dostęp do kanału!", ephemeral=True)
 
 async def setup(bot: commands.Bot):
