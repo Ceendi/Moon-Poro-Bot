@@ -21,7 +21,7 @@ class Sponsors(commands.Cog):
     async def vban(self, interaction: discord.Interaction, uzytkownik1: discord.Member,
     uzytkownik2: Optional[discord.Member], uzytkownik3: Optional[discord.Member], uzytkownik4: Optional[discord.Member], uzytkownik5: Optional[discord.Member]):
         uzytkownicy = [uzytkownik1, uzytkownik2, uzytkownik3, uzytkownik4, uzytkownik5]
-        channel = interaction.guild.get_channel(722904382823334003)
+        channel = interaction.guild.get_channel(1005927253605093427)
         for uzytkownik in uzytkownicy:
             if uzytkownik:
                 if uzytkownik in channel.members:
