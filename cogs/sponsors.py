@@ -35,7 +35,7 @@ class Sponsors(commands.Cog):
         uzytkownik = "Osoba, której oddajesz dostęp."
     )
     async def vunban(self, interaction: discord.Interaction, uzytkownik: discord.Member):
-        channel = interaction.guild.get_channel(722904382823334003)
+        channel = interaction.guild.get_channel(1005927253605093427)
         await channel.set_permissions(uzytkownik, connect=None)
         await interaction.response.send_message("Oddano dostęp do kanału!", ephemeral=True)
 
