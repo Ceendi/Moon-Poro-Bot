@@ -1,9 +1,9 @@
-from sqlite3 import connect
 import discord
 from discord import app_commands
 from discord.ext import commands
 import config
 from typing import Optional
+from discord.utils import get
 
 class Sponsors(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -38,6 +38,20 @@ class Sponsors(commands.Cog):
         channel = interaction.guild.get_channel(1005927253605093427)
         await channel.set_permissions(uzytkownik, connect=True)
         await interaction.response.send_message("Oddano dostęp do kanału!", ephemeral=True)
+
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="open", description="Otwiera dostęp do kanału drzez.")
+    async def open(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(1005927253605093427)
+        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+        await channel.set_permissions(uzytkownik, connect=True)
+
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="close", description="Zamyka dostęp do kanału drzez.")
+    async def close(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(1005927253605093427)
+        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
+        await channel.set_permissions(uzytkownik, connect=False)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Sponsors(bot), guild = discord.Object(id = config.guild_id))
