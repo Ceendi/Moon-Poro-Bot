@@ -40,18 +40,20 @@ class Sponsors(commands.Cog):
         await interaction.response.send_message("Oddano dostęp do kanału!", ephemeral=True)
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="open", description="Otwiera dostęp do kanału drzez.")
+    @app_commands.command(name="vopen", description="Otwiera dostęp do kanału drzez.")
     async def open(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(1005927253605093427)
         uzytkownik = get(interaction.guild.roles, name="Użytkownik")
         await channel.set_permissions(uzytkownik, connect=True)
+        await interaction.response.send_message("Otwarto kanał!", ephemeral=True)
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="close", description="Zamyka dostęp do kanału drzez.")
+    @app_commands.command(name="vclose", description="Zamyka dostęp do kanału drzez.")
     async def close(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(1005927253605093427)
         uzytkownik = get(interaction.guild.roles, name="Użytkownik")
         await channel.set_permissions(uzytkownik, connect=False)
+        await interaction.response.send_message("Zamknięto kanał!", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Sponsors(bot), guild = discord.Object(id = config.guild_id))
