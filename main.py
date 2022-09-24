@@ -18,7 +18,7 @@ class Bot(commands.Bot):
             )
 
     async def setup_hook(self):
-        extensions = ['przyznawanie_roli', 'warn', 'role', 'ticket', 'weryfikacja']
+        extensions = ['przyznawanie_roli', 'warn', 'role', 'ticket', 'weryfikacja', 'sponsors']
         for ext in extensions:
             await self.load_extension(f"cogs.{ext}")
         await self.tree.sync(guild = discord.Object(id = config.guild_id))
