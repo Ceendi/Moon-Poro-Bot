@@ -5,29 +5,35 @@ import config
 from typing import Optional
 from discord.utils import get
 
+class Person(discord.ui.Button):
+    def __init__(self, uzytkownik):
+        self.uzytkownik: discord.Member = uzytkownik
+        super().__init__(label=str(self.uzytkownik), style=discord.ButtonStyle.red)
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(1005927253605093427)
+        if self.uzytkownik in channel.members:
+            await self.uzytkownik.move_to(channel=None)
+        await channel.set_permissions(self.uzytkownik, connect=False)
+        await interaction.response.send_message(f"Udało się kicknąć {self.uzytkownik}", ephemeral=True)
+
 class Sponsors(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="vban", description="Usuwa dostęp do wbijania na kanał drzez danej osobie.")
-    @app_commands.describe(
-        uzytkownik1 = "Osoba, której zabierasz dostęp.",
-        uzytkownik2 = "Osoba, której zabierasz dostęp.",
-        uzytkownik3 = "Osoba, której zabierasz dostęp.",
-        uzytkownik4 = "Osoba, której zabierasz dostęp.",
-        uzytkownik5 = "Osoba, której zabierasz dostęp."
-    )
-    async def vban(self, interaction: discord.Interaction, uzytkownik1: discord.Member,
-    uzytkownik2: Optional[discord.Member], uzytkownik3: Optional[discord.Member], uzytkownik4: Optional[discord.Member], uzytkownik5: Optional[discord.Member]):
-        uzytkownicy = [uzytkownik1, uzytkownik2, uzytkownik3, uzytkownik4, uzytkownik5]
+    async def vban(self, interaction: discord.Interaction):
+        uzytkownicy = discord.ui.View()
         channel = interaction.guild.get_channel(1005927253605093427)
-        for uzytkownik in uzytkownicy:
-            if uzytkownik:
-                if uzytkownik in channel.members:
-                    await uzytkownik.move_to(channel=None)
-                await channel.set_permissions(uzytkownik, connect=False)
-        await interaction.response.send_message("Zabrano dostęp tym osobom!", ephemeral=True)
+        if channel.members == []:
+            await interaction.response.send_message("Nie znaleziono osób na kanale.", ephemeral=True)
+            return
+        for uzytkownik in channel.members:
+            if uzytkownik.id == 917028904433238036:
+                continue
+            uzytkownicy.add_item(Person(uzytkownik))
+        await interaction.response.send_message(view=uzytkownicy, ephemeral=True)
 
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="vuban", description="Cofa usunięty dostęp do wbijania na kanał drzez.")
