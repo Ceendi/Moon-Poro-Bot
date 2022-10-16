@@ -31,6 +31,9 @@ class Sponsors(commands.Cog):
             return
         for uzytkownik in channel.members:
             if uzytkownik.id == 917028904433238036:
+                if len(channel.members) == 1:
+                    await interaction.response.send_message("Nie znaleziono osób na kanale.", ephemeral=True)
+                    return
                 continue
             uzytkownicy.add_item(Person(uzytkownik))
         await interaction.response.send_message(view=uzytkownicy, ephemeral=True)
