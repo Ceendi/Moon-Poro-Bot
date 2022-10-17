@@ -211,7 +211,7 @@ class Role(commands.Cog):
         await interaction.response.defer()
         members = []
         for member in interaction.guild.members:
-            if rola in member.roles:
+            if rola in member.roles and "Zweryfikowany" not in str(member.roles):
                 members.append(member.mention)
             if len(members) > 30:
                 message = ', '.join(members)
