@@ -4,6 +4,7 @@ from discord.ext import commands
 import config
 from typing import Optional
 from discord.utils import get
+import time
 
 class Person(discord.ui.Button):
     def __init__(self, uzytkownik):
@@ -63,6 +64,40 @@ class Sponsors(commands.Cog):
         uzytkownik = get(interaction.guild.roles, name="Użytkownik")
         await channel.set_permissions(uzytkownik, connect=False, view_channel=True)
         await interaction.response.send_message("Zamknięto kanał!", ephemeral=True)
+
+
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if before.channel:
+            if before.channel.id != 1042932145280262204:
+                return
+        if after.channel:
+            if after.channel.id != 1042932145280262204:
+                return
+        if not before.channel:
+            self.start = time.time()
+        elif not after.channel:
+            self.end = time.time()
+            czas_rozm = int(self.end - self.start)
+            data = await self.bot.pool.fetch("SELECT * FROM proxy_vc;")
+            time_100 = czas_rozm + data[0][1]
+            time_whole = czas_rozm + data[0][0]
+            if time_100 > 100*60*60:
+                godzin = int(time_whole/3600)
+                godzin = godzin - godzin % 100
+                await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100-100*60*60)
+                channel = member.guild.get_channel(551881719754784818)
+                await channel.send(f"Proxy i Talone siedzieli na VC **{godzin}** godzin!")
+            else:
+                channel = member.guild.get_channel(628241111756046336)
+                if czas_rozm < 60:
+                    await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
+                elif czas_rozm < 60*60:
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
+                else:
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
+                await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Sponsors(bot), guild = discord.Object(id = config.guild_id))
