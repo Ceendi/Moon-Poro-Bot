@@ -2,12 +2,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import config
+import datetime
 
 
 class Przyjmij(discord.ui.View):
-    def __init__(self, author):
+    def __init__(self, author, bot):
         super().__init__(timeout=43200)
         self.author: discord.Member = author
+        self.bot = bot
 
     @discord.ui.button(label="Przyjmij", style=discord.ButtonStyle.green)
     async def przyjmij(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -17,42 +19,52 @@ class Przyjmij(discord.ui.View):
             await self.author.send(f"Twoje zgłoszenie zostało przyjęte przez moda. Odpowiednie działania zostały podjęte.")
         except discord.errors.Forbidden:
             pass
+        async with self.bot.pool.acquire() as con:
+            mod_stat = await con.fetch('SELECT * FROM mod_stats WHERE id=$1;', interaction.user.id)
+            if not mod_stat:
+                await con.execute("INSERT INTO mod_stats(id) VALUES($1);", interaction.user.id)
+            year = datetime.date.today().year%100
+            month = datetime.date.today().month
+            column_name = "zy" + str(year) + '_m' + str(month)
+            await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1;")
         await interaction.response.send_message("Przyjąłeś zgłoszenie!", ephemeral=True)
 
 
 class ZgloszenieModal(discord.ui.Modal):
-    def __init__(self, title):
+    def __init__(self, title, bot):
         self.title = title
+        self.bot = bot
         super().__init__()
 
     powod = discord.ui.TextInput(style=discord.TextStyle.long, required=True, label='Powód')
 
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(config.ticket_channel_id)
-        await channel.send(content=f"@here\n**{self.title}**\n{interaction.user.mention}: {self.powod}", view=Przyjmij(interaction.user))
+        await channel.send(content=f"@here\n**{self.title}**\n{interaction.user.mention}: {self.powod}", view=Przyjmij(interaction.user, self.bot))
         await interaction.response.send_message("Pomyślnie wysłano zgłoszenie.", ephemeral=True)
 
 
 class Zgloszenie(discord.ui.Button):
-    def __init__(self, title):
+    def __init__(self, title, bot):
         self.title = title
+        self.bot = bot
         super().__init__(label=self.title, custom_id=self.title, style=discord.ButtonStyle.red)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ZgloszenieModal(self.title))
+        await interaction.response.send_modal(ZgloszenieModal(self.title, self.bot))
 
 
 class Ticket(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         toxic = discord.ui.View(timeout=None)
-        toxic.add_item(Zgloszenie('Toxic'))
+        toxic.add_item(Zgloszenie('Toxic', self.bot))
         odwolania = discord.ui.View(timeout=None)
-        odwolania.add_item(Zgloszenie('Odwołania'))
+        odwolania.add_item(Zgloszenie('Odwołania', self.bot))
         ranga = discord.ui.View(timeout=None)
-        ranga.add_item(Zgloszenie('Ranga'))
+        ranga.add_item(Zgloszenie('Ranga', self.bot))
         inne = discord.ui.View(timeout=None)
-        inne.add_item(Zgloszenie('Inne'))
+        inne.add_item(Zgloszenie('Inne', self.bot))
         self.bot.add_view(toxic)
         self.bot.add_view(odwolania)
         self.bot.add_view(ranga)

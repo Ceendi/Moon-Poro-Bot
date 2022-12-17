@@ -131,6 +131,14 @@ class Warn(commands.Cog):
             await self.bot.pool.execute('INSERT INTO warn VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9);', uzytkownik.id, typ, powod, now, end_date, message.id, [interaction.user.id], True, opis)
             await uzytkownik.add_roles(warn_role)
             await interaction.response.send_message(uzytkownik.mention + " otrzymał **" + str(warn_role) + "** za " + str(powod) + " punkt regulaminu.")
+        async with self.bot.pool.acquire() as con:
+            mod_stat = await con.fetch('SELECT * FROM mod_stats WHERE id=$1;', interaction.user.id)
+            if not mod_stat:
+                await con.execute("INSERT INTO mod_stats(id) VALUES($1);", interaction.user.id)
+            year = datetime.date.today().year%100
+            month = datetime.date.today().month
+            column_name = "wy" + str(year) + '_m' + str(month)
+            await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1;")
 
     @warn.error
     async def warnError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
