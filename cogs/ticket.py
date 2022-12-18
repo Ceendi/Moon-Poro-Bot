@@ -19,6 +19,7 @@ class Przyjmij(discord.ui.View):
             await self.author.send(f"Twoje zgłoszenie zostało przyjęte przez moda. Odpowiednie działania zostały podjęte.")
         except discord.errors.Forbidden:
             pass
+        await interaction.response.send_message("Przyjąłeś zgłoszenie!", ephemeral=True)
         async with self.bot.pool.acquire() as con:
             mod_stat = await con.fetch('SELECT * FROM mod_stats WHERE id=$1;', interaction.user.id)
             if not mod_stat:
@@ -27,7 +28,7 @@ class Przyjmij(discord.ui.View):
             month = datetime.date.today().month
             column_name = "zy" + str(year) + '_m' + str(month)
             await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1;")
-        await interaction.response.send_message("Przyjąłeś zgłoszenie!", ephemeral=True)
+            print(str(interaction.user) + " zwiekszono o 1 zgloszenie")
 
 
 class ZgloszenieModal(discord.ui.Modal):

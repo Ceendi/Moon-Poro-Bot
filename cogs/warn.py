@@ -139,6 +139,7 @@ class Warn(commands.Cog):
             month = datetime.date.today().month
             column_name = "wy" + str(year) + '_m' + str(month)
             await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1;")
+            print(str(interaction.user) + " zwiekszono o 1 warn")
 
     @warn.error
     async def warnError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
