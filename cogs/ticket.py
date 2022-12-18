@@ -27,8 +27,7 @@ class Przyjmij(discord.ui.View):
             year = datetime.date.today().year%100
             month = datetime.date.today().month
             column_name = "zy" + str(year) + '_m' + str(month)
-            await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1;")
-            print(str(interaction.user) + " zwiekszono o 1 zgloszenie")
+            await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1 WHERE id=$1;", interaction.user.id)
 
 
 class ZgloszenieModal(discord.ui.Modal):
