@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import datetime
+import asyncpg
 import config
 
 
@@ -23,19 +24,16 @@ class Paginator(discord.ui.View):
         return self.entries[list(self.entries)[self.current_page]]
 
     def format_page(self, entries: dict):
-        embed = discord.Embed(title='Zgloszenia|Warny')
-        id = list(self.entries)[self.current_page]
-        user = self.bot.get_user(id)
-        if user:
-            embed.add_field(name="Mod", value=str(user), inline=False)
-        else:
-            embed.add_field(name="Mod", value=str(id), inline=False)
-        month = datetime.datetime.now().month + 1
-        for value in entries:
-            month = month-1
-            if month == 0:
-                month = 12
-            embed.add_field(name=str(month), value='|'.join(map(str, value)))
+        month = list(self.entries)[self.current_page]
+        embed = discord.Embed(title=str(month))
+        for id, values in entries.items():
+            user = self.bot.get_user(id)
+            if values['z'] == 0 and values['w'] == 0:
+                continue
+            if user:
+                embed.add_field(name='\u200b', value=user.mention+": "+str(values['z'])+"|"+str(values['w']))
+            else:
+                embed.add_field(name='\u200b', value=str(id)+": "+str(values['z'])+"|"+str(values['w']))
         return embed
 
     @discord.ui.button(emoji='\U000025c0', style=discord.ButtonStyle.blurple)
@@ -51,9 +49,9 @@ class Paginator(discord.ui.View):
         return await interaction.response.edit_message(embed=embed)
 
     @classmethod
-    async def start(cls, interaction: discord.Interaction, entries: dict, bot):
-        new = cls(entries, bot)
-        embed = new.format_page(entries=entries[list(entries)[0]])
+    async def start(cls, interaction: discord.Interaction, stats: dict, bot):
+        new = cls(stats, bot)
+        embed = new.format_page(entries=stats[list(stats)[0]])
         await interaction.channel.send(embed=embed, view=new)
         return new
 
@@ -66,7 +64,26 @@ class Mod_stats(commands.Cog):
     @app_commands.command(name="mod_stats", description="Pokazuje ilosci danych warnow i przyjetych zgloszen przez modow.")
     async def mod_stats(self, interaction: discord.Interaction):
         datas = await self.bot.pool.fetch("SELECT * FROM mod_stats;")
-        await Paginator.start(interaction, {data[0]: [x for x in zip(data[1::2], data[2::2])] for data in datas}, self.bot)
+        data: asyncpg.Record
+        stats = dict()
+        for data in datas:
+            id=data[0]
+            for date, number in data.items():
+                if date.startswith('id'):
+                    id = number
+                else:
+                    month = date[-2:]
+                    try:
+                        stats[month][id][date[0]] = number
+                    except KeyError:
+                        try:
+                            stats[month][id] = dict()
+                            stats[month][id][date[0]] = number
+                        except KeyError:
+                            stats[month] = dict()
+                            stats[month][id] = dict()
+                            stats[month][id][date[0]] = number
+        await Paginator.start(interaction, stats, self.bot)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Mod_stats(bot), guild = discord.Object(id = config.guild_id))
