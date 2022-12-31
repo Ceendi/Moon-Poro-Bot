@@ -136,7 +136,7 @@ class Warn(commands.Cog):
             if not mod_stat:
                 await con.execute("INSERT INTO mod_stats(id) VALUES($1);", interaction.user.id)
             year = datetime.date.today().year%100
-            month = datetime.date.today().month
+            month = datetime.date.today().strftime('%m')
             column_name = "wy" + str(year) + '_m' + str(month)
             await con.execute(f"UPDATE mod_stats SET {column_name}={column_name}+1 WHERE id=$1;", interaction.user.id)
 
