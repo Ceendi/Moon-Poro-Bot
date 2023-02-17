@@ -89,6 +89,13 @@ class Sponsors(commands.Cog):
                     godzin = int(time_whole/3600)
                     godzin = godzin - godzin % 100
                     await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100-100*60*60)
+                    channel = member.guild.get_channel(628241111756046336)
+                    if czas_rozm < 60:
+                        await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
+                    elif czas_rozm < 60*60:
+                        await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
+                    else:
+                        await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
                     channel = member.guild.get_channel(551881719754784818)
                     await channel.send(f"Proxy i Talone siedzieli na VC **{godzin}** godzin!")
                 else:
