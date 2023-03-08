@@ -43,7 +43,7 @@ from pyot.core.exceptions import NotFound
 
 class Zweryfikuj(discord.ui.View):
     def __init__(self, icon_id, nick, server, bot):
-        super().__init__(timeout=300)
+        super().__init__(timeout=120)
         self.icon_id = icon_id
         self.nick = nick
         self.server = server
