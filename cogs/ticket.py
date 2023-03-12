@@ -7,7 +7,7 @@ import datetime
 
 class Przyjmij(discord.ui.View):
     def __init__(self, author, bot):
-        super().__init__(timeout=43200)
+        super().__init__(timeout=86400)
         self.author: discord.Member = author
         self.bot = bot
 
