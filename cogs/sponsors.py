@@ -2,7 +2,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import config
-from typing import Optional
 from discord.utils import get
 import time
 
