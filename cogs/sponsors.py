@@ -68,10 +68,10 @@ class Sponsors(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if after.channel and after.channel.id == 1042932145280262204 and len(after.channel.members) == 1:
+        if after.channel and after.channel.id == 1042932145280262204 and len(after.channel.members) == 1 and after.channel != before.channel:
             self.start = time.time()
             return
-        if before.channel and before.channel.id == 1042932145280262204 and not before.channel.members:
+        if before.channel and before.channel.id == 1042932145280262204 and not before.channel.members and after.channel != before.channel:
             self.end = time.time()
             czas_rozm = int(self.end - self.start)
             data = await self.bot.pool.fetch("SELECT * FROM proxy_vc;")
@@ -101,13 +101,15 @@ class Sponsors(commands.Cog):
                 await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100)
             return
         
-        if after.channel and after.channel.id == 1005927253605093427:
+        if after.channel and after.channel.id == 1005927253605093427 and after.channel != before.channel:
             drzez = after.channel.guild.get_member(917028904433238036)
-            await drzez.send(member.mention + " wbił na vc!")
+            if member != drzez:
+                await drzez.send(member.mention + " wbił na vc!")
             return
-        if before.channel and before.channel.id == 1005927253605093427:
+        if before.channel and before.channel.id == 1005927253605093427 and after.channel != before.channel:
             drzez = before.channel.guild.get_member(917028904433238036)
-            await drzez.send(member.mention + " wyszedł z vc!")
+            if member != drzez:
+                await drzez.send(member.mention + " wyszedł z vc!")
             return
 
 async def setup(bot: commands.Bot):
