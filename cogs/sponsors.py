@@ -68,44 +68,47 @@ class Sponsors(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if before.channel:
-            if before.channel.id != 1042932145280262204:
-                return
-        if after.channel:
-            if after.channel.id != 1042932145280262204:
-                return
-        if after.channel:
-            if len(after.channel.members) == 1:
-                self.start = time.time()
-        elif before.channel:
-            if not before.channel.members:
-                self.end = time.time()
-                czas_rozm = int(self.end - self.start)
-                data = await self.bot.pool.fetch("SELECT * FROM proxy_vc;")
-                time_100 = czas_rozm + data[0][1]
-                time_whole = czas_rozm + data[0][0]
-                if time_100 > 100*60*60:
-                    godzin = int(time_whole/3600)
-                    godzin = godzin - godzin % 100
-                    await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100-100*60*60)
-                    channel = member.guild.get_channel(628241111756046336)
-                    if czas_rozm < 60:
-                        await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
-                    elif czas_rozm < 60*60:
-                        await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
-                    else:
-                        await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
-                    channel = member.guild.get_channel(551881719754784818)
-                    await channel.send(f"Proxy i Talone siedzieli na VC **{godzin}** godzin!")
+        if after.channel and after.channel.id == 1042932145280262204 and len(after.channel.members) == 1:
+            self.start = time.time()
+            return
+        if before.channel and before.channel.id == 1042932145280262204 and not before.channel.members:
+            self.end = time.time()
+            czas_rozm = int(self.end - self.start)
+            data = await self.bot.pool.fetch("SELECT * FROM proxy_vc;")
+            time_100 = czas_rozm + data[0][1]
+            time_whole = czas_rozm + data[0][0]
+            if time_100 > 100*60*60:
+                godzin = int(time_whole/3600)
+                godzin = godzin - godzin % 100
+                await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100-100*60*60)
+                channel = member.guild.get_channel(628241111756046336)
+                if czas_rozm < 60:
+                    await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
+                elif czas_rozm < 60*60:
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
                 else:
-                    channel = member.guild.get_channel(628241111756046336)
-                    if czas_rozm < 60:
-                        await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
-                    elif czas_rozm < 60*60:
-                        await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
-                    else:
-                        await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
-                    await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100)
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
+                channel = member.guild.get_channel(551881719754784818)
+                await channel.send(f"Proxy i Talone siedzieli na VC **{godzin}** godzin!")
+            else:
+                channel = member.guild.get_channel(628241111756046336)
+                if czas_rozm < 60:
+                    await channel.send(f"Rozmowa trwala {czas_rozm} sekund.")
+                elif czas_rozm < 60*60:
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/60)} minut.")
+                else:
+                    await channel.send(f"Rozmowa trwala {int(czas_rozm/3600)} godzin i {int((czas_rozm%3600)/60)} minut.")
+                await self.bot.pool.execute("UPDATE proxy_vc SET time=$1, message_time=$2;", time_whole, time_100)
+            return
+        
+        if after.channel and after.channel.id == 1005927253605093427:
+            drzez = after.channel.guild.get_member(917028904433238036)
+            await drzez.send(member.mention + " wbił na vc!")
+            return
+        if before.channel and before.channel.id == 1005927253605093427:
+            drzez = before.channel.guild.get_member(917028904433238036)
+            await drzez.send(member.mention + " wyszedł z vc!")
+            return
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Sponsors(bot), guild = discord.Object(id = config.guild_id))
