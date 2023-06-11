@@ -183,7 +183,7 @@ class WeryfikacjaCog(commands.Cog):
                     discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
                 if discord_new_rank != old_role:
-                    print(member, old_role)
+                    print(member, old_role, discord_new_rank)
                     await member.remove_roles(old_role)
                     await member.add_roles(discord_new_rank)
 
