@@ -187,6 +187,8 @@ class WeryfikacjaCog(commands.Cog):
                     await member.remove_roles(old_role)
                     await member.add_roles(discord_new_rank)
 
+        print("koniec sprawdzania")
+
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
         await self.bot.wait_until_ready()
