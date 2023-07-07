@@ -104,12 +104,18 @@ class Sponsors(commands.Cog):
         if after.channel and after.channel.id == 1005927253605093427 and after.channel != before.channel:
             drzez = after.channel.guild.get_member(917028904433238036)
             if member != drzez:
-                await drzez.send(member.mention + " wbił na vc!")
+                try:
+                    await drzez.send(member.mention + " wbił na vc!")
+                except discord.errors.Forbidden:
+                    pass
             return
         if before.channel and before.channel.id == 1005927253605093427 and after.channel != before.channel:
             drzez = before.channel.guild.get_member(917028904433238036)
             if member != drzez:
-                await drzez.send(member.mention + " wyszedł z vc!")
+                try:
+                    await drzez.send(member.mention + " wyszedł z vc!")
+                except discord.errors.Forbidden:
+                    pass
             return
 
 async def setup(bot: commands.Bot):
