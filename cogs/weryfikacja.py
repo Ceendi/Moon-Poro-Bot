@@ -167,6 +167,8 @@ class WeryfikacjaCog(commands.Cog):
             guild = self.bot.get_guild(config.guild_id)
             member = guild.get_member(data['id'])
             if member:
+                if "Zweryfikowany" not in str(member.roles):
+                    print(member.id)
                 for old_role in member.roles:
                     if str(old_role) in lol_ranks:
                         break
