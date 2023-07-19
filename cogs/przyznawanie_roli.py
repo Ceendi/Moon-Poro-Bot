@@ -119,7 +119,11 @@ class Rangowe(discord.ui.View):
             ),
             discord.SelectOption(
                 label="Platinum",
-                emoji='<:platinum:930537679265869844>',
+                emoji='<:platinum2:1131348018675863633>',
+            ),
+            discord.SelectOption(
+                label="Emerald",
+                emoji='<:emerald:1131341463083548713>',
             ),
             discord.SelectOption(
                 label="Diamond",
