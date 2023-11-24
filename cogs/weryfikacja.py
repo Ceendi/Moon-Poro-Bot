@@ -9,6 +9,13 @@ class LolModel(ModelConf):
     default_version = "latest"
     default_locale = "en_us"
 
+@activate_model("riot")
+class RiotModel(ModelConf):
+    default_platform = "eun1"
+    default_region = "europe"
+    default_version = "latest"
+    default_locale = "en_us"
+
 
 @activate_pipeline("lol")
 class LolPipeline(PipelineConf):
@@ -20,6 +27,7 @@ class LolPipeline(PipelineConf):
             "expirations": {
                 "summoner_v4_by_name": 0,
                 "league_v4_summoner_entries": 600,
+                "account_v1_by_riot_id": 600,
             }
         },
         {
@@ -27,6 +35,7 @@ class LolPipeline(PipelineConf):
             "api_key": riot_api_token
         }
     ]
+
 
 import discord
 from discord.utils import get
@@ -38,7 +47,10 @@ from random import randrange
 from config import lol_ranks
 from functions import has_rank_roles
 from pyot.models import lol
+from pyot.models import riot
 from pyot.core.exceptions import NotFound
+import requests
+
 
 
 class Zweryfikuj(discord.ui.View):
@@ -98,19 +110,33 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         super().__init__(timeout=120)
         self.bot = bot
 
-    nick = discord.ui.TextInput(label='Nick', required=True, placeholder='Twój nick..')
-    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..')
+    game_name = discord.ui.TextInput(label='Nick', required=True, placeholder='Twój nick..', min_length=3, max_length=16)
+    tag = discord.ui.TextInput(label='TAG', required=True, placeholder='Twój tag..', min_length=3, max_length=5)
+    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..', min_length=2, max_length=4)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return str(self.server).lower() in ['eune', 'euw', 'na']
 
     async def on_submit(self, interaction: discord.Interaction):
         servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
-        self.server = servers[str(self.server).lower()]
+        self.server_translated = servers[str(self.server).lower()]
+        summoner = requests.get(f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{self.game_name}/{self.tag}?api_key={riot_api_token}")
+        if summoner.status_code == 404:
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}**!", ephemeral=True)
+            return
+        elif not summoner.ok:
+            await interaction.response.send_message(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
+            return
+        puuid = summoner.json().get('puuid')
         try:
-            summoner = await lol.Summoner(platform=self.server, name=self.nick).get()
+            summoner = await lol.Summoner(puuid=puuid, platform=self.server_translated).get()
+        except:
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}** na serwerze **{self.server}**!", ephemeral=True)
+            return
+        try:
+            summoner = await lol.Summoner(platform=self.server_translated, name=summoner.name).get()
         except NotFound:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.nick}**!", ephemeral=True)
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}** na serwerze **{self.server}**!", ephemeral=True)
             return
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE lol_id = $1;", summoner.id)
         if not data:
@@ -118,9 +144,9 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
             while summoner.profile_icon_id == random_icon_id:
                 random_icon_id = randrange(0, 28)
             icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
-            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.nick}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
+            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.game_name}#{self.tag}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
             embed.set_image(url=icon_url)
-            view = Zweryfikuj(random_icon_id, self.nick, self.server, self.bot)
+            view = Zweryfikuj(random_icon_id, summoner.name, self.server_translated, self.bot)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.send_message("To konto w lolu już jest przypisane do innego użytkownika!", ephemeral=True)
