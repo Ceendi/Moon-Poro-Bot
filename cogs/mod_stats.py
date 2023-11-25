@@ -1,7 +1,6 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import datetime
 import asyncpg
 import config
 
@@ -10,7 +9,7 @@ class Paginator(discord.ui.View):
     def __init__(self, entries: list, bot):
         super().__init__(timeout=180)
         self.entries: dict = entries
-        self.current_page = 0
+        self.current_page = len(self.entries.keys()) - 1
         self.max_page = len(self.entries.keys())
         self.bot: commands.Bot() = bot
     
@@ -26,6 +25,7 @@ class Paginator(discord.ui.View):
     def format_page(self, entries: dict):
         month = list(self.entries)[self.current_page]
         embed = discord.Embed(title=str(month))
+        embed.description = "id: zgloszenia|warny"
         for id, values in entries.items():
             user = self.bot.get_user(id)
             if values['z'] == 0 and values['w'] == 0:
@@ -51,7 +51,7 @@ class Paginator(discord.ui.View):
     @classmethod
     async def start(cls, interaction: discord.Interaction, stats: dict, bot):
         new = cls(stats, bot)
-        embed = new.format_page(entries=stats[list(stats)[0]])
+        embed = new.format_page(entries=stats[str(list(stats)[-1])])
         await interaction.channel.send(embed=embed, view=new)
         return new
 
