@@ -1,6 +1,7 @@
 from pyot.conf.model import activate_model, ModelConf
 from pyot.conf.pipeline import activate_pipeline, PipelineConf
 from config import riot_api_token
+from discord.app_commands import Choice
 
 @activate_model("lol")
 class LolModel(ModelConf):
@@ -47,7 +48,6 @@ from random import randrange
 from config import lol_ranks
 from functions import has_rank_roles
 from pyot.models import lol
-from pyot.models import riot
 from pyot.core.exceptions import NotFound
 import requests
 
@@ -233,6 +233,52 @@ class WeryfikacjaCog(commands.Cog):
         await interaction.user.remove_roles(zweryfikowany)
         await interaction.response.send_message("Pomyślnie usunięto Cię z listy zweryfikowanych!", ephemeral=True)
 
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="usun_wer_nick", description="Usuwa dany nick z listy zweryfikowanych!")
+    @app_commands.describe(
+        nick = "Nick, jak nick to nazwa#123 to wpisujesz nazwa",
+        tag = "Tag, jak nick to nazwa#123 to wpisujesz 123"
+    )
+    @app_commands.choices(
+    server = [
+        Choice(name = "EUNE", value = 'EUN1'),
+        Choice(name = "EUW", value = 'EUW1'),
+        Choice(name = "NA", value = 'NA1'),
+    ]
+    )
+    async def usun_wer_nick(self, interaction: discord.Interaction, nick: str, tag: str, server: str):
+        summoner = requests.get(f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nick}/{tag}?api_key={riot_api_token}")
+        if summoner.status_code == 404:
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
+            return
+        elif not summoner.ok:
+            await interaction.response.send_message(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
+            return
+        puuid = summoner.json().get('puuid')
+        try:
+            summoner = await lol.Summoner(puuid=puuid, platform=server).get()
+        except:
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{nick}#{tag}** na serwerze **{server}**!", ephemeral=True)
+            return
+        data = await self.bot.pool.fetch("SELECT id, message_id FROM zweryfikowani WHERE lol_id=$1;", summoner.id)
+        if data:
+            data = data[0]
+            id = data[0]
+            message_id = data[1]
+            guild = self.bot.get_guild(config.guild_id)
+            channel = guild.get_channel(config.zweryfikowani_channel_id)
+            message = channel.get_partial_message(message_id)
+            member = guild.get_member(id)
+            if member:
+                zweryfikowany = get(guild.roles, name="Zweryfikowany")
+                if zweryfikowany in member.roles:
+                    await member.remove_roles(zweryfikowany)
+            await message.delete()
+            await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE lol_id=$1;", summoner.id)
+            await interaction.response.send_message(f"Usunieto!", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Nie znaleziono osoby z takim nickiem na serwerze.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(WeryfikacjaCog(bot), guild = discord.Object(id = config.guild_id))
