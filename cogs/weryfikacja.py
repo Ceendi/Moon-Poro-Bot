@@ -10,14 +10,6 @@ class LolModel(ModelConf):
     default_version = "latest"
     default_locale = "en_us"
 
-@activate_model("riot")
-class RiotModel(ModelConf):
-    default_platform = "eun1"
-    default_region = "europe"
-    default_version = "latest"
-    default_locale = "en_us"
-
-
 @activate_pipeline("lol")
 class LolPipeline(PipelineConf):
     name = "lol_main"
@@ -111,7 +103,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         self.bot = bot
 
     game_name = discord.ui.TextInput(label='Nick', required=True, placeholder='Twój nick..', min_length=3, max_length=16)
-    tag = discord.ui.TextInput(label='TAG', required=True, placeholder='Twój tag..', min_length=3, max_length=5)
+    tag = discord.ui.TextInput(label='TAG', required=True, placeholder='Twój tag..', min_length=3, max_length=6)
     server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..', min_length=2, max_length=4)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -120,6 +112,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
     async def on_submit(self, interaction: discord.Interaction):
         servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
         self.server_translated = servers[str(self.server).lower()]
+        self.tag = str(self.tag).replace('#', '')
         summoner = requests.get(f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{self.game_name}/{self.tag}?api_key={riot_api_token}")
         if summoner.status_code == 404:
             await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}**!", ephemeral=True)
@@ -248,18 +241,20 @@ class WeryfikacjaCog(commands.Cog):
     ]
     )
     async def usun_wer_nick(self, interaction: discord.Interaction, nick: str, tag: str, server: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        tag = tag.replace('#', '')
         summoner = requests.get(f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{nick}/{tag}?api_key={riot_api_token}")
         if summoner.status_code == 404:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
+            await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
             return
         elif not summoner.ok:
-            await interaction.response.send_message(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
+            await interaction.followup.send(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
             return
         puuid = summoner.json().get('puuid')
         try:
             summoner = await lol.Summoner(puuid=puuid, platform=server).get()
         except:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{nick}#{tag}** na serwerze **{server}**!", ephemeral=True)
+            await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}** na serwerze **{server}**!", ephemeral=True)
             return
         data = await self.bot.pool.fetch("SELECT id, message_id FROM zweryfikowani WHERE lol_id=$1;", summoner.id)
         if data:
@@ -276,9 +271,9 @@ class WeryfikacjaCog(commands.Cog):
                     await member.remove_roles(zweryfikowany)
             await message.delete()
             await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE lol_id=$1;", summoner.id)
-            await interaction.response.send_message(f"Usunieto!", ephemeral=True)
+            await interaction.followup.send(f"Usunieto!", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Nie znaleziono osoby z takim nickiem na serwerze.", ephemeral=True)
+            await interaction.followup.send(f"Nie znaleziono osoby z takim nickiem na serwerze.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(WeryfikacjaCog(bot), guild = discord.Object(id = config.guild_id))
