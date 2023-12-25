@@ -46,10 +46,11 @@ import requests
 
 
 class Zweryfikuj(discord.ui.View):
-    def __init__(self, icon_id, nick, server, bot):
+    def __init__(self, icon_id, nick, puuid, server, bot):
         super().__init__(timeout=120)
         self.icon_id = icon_id
         self.nick = nick
+        self.puuid = puuid
         self.server = server
         self.bot = bot
     
@@ -61,7 +62,7 @@ class Zweryfikuj(discord.ui.View):
             await interaction.followup.send("Już jesteś zweryfikowany!", ephemeral=True)
             return
         try:
-            summoner = await lol.Summoner(platform=self.server, name=self.nick).get()
+            summoner = await lol.Summoner(platform=self.server, puuid=self.puuid).get()
         except NotFound:
             await interaction.followup.send(f"Nie znaleziono osoby o nicku **{self.nick}**!", ephemeral=True)
             return
@@ -126,11 +127,6 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         except:
             await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}** na serwerze **{self.server}**!", ephemeral=True)
             return
-        try:
-            summoner = await lol.Summoner(platform=self.server_translated, name=summoner.name).get()
-        except NotFound:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}** na serwerze **{self.server}**!", ephemeral=True)
-            return
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE lol_id = $1;", summoner.id)
         if not data:
             random_icon_id = randrange(0, 28)
@@ -139,7 +135,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
             icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
             embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.game_name}#{self.tag}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
             embed.set_image(url=icon_url)
-            view = Zweryfikuj(random_icon_id, summoner.name, self.server_translated, self.bot)
+            view = Zweryfikuj(random_icon_id, str(self.game_name)+"#"+str(self.tag), puuid, self.server_translated, self.bot)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.send_message("To konto w lolu już jest przypisane do innego użytkownika!", ephemeral=True)
