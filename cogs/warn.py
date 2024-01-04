@@ -26,6 +26,7 @@ class Warn(commands.Cog):
     async def czysc_warny(self):
         guild = self.bot.get_guild(config.guild_id)
         channel = guild.get_channel(config.warn_channel_id)
+        guild.channels = guild.fetch_channels()
         print(guild)
         print(guild.id)
         print(guild.channels)
