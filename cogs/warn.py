@@ -26,8 +26,8 @@ class Warn(commands.Cog):
     async def czysc_warny(self):
         guild = self.bot.get_guild(config.guild_id)
         channel = guild.get_channel(config.warn_channel_id)
-        print(guild)
-        print(channel)
+        print(guild.id)
+        print(channel.id)
         async with self.bot.pool.acquire() as con:
             datas = await con.fetch("SELECT * FROM warn WHERE NOW() > koniec AND active=$1;", True)
             for data in datas:
