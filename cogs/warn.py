@@ -32,6 +32,7 @@ class Warn(commands.Cog):
             for data in datas:
                 role = get(guild.roles, name=warns[data["typ"]])
                 uzytkownik = guild.get_member(data["id"])
+                print(f"Deleting warn for {uzytkownik}")
                 message = channel.get_partial_message(data["message_id"])
                 embed = discord.Embed(title=str(role), description=data["powod"] + " punkt regulaminu", colour=discord.Colour.dark_gray())
                 if data["opis"]:
