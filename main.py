@@ -10,10 +10,10 @@ import logging.handlers
 
 
 class Bot(commands.Bot):
-    def __init__(self):
+    def __init__(self, intents):
         super().__init__(
             command_prefix='%',
-            intents = discord.Intents.all()
+            intents = intents
             )
 
     async def setup_hook(self):
@@ -57,7 +57,14 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 """ERROR HANDLER"""
 
-bot = Bot()
+intents = discord.Intents().none()
+intents.message_content = True
+intents.guild_messages = True
+intents.messages = True
+intents.emojis = True
+intents.members = True
+intents.guilds = True
+bot = Bot(intents)
 
 async def main():
     async with bot, asyncpg.create_pool(**config.POSTGRES_INFO) as pool:
