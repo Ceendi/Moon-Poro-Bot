@@ -177,8 +177,6 @@ class WeryfikacjaCog(commands.Cog):
 
     @tasks.loop(hours=24.0)
     async def sprawdz_zweryfikowanych(self):
-        #guild = self.bot.get_guild(config.guild_id)
-        #print(guild.get_channel(999747704261464094))
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         for data in datas:
             guild = self.bot.get_guild(config.guild_id)
