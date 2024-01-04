@@ -182,6 +182,7 @@ class WeryfikacjaCog(commands.Cog):
         for data in datas:
             guild = self.bot.get_guild(config.guild_id)
             member = guild.get_member(data['id'])
+            print(f"Verification check for {member}")
             if member:
                 if "Zweryfikowany" not in str(member.roles):
                     print(member.id)
