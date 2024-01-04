@@ -183,7 +183,7 @@ class WeryfikacjaCog(commands.Cog):
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         for data in datas:
             member = guild.get_member(data['id'])
-            #print(f"Verification check for {member}")
+            print(f"Verification check for {member}")
             if member:
                 if "Zweryfikowany" not in str(member.roles):
                     print(member.id)
