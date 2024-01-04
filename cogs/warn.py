@@ -28,6 +28,7 @@ class Warn(commands.Cog):
         channel = guild.get_channel(config.warn_channel_id)
         print(guild)
         print(guild.id)
+        print(guild.channels)
         print(channel.id)
         async with self.bot.pool.acquire() as con:
             datas = await con.fetch("SELECT * FROM warn WHERE NOW() > koniec AND active=$1;", True)
