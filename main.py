@@ -11,8 +11,6 @@ import logging.handlers
 
 class Bot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.all()
-        intents.guilds = True
         super().__init__(
             command_prefix='%',
             intents = discord.Intents.all()
