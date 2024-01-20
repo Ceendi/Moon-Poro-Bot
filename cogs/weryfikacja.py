@@ -160,6 +160,8 @@ class WeryfikacjaCog(commands.Cog):
                     print(i)
                 i+=1
 
+                print(entry["lol_id"], league)
+
                 member_id = entry["id"]
                 member = guild.get_member(member_id)
                 old_user_roles = member.roles
