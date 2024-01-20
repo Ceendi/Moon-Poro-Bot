@@ -170,7 +170,7 @@ class WeryfikacjaCog(commands.Cog):
                 user_roles.remove(old_role)
 
         leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
-
+        print("after leagues")
         lol_rank = 'UNRANKED'
         for league in leagues:
             if league["queueType"] == 'RANKED_SOLO_5x5':
@@ -182,8 +182,11 @@ class WeryfikacjaCog(commands.Cog):
             discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
         user_roles.append(discord_new_rank)
+        print("before role edit")
         if old_user_roles != user_roles:
+            print("before editting role")
             await member.edit(roles=user_roles)
+        print("after editting")
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
