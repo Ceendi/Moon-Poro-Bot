@@ -144,54 +144,44 @@ class WeryfikacjaCog(commands.Cog):
         guild = self.bot.get_guild(config.guild_id)
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         datas = [data for data in datas if guild.get_member(data["id"])]
-
         i=0
 
-        for i in range(0, len(datas), 5):
-            data = datas[i:i+5]
-            async with client:
-                async with TaskGroup(asyncio.Semaphore(100)) as tg:
-                    for account in data:
-                        await tg.create_task(client.get_lol_league_v4_entries_by_summoner(region=account["server"], summoner_id=account["lol_id"]))
-                    leagues: list[RiotAPISchema.LolLeagueV4LeagueEntry] = tg.results()
+        for data in datas:
+            if i%20==0:
+                print(i)
+            i+=1
+
+            member = guild.get_member(data["id"])
+            old_user_roles = member.roles
+            user_roles = member.roles
             
-            for entry, league in zip(data, leagues):
-                if i%20==0:
-                    print(i)
-                i+=1
+            if "Zweryfikowany" not in str(member.roles):
+                zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
+                user_roles.append(zweryfikowany)
+            
+            if "Użytkownik" not in str(member.roles):
+                uzytkownik = get(member.guild.roles, name="Użytkownik")
+                user_roles.append(uzytkownik)
 
-                print(entry["lol_id"], league)
+            for old_role in member.roles:
+                if str(old_role) in lol_ranks:
+                    user_roles.remove(old_role)
 
-                member_id = entry["id"]
-                member = guild.get_member(member_id)
-                old_user_roles = member.roles
-                user_roles = member.roles
-                
-                if "Zweryfikowany" not in str(member.roles):
-                    zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
-                    user_roles.append(zweryfikowany)
-                
-                if "Użytkownik" not in str(member.roles):
-                    uzytkownik = get(member.guild.roles, name="Użytkownik")
-                    user_roles.append(uzytkownik)
+            leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
-                for old_role in member.roles:
-                    if str(old_role) in lol_ranks:
-                        user_roles.remove(old_role)
+            lol_rank = 'UNRANKED'
+            for league in leagues:
+                if league["queueType"] == 'RANKED_SOLO_5x5':
+                    lol_rank = league["tier"]
+                    break
+            if lol_rank == "GRANDMASTER":
+                discord_new_rank = get(member.guild.roles, name='GrandMaster')
+            else:
+                discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
-                lol_rank = 'UNRANKED'
-                for l in league:
-                    if l["queueType"] == 'RANKED_SOLO_5x5':
-                        lol_rank = l["tier"]
-                        break
-                if lol_rank == "GRANDMASTER":
-                    discord_new_rank = get(member.guild.roles, name='GrandMaster')
-                else:
-                    discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
-
-                user_roles.append(discord_new_rank)
-                if old_user_roles != user_roles:
-                    await member.edit(roles=user_roles)
+            user_roles.append(discord_new_rank)
+            if old_user_roles != user_roles:
+                await member.edit(roles=user_roles)
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
