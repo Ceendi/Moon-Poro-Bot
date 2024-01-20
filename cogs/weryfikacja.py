@@ -166,8 +166,9 @@ class WeryfikacjaCog(commands.Cog):
             for old_role in member.roles:
                 if str(old_role) in lol_ranks:
                     user_roles.remove(old_role)
-
-            leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
+                    
+            async with client:
+                leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
             lol_rank = 'UNRANKED'
             for league in leagues:
