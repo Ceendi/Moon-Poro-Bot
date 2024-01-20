@@ -144,10 +144,10 @@ class WeryfikacjaCog(commands.Cog):
         guild = self.bot.get_guild(config.guild_id)
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         datas = [data for data in datas if guild.get_member(data["id"])]
-
-        async with TaskGroup(asyncio.Semaphore(100)) as tg:
-            for data in datas:
-                await tg.create_task(self.check_lol_rank(data, guild))
+        async with client:
+            async with TaskGroup(asyncio.Semaphore(100)) as tg:
+                for data in datas:
+                    await tg.create_task(self.check_lol_rank(data, guild))
 
     async def check_lol_rank(self, data, guild: discord.Guild):
         member: discord.Member = guild.get_member(data["id"])
