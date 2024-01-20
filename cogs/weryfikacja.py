@@ -112,6 +112,7 @@ class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
+        i=0
     
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -153,6 +154,8 @@ class WeryfikacjaCog(commands.Cog):
         member: discord.Member = guild.get_member(data["id"])
         old_user_roles = member.roles
         user_roles = member.roles
+        self.i+=1
+        print(self.i)
         
         if "Zweryfikowany" not in str(member.roles):
             zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
@@ -165,9 +168,9 @@ class WeryfikacjaCog(commands.Cog):
         for old_role in member.roles:
             if str(old_role) in lol_ranks:
                 user_roles.remove(old_role)
-        print("before")
+
         leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
-        print(leagues)
+
         lol_rank = 'UNRANKED'
         for league in leagues:
             if league["queueType"] == 'RANKED_SOLO_5x5':
