@@ -1,7 +1,6 @@
-import asyncio
 from pulsefire.clients import RiotAPIClient
-from pulsefire.schemas import RiotAPISchema
-from pulsefire.taskgroups import TaskGroup
+import asyncio
+from pulsefire.middlewares import rate_limiter_middleware
 import discord
 from discord.utils import get
 from discord.ext import commands, tasks
@@ -146,6 +145,7 @@ class WeryfikacjaCog(commands.Cog):
         datas = [data for data in datas if guild.get_member(data["id"])]
         i=0
 
+
         async with client:
             for data in datas:
                 i+=1
@@ -182,6 +182,7 @@ class WeryfikacjaCog(commands.Cog):
 
                 if old_user_roles != user_roles:
                     await member.edit(roles=user_roles)
+                await asyncio.sleep(0.4)
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
