@@ -145,7 +145,7 @@ class WeryfikacjaCog(commands.Cog):
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         datas = [data for data in datas if guild.get_member(data["id"])]
         async with client:
-            async with TaskGroup(asyncio.Semaphore(100)) as tg:
+            async with TaskGroup(asyncio.Semaphore(20)) as tg:
                 for data in datas:
                     await tg.create_task(self.check_lol_rank(data, guild))
 
@@ -153,8 +153,6 @@ class WeryfikacjaCog(commands.Cog):
         member: discord.Member = guild.get_member(data["id"])
         old_user_roles = member.roles
         user_roles = member.roles
-
-        print("running next")
         
         if "Zweryfikowany" not in str(member.roles):
             zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
@@ -167,9 +165,9 @@ class WeryfikacjaCog(commands.Cog):
         for old_role in member.roles:
             if str(old_role) in lol_ranks:
                 user_roles.remove(old_role)
-
+        print("before")
         leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
-
+        print(leagues)
         lol_rank = 'UNRANKED'
         for league in leagues:
             if league["queueType"] == 'RANKED_SOLO_5x5':
