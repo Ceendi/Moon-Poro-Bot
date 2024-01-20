@@ -146,7 +146,7 @@ class WeryfikacjaCog(commands.Cog):
         datas = [data for data in datas if guild.get_member(data["id"])]
         i=0
 
-        async with asyncio.TaskGroup() as tg:
+        async with TaskGroup(asyncio.Semaphore(100)) as tg:
             for data in datas:
                 i+=1
                 print(i)
@@ -169,8 +169,7 @@ class WeryfikacjaCog(commands.Cog):
             if str(old_role) in lol_ranks:
                 user_roles.remove(old_role)
 
-        async with client:
-            leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
+        leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
         lol_rank = 'UNRANKED'
         for league in leagues:
