@@ -112,7 +112,7 @@ class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
-        i=0
+        self.i=0
     
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
