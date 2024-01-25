@@ -1,5 +1,5 @@
 import discord
-from discord import app_commands
+from discord import Message, app_commands
 from discord.ext import commands
 import asyncpg
 import config
@@ -58,6 +58,14 @@ class Paginator(discord.ui.View):
 class Mod_stats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.boost_messages = ['boost', 'wbije rangę', 'wbije range', 'bost', 'pomogę z', 'pomoge z',
+                          'za free', 'tanio']
+
+    @commands.Cog.listener('on_message')
+    async def on_message(self, message: Message):
+        if not message.author.bot and any(bm in message.content for bm in self.boost_messages):
+            channel = message.guild.get_channel(1199455265234370640)
+            await channel.send(f'{message.author.mention} napisał na kanale {message.channel.mention} "{message.content}" {message.id}')
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))

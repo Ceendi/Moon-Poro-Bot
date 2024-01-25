@@ -72,9 +72,7 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
     server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..', min_length=2, max_length=4)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return (str(self.server).lower() in ['eune', 'euw', 'na'] and
-                str(self.game_name).isalnum() and
-                (str(self.tag).isalnum() or str(self.tag)[0] == '#' and str(self.tag)[1:].isalnum()))
+        return (str(self.server).lower() in ['eune', 'euw', 'na'])
 
     async def on_submit(self, interaction: discord.Interaction):
         servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
@@ -143,13 +141,9 @@ class WeryfikacjaCog(commands.Cog):
         guild = self.bot.get_guild(config.guild_id)
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         datas = [data for data in datas if guild.get_member(data["id"])]
-        i=0
-
 
         async with client:
             for data in datas:
-                i+=1
-                print(i)
                 member: discord.Member = guild.get_member(data["id"])
                 old_user_roles = member.roles
                 user_roles = member.roles
