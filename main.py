@@ -39,7 +39,7 @@ class Bot(commands.Bot):
                 pass
 
     async def on_member_join(self, member: discord.Member):
-        if member.created_at + datetime.timedelta(hours=2) > datetime.datetime.now(datetime.timezone.utc):
+        if member.created_at + datetime.timedelta(days=90) > datetime.datetime.now(datetime.timezone.utc):
             await member.ban(reason="Multikonto")
             channel = member.guild.get_channel(config.komendy_botowe_channel_id)
             await channel.send(f"Zbanowano {member.mention} za multikonto!")
