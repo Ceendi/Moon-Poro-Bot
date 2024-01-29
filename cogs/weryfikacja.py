@@ -46,18 +46,18 @@ class Zweryfikuj(discord.ui.View):
                 discord_new_rank = get(interaction.guild.roles, name='GrandMaster')
             else:
                 discord_new_rank = get(interaction.guild.roles, name=lol_rank.capitalize())
-            
-                embed = discord.Embed(colour=discord.Colour.green())
-                embed.add_field(name="Nick", value=interaction.user.mention)
-                embed.add_field(name="Serwer", value=self.server)
-                channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
-                message = await channel.send(embed=embed)
-                await self.bot.pool.execute("INSERT INTO zweryfikowani VALUES($1, $2, $3, $4);", interaction.user.id, message.id, summoner["id"], self.server)
-                zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
-                server_role = get(interaction.guild.roles, name=server_translation[self.server])
-                uzytkownik_role = get(interaction.guild.roles, name="Użytkownik")
-                await interaction.user.add_roles(*[discord_new_rank, server_role, uzytkownik_role, zweryfikowany])
-                await interaction.followup.send("Udało Ci się przejść weryfikację!", ephemeral=True)
+
+            embed = discord.Embed(colour=discord.Colour.green())
+            embed.add_field(name="Nick", value=interaction.user.mention)
+            embed.add_field(name="Serwer", value=self.server)
+            channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
+            message = await channel.send(embed=embed)
+            await self.bot.pool.execute("INSERT INTO zweryfikowani VALUES($1, $2, $3, $4);", interaction.user.id, message.id, summoner["id"], self.server)
+            zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
+            server_role = get(interaction.guild.roles, name=server_translation[self.server])
+            uzytkownik_role = get(interaction.guild.roles, name="Użytkownik")
+            await interaction.user.add_roles(*[discord_new_rank, server_role, uzytkownik_role, zweryfikowany])
+            await interaction.followup.send("Udało Ci się przejść weryfikację!", ephemeral=True)
         else:
             await interaction.followup.send("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
 
