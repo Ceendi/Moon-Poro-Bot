@@ -228,6 +228,18 @@ class Role(commands.Cog):
            await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
         else:
             raise error
+        
+    
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="wylacz_multikonta", description="Wyłącza sprawdzanie multikonta")
+    async def wylacz_multikonta(self, interaction: discord.Interaction):
+        self.bot.join_check = not self.bot.join_check
+        if self.bot.join_check:
+            await interaction.response.send_message("Włączono sprawdzanie multikont!", ephemeral=True)
+        else:
+            await interaction.response.send_message("Wyłączono sprawdzanie multikont!", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Role(bot), guild = discord.Object(id = config.guild_id))
