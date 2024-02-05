@@ -55,6 +55,15 @@ class Paginator(discord.ui.View):
         await interaction.channel.send(embed=embed, view=new)
         return new
 
+class Sprawdzone(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+
+    @discord.ui.button(label="Sprawdzone", style=discord.ButtonStyle.green)
+    async def sprawdzone(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.message.edit(content="~~" + interaction.message.content + "~~", view=None)
+
+
 class Mod_stats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -65,7 +74,7 @@ class Mod_stats(commands.Cog):
     async def on_message(self, message: Message):
         if not message.author.bot and any(bm in message.content for bm in self.boost_messages):
             channel = message.guild.get_channel(1199455265234370640)
-            await channel.send(f'{message.author.mention} napisał na kanale {message.channel.mention} "{message.content}" {message.id}')
+            await channel.send(f'{message.author.mention} napisał na kanale {message.channel.mention} "{message.content}" {message.id}', view=Sprawdzone())
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
