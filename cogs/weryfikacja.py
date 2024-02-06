@@ -1,6 +1,5 @@
 from pulsefire.clients import RiotAPIClient
 import asyncio
-from pulsefire.middlewares import rate_limiter_middleware
 import discord
 from discord.utils import get
 from discord.ext import commands, tasks
