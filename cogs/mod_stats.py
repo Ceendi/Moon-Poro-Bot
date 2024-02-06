@@ -57,7 +57,7 @@ class Paginator(discord.ui.View):
 
 class Sprawdzone(discord.ui.View):
     def __init__(self):
-        super().__init__()
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="Sprawdzone", style=discord.ButtonStyle.green)
     async def sprawdzone(self, interaction: discord.Interaction, button: discord.ui.Button):
