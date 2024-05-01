@@ -144,6 +144,8 @@ class WeryfikacjaCog(commands.Cog):
         async with client:
             for data in datas:
                 member: discord.Member = guild.get_member(data["id"])
+                if not member:
+                    continue
                 old_user_roles = member.roles
                 user_roles = member.roles
                 
