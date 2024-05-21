@@ -44,6 +44,14 @@ class Bot(commands.Bot):
             await member.ban(reason="Multikonto")
             channel = member.guild.get_channel(config.komendy_botowe_channel_id)
             await channel.send(f"Zbanowano {member.mention} za multikonto!")
+        
+    async def on_member_remove(self, member: discord.Member):
+        channel = member.guild.get_channel(config.komendy_botowe_channel_id)
+        await channel.send(f"{member.mention} wyszedł!")
+
+    async def on_member_ban(self, guild: discord.Guild, member: discord.Member):
+        channel = member.guild.get_channel(config.komendy_botowe_channel_id)
+        await channel.send(f"{member.mention} zbanowany!")
 
 """ERROR HANDLER"""
 logger = logging.getLogger('discord')
