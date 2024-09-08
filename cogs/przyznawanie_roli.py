@@ -281,6 +281,19 @@ class Przyznawanie_Roli(commands.Cog):
         bot.add_view(Not_lol())
         bot.add_view(WerPrzycisk(self.bot))
 
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        if "Zweryfikowany" in str(before.roles) and "Zweryfikowany" in str(after.roles):
+            new_role = next((role for role in after.roles if role not in before.roles), None)
+            old_role = next((role for role in before.roles if role not in after.roles), None)
+            if str(new_role) in config.lol_ranks and str(old_role) in config.lol_ranks:
+                await after.remove_roles(new_role)
+                await after.add_roles(old_role)
+                try:
+                    await after.send("Posiadasz rolę **Zweryfikowany**, która automatycznie aktualizuje Ci rolę co 24h! Jeśli chcesz zmienić konto to użyj komendy /usun_weryfikacje.")
+                except:
+                    pass
+
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
     @app_commands.command(name="przyznawanie_roli", description="Wysyła przyciski do przyznawania roli.")
