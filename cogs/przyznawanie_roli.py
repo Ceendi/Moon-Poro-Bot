@@ -285,14 +285,14 @@ class Przyznawanie_Roli(commands.Cog):
     async def on_member_update(self, before, after):
         if "Zweryfikowany" in str(before.roles) and "Zweryfikowany" in str(after.roles):
             new_role = next((role for role in after.roles if role not in before.roles), None)
-            old_role = next((role for role in before.roles if role not in after.roles), None)
-            if str(new_role) in config.lol_ranks and str(old_role) in config.lol_ranks:
-                await after.remove_roles(new_role)
-                await after.add_roles(old_role)
-                try:
-                    await after.send("Posiadasz rolę **Zweryfikowany**, która automatycznie aktualizuje Ci rolę co 24h! Jeśli chcesz zmienić konto to użyj komendy /usun_weryfikacje.")
-                except:
-                    pass
+            if str(new_role) in config.lol_ranks:
+                count = sum(1 for role in after.roles if role in config.lol_ranks)
+                if count > 1:
+                    await after.remove_roles(new_role)
+                    try:
+                        await after.send("Posiadasz rolę **Zweryfikowany**, która automatycznie aktualizuje Ci rolę co 24h! Jeśli chcesz zmienić konto to użyj komendy /usun_weryfikacje.")
+                    except:
+                        pass
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id = config.guild_id))
