@@ -108,6 +108,19 @@ class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
+
+
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
+        if entry.action == discord.AuditLogAction.member_role_update:
+            if "Zweryfikowany" in str(entry.target.roles):
+                if entry.target == entry.user:
+                    roles = entry.target.roles
+                    roles.remove(entry.after.roles[0])
+                    roles.append(entry.before.roles[0])
+                    await entry.user.edit(roles=roles)
+                    print("Fixed 2 roles on verified user.")
+
     
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -172,6 +185,8 @@ class WeryfikacjaCog(commands.Cog):
                     discord_new_rank = get(member.guild.roles, name='GrandMaster')
                 else:
                     discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
+
+                self.ranks[member.id] = discord_new_rank
 
                 user_roles.append(discord_new_rank)
 
