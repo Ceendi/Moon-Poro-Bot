@@ -34,7 +34,7 @@ class Zweryfikuj(discord.ui.View):
         if summoner['profileIconId'] == self.icon_id:
             if has_rank_roles(interaction.user):
                 for role in interaction.user.roles:
-                    if str(role) in lol_ranks:
+                    if str(role) in lol_ranks or str(role) == "Nie posiadam konta w lolu":
                         await interaction.user.remove_roles(role)
             lol_rank = 'UNRANKED'
             for league in leagues:
@@ -113,13 +113,22 @@ class WeryfikacjaCog(commands.Cog):
     @commands.Cog.listener()
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
         if entry.action == discord.AuditLogAction.member_role_update:
-            if "Zweryfikowany" in str(entry.target.roles):
+            if "Zweryfikowany" in str(entry.target.roles) and "Zweryfikowany" in str(entry.user.roles):
                 if entry.target == entry.user:
+                    added_role = None
+                    removed_role = None
                     roles = entry.target.roles
-                    roles.remove(entry.after.roles[0])
-                    roles.append(entry.before.roles[0])
-                    await entry.user.edit(roles=roles)
-                    print("Fixed 2 roles on verified user.")
+                    if len(entry.after.roles) == 1:
+                        added_role = entry.after.roles[0]
+                    if len(entry.before.roles) == 1:
+                        removed_role = entry.before.roles[0]
+
+                    if str(added_role) in lol_ranks:
+                        roles.remove(added_role)
+                        if removed_role:
+                            roles.append(removed_role)
+                        await entry.user.edit(roles=roles)
+                        print("Fixed 2 roles on verified user.")
 
     
     @commands.Cog.listener()
