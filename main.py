@@ -85,6 +85,7 @@ intents.messages = True
 intents.emojis = True
 intents.members = True
 intents.guilds = True
+intents.moderation = True
 bot = Bot(intents)
 
 
