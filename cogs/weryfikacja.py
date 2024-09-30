@@ -186,8 +186,6 @@ class WeryfikacjaCog(commands.Cog):
                 else:
                     discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
-                self.ranks[member.id] = discord_new_rank
-
                 user_roles.append(discord_new_rank)
 
                 if old_user_roles != user_roles:
