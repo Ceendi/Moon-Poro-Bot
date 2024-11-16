@@ -251,7 +251,7 @@ class WerPrzycisk(discord.ui.View):
     def __init__(self, bot):
         super().__init__(timeout=None)
         self.value = 0
-        self.cd = commands.CooldownMapping.from_cooldown(1.0, 150.0, key)
+        self.cd = commands.CooldownMapping.from_cooldown(1.0, 30.0, key)
         self.bot = bot
 
     @discord.ui.button(label="Weryfikacja", style=discord.ButtonStyle.red, custom_id="weryfikacja")
