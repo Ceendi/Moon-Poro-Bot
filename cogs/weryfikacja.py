@@ -188,7 +188,7 @@ class WeryfikacjaCog(commands.Cog):
 
                 if not data["puuid"]:
                     return
-                leagues = await client.get_lol_league_v4_entries_by_puuid(region=data["server"], summoner_id=data["puuid"])
+                leagues = await client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
                 #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
                 lol_rank = 'UNRANKED'
