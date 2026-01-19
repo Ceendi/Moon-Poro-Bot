@@ -240,6 +240,29 @@ class Role(commands.Cog):
         else:
             await interaction.response.send_message("Wyłączono sprawdzanie multikont!", ephemeral=True)
 
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="napraw_weryfikacje", description="Naprawia role osób z niepoprawną weryfikacją.")
+    async def napraw_weryfikacje(self, interaction: discord.Interaction):
+        data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani")
+        ids = []
+        for row in data:
+            ids.append(row['id'])
+        for member in interaction.guild.members:
+            if any(role.name == "Zweryfikowany" for role in member.roles) and member.id not in ids:
+                new_roles = [role for role in member.roles if role.name != "Zweryfikowany" and role.name not in config.lol_ranks]
+                unranked_role = get(interaction.guild.roles, name="Unranked")
+                if unranked_role and unranked_role not in new_roles:
+                    new_roles.append(unranked_role)
+                await member.edit(roles=new_roles)
+        await interaction.response.send_message("Skończono naprawianie weryfikacji.")
+
+    @napraw_weryfikacje.error
+    async def napraw_weryfikacjeError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingAnyRole):
+           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
+        else:
+            raise error
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Role(bot), guild = discord.Object(id = config.guild_id))

@@ -276,5 +276,41 @@ class WeryfikacjaCog(commands.Cog):
         else:
             await interaction.followup.send(f"Ten nick nie jest na serwerze jako zweryfikowany.", ephemeral=True)
 
+    @app_commands.checks.has_any_role("Administracja")
+    @app_commands.guilds(discord.Object(id = config.guild_id))
+    @app_commands.command(name="show_wer_user", description="Pokazuje Discord usera na podstawie nicku i tagu z lola.")
+    @app_commands.describe(
+        nick = "Nick z lola",
+        tag = "Tag z lola"
+    )
+    @app_commands.choices(
+        server = [
+            Choice(name = "EUNE", value = 'EUN1'),
+            Choice(name = "EUW", value = 'EUW1'),
+            Choice(name = "NA", value = 'NA1'),
+        ]
+    )
+    async def show_wer_user(self, interaction: discord.Interaction, nick: str, tag: str, server: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
+        tag = tag.replace('#', '')
+        async with client:
+            try:
+                summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
+                puuid = summoner["puuid"]
+            except Exception as err:
+                if hasattr(err, 'status') and err.status == 404:
+                    await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"Wystąpił błąd podczas komunikacji z API Riot!", ephemeral=True)
+                return
+
+        data = await self.bot.pool.fetch("SELECT id FROM zweryfikowani WHERE puuid=$1;", puuid)
+        if data:
+            user_id = data[0]['id']
+            await interaction.followup.send(f"Użytkownik **{nick}#{tag}** to <@{user_id}> (ID: {user_id})", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Ten nick nie jest przypisany do żadnego zweryfikowanego użytkownika.", ephemeral=True)
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(WeryfikacjaCog(bot), guild = discord.Object(id = config.guild_id))
