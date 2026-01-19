@@ -4,6 +4,7 @@ from discord.ext import commands
 import config
 import asyncpg
 import asyncio
+from pulsefire.clients import RiotAPIClient
 import datetime
 import logging.handlers
 
@@ -90,8 +91,9 @@ bot = Bot(intents)
 
 
 async def main():
-    async with bot, asyncpg.create_pool(**config.POSTGRES_INFO) as pool:
+    async with bot, asyncpg.create_pool(**config.POSTGRES_INFO) as pool, RiotAPIClient(default_headers={"X-Riot-Token": config.riot_api_token}) as riot_client:
         bot.pool = pool
+        bot.riot_client = riot_client
         await bot.start(config.token)
 
 

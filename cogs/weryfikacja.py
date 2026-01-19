@@ -10,7 +10,6 @@ import config
 from config import lol_ranks
 from functions import has_rank_roles
 
-client = RiotAPIClient(default_headers={"X-Riot-Token": config.riot_api_token})
 
 class Zweryfikuj(discord.ui.View):
     def __init__(self, icon_id, nick, puuid, server, bot):
@@ -28,8 +27,8 @@ class Zweryfikuj(discord.ui.View):
         if "Zweryfikowany" in str(interaction.user.roles):
             await interaction.followup.send("Już jesteś zweryfikowany!", ephemeral=True)
             return
-        summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
-        leagues = await client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid)
+        summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
+        leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid)
         # leagues = await client.get_lol_league_v4_entries_by_summoner(region=self.server, summoner_id=summoner["id"])
         if summoner['profileIconId'] == self.icon_id:
             if has_rank_roles(interaction.user):
@@ -71,48 +70,42 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
     server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..', min_length=2, max_length=4)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return (str(self.server).lower() in ['eune', 'euw', 'na'])
+        return (str(self.server.value).lower() in ['eune', 'euw', 'na'])
 
     async def on_submit(self, interaction: discord.Interaction):
         servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
         api_servers = {'eune': 'europe', 'euw': 'europe', 'na': 'americas'}
-        self.server_translated = servers[str(self.server).lower()]
-        self.api_server = api_servers[str(self.server).lower()]
-        self.tag = str(self.tag).replace('#', '')
-        summoner = await client.get_account_v1_by_riot_id(game_name=self.game_name, tag_line=self.tag, region=self.api_server)
-        summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server_translated, puuid=summoner["puuid"])
+        self.server_translated = servers[str(self.server.value).lower()]
+        self.api_server = api_servers[str(self.server.value).lower()]
+        self.tag_str = str(self.tag.value).replace('#', '')
+        summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=self.game_name.value, tag_line=self.tag_str, region=self.api_server)
+        summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=self.server_translated, puuid=summoner["puuid"])
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE puuid = $1;", summoner['puuid'])
         if not data:
             random_icon_id = randrange(0, 28)
             while summoner['profileIconId'] == random_icon_id:
                 random_icon_id = randrange(0, 28)
             icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
-            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.game_name}#{self.tag}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
+            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.game_name.value}#{self.tag_str}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
             embed.set_image(url=icon_url)
-            view = Zweryfikuj(random_icon_id, str(self.game_name)+"#"+str(self.tag), summoner["puuid"], self.server_translated, self.bot)
+            view = Zweryfikuj(random_icon_id, str(self.game_name.value)+"#"+str(self.tag_str), summoner["puuid"], self.server_translated, self.bot)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.send_message("To konto w lolu już jest przypisane do innego użytkownika!", ephemeral=True)
 
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        if error.status == 404:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name}#{self.tag}**!", ephemeral=True)
+        if hasattr(error, 'status') and error.status == 404:
+            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name.value}#{self.tag.value}**!", ephemeral=True)
         else:
-            await interaction.response.send_message("Coś poszło nie tak, spróbuj ponownie później!", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Coś poszło nie tak, spróbuj ponownie później!", ephemeral=True)
             raise error
 
 class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
-
-    async def cog_load(self):
-        await client.__aenter__()
-
-    async def cog_unload(self):
-        await client.__aexit__(None, None, None)
-
 
     @commands.Cog.listener()
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
@@ -143,7 +136,7 @@ class WeryfikacjaCog(commands.Cog):
             lol_rank = 'UNRANKED'
             if not data[0]["puuid"]:
                 return
-            leagues = await client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"])
+            leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"])
             #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data[0]["server"], summoner_id=data[0]["lol_id"])
             for league in leagues:
                 if league["queueType"] == 'RANKED_SOLO_5x5':
@@ -190,24 +183,24 @@ class WeryfikacjaCog(commands.Cog):
 
             if not data["puuid"]:
                 return
-            leagues = await client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
+            leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
             #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
-        lol_rank = 'UNRANKED'
-        for league in leagues:
-            if league["queueType"] == 'RANKED_SOLO_5x5':
-                lol_rank = league["tier"]
-                break
-        if lol_rank == "GRANDMASTER":
-            discord_new_rank = get(member.guild.roles, name='GrandMaster')
-        else:
-            discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
+            lol_rank = 'UNRANKED'
+            for league in leagues:
+                if league["queueType"] == 'RANKED_SOLO_5x5':
+                    lol_rank = league["tier"]
+                    break
+            if lol_rank == "GRANDMASTER":
+                discord_new_rank = get(member.guild.roles, name='GrandMaster')
+            else:
+                discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
-        user_roles.append(discord_new_rank)
+            user_roles.append(discord_new_rank)
 
-        if old_user_roles != user_roles:
-            await member.edit(roles=user_roles)
-        await asyncio.sleep(0.4)
+            if old_user_roles != user_roles:
+                await member.edit(roles=user_roles)
+            await asyncio.sleep(0.4)
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
@@ -248,9 +241,9 @@ class WeryfikacjaCog(commands.Cog):
         api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
         tag = tag.replace('#', '')
         try:
-            summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
+            summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
             puuid = summoner["puuid"]
-            summoner = await client.get_lol_summoner_v4_by_puuid(region=server, puuid=puuid)
+            summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=server, puuid=puuid)
         except Exception as err:
             if hasattr(err, 'status') and err.status == 404:
                 await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
@@ -296,7 +289,7 @@ class WeryfikacjaCog(commands.Cog):
         api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
         tag = tag.replace('#', '')
         try:
-            summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
+            summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
             puuid = summoner["puuid"]
         except Exception as err:
             if hasattr(err, 'status') and err.status == 404:
