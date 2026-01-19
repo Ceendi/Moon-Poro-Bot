@@ -28,10 +28,9 @@ class Zweryfikuj(discord.ui.View):
         if "Zweryfikowany" in str(interaction.user.roles):
             await interaction.followup.send("Już jesteś zweryfikowany!", ephemeral=True)
             return
-        async with client:
-            summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
-            leagues = await client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid)
-            # leagues = await client.get_lol_league_v4_entries_by_summoner(region=self.server, summoner_id=summoner["id"])
+        summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
+        leagues = await client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid)
+        # leagues = await client.get_lol_league_v4_entries_by_summoner(region=self.server, summoner_id=summoner["id"])
         if summoner['profileIconId'] == self.icon_id:
             if has_rank_roles(interaction.user):
                 for role in interaction.user.roles:
@@ -80,9 +79,8 @@ class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
         self.server_translated = servers[str(self.server).lower()]
         self.api_server = api_servers[str(self.server).lower()]
         self.tag = str(self.tag).replace('#', '')
-        async with client:
-            summoner = await client.get_account_v1_by_riot_id(game_name=self.game_name, tag_line=self.tag, region=self.api_server)
-            summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server_translated, puuid=summoner["puuid"])
+        summoner = await client.get_account_v1_by_riot_id(game_name=self.game_name, tag_line=self.tag, region=self.api_server)
+        summoner = await client.get_lol_summoner_v4_by_puuid(region=self.server_translated, puuid=summoner["puuid"])
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE puuid = $1;", summoner['puuid'])
         if not data:
             random_icon_id = randrange(0, 28)
@@ -108,6 +106,12 @@ class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
+
+    async def cog_load(self):
+        await client.__aenter__()
+
+    async def cog_unload(self):
+        await client.__aexit__(None, None, None)
 
 
     @commands.Cog.listener()
@@ -137,11 +141,10 @@ class WeryfikacjaCog(commands.Cog):
         server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
         if data:
             lol_rank = 'UNRANKED'
-            async with client:
-                if not data[0]["puuid"]:
-                    return
-                leagues = await client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"])
-                #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data[0]["server"], summoner_id=data[0]["lol_id"])
+            if not data[0]["puuid"]:
+                return
+            leagues = await client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"])
+            #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data[0]["server"], summoner_id=data[0]["lol_id"])
             for league in leagues:
                 if league["queueType"] == 'RANKED_SOLO_5x5':
                     lol_rank = league["tier"]
@@ -166,46 +169,45 @@ class WeryfikacjaCog(commands.Cog):
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
         datas = [data for data in datas if guild.get_member(data["id"])]
 
-        async with client:
-            for data in datas:
-                member: discord.Member = guild.get_member(data["id"])
-                if not member:
-                    continue
-                old_user_roles = member.roles
-                user_roles = member.roles
-                
-                if "Zweryfikowany" not in str(member.roles):
-                    zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
-                    user_roles.append(zweryfikowany)
-                
-                if "Użytkownik" not in str(member.roles):
-                    uzytkownik = get(member.guild.roles, name="Użytkownik")
-                    user_roles.append(uzytkownik)
+        for data in datas:
+            member: discord.Member = guild.get_member(data["id"])
+            if not member:
+                continue
+            old_user_roles = member.roles
+            user_roles = member.roles
+            
+            if "Zweryfikowany" not in str(member.roles):
+                zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
+                user_roles.append(zweryfikowany)
+            
+            if "Użytkownik" not in str(member.roles):
+                uzytkownik = get(member.guild.roles, name="Użytkownik")
+                user_roles.append(uzytkownik)
 
-                for old_role in member.roles:
-                    if str(old_role) in lol_ranks:
-                        user_roles.remove(old_role)
+            for old_role in member.roles:
+                if str(old_role) in lol_ranks:
+                    user_roles.remove(old_role)
 
-                if not data["puuid"]:
-                    return
-                leagues = await client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
-                #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
+            if not data["puuid"]:
+                return
+            leagues = await client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
+            #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
 
-                lol_rank = 'UNRANKED'
-                for league in leagues:
-                    if league["queueType"] == 'RANKED_SOLO_5x5':
-                        lol_rank = league["tier"]
-                        break
-                if lol_rank == "GRANDMASTER":
-                    discord_new_rank = get(member.guild.roles, name='GrandMaster')
-                else:
-                    discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
+        lol_rank = 'UNRANKED'
+        for league in leagues:
+            if league["queueType"] == 'RANKED_SOLO_5x5':
+                lol_rank = league["tier"]
+                break
+        if lol_rank == "GRANDMASTER":
+            discord_new_rank = get(member.guild.roles, name='GrandMaster')
+        else:
+            discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
 
-                user_roles.append(discord_new_rank)
+        user_roles.append(discord_new_rank)
 
-                if old_user_roles != user_roles:
-                    await member.edit(roles=user_roles)
-                await asyncio.sleep(0.4)
+        if old_user_roles != user_roles:
+            await member.edit(roles=user_roles)
+        await asyncio.sleep(0.4)
 
     @sprawdz_zweryfikowanych.before_loop
     async def beofre_sprawdz_zweryfikowanych(self):
@@ -245,18 +247,17 @@ class WeryfikacjaCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
         tag = tag.replace('#', '')
-        async with client:
-            try:
-                summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
-                puuid = summoner["puuid"]
-                summoner = await client.get_lol_summoner_v4_by_puuid(region=server, puuid=puuid)
-            except Exception as err:
-                if err.status == 404:
-                    await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
-                    return
-                else:
-                    await interaction.followup.send(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
-                    return
+        try:
+            summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
+            puuid = summoner["puuid"]
+            summoner = await client.get_lol_summoner_v4_by_puuid(region=server, puuid=puuid)
+        except Exception as err:
+            if hasattr(err, 'status') and err.status == 404:
+                await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
+                return
+            else:
+                await interaction.followup.send(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
+                return
         data = await self.bot.pool.fetch("SELECT id, message_id FROM zweryfikowani WHERE puuid=$1;", summoner["puuid"])
         if data:
             data = data[0]
@@ -294,16 +295,15 @@ class WeryfikacjaCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
         tag = tag.replace('#', '')
-        async with client:
-            try:
-                summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
-                puuid = summoner["puuid"]
-            except Exception as err:
-                if hasattr(err, 'status') and err.status == 404:
-                    await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
-                else:
-                    await interaction.followup.send(f"Wystąpił błąd podczas komunikacji z API Riot!", ephemeral=True)
-                return
+        try:
+            summoner = await client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
+            puuid = summoner["puuid"]
+        except Exception as err:
+            if hasattr(err, 'status') and err.status == 404:
+                await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
+            else:
+                await interaction.followup.send(f"Wystąpił błąd podczas komunikacji z API Riot!", ephemeral=True)
+            return
 
         data = await self.bot.pool.fetch("SELECT id FROM zweryfikowani WHERE puuid=$1;", puuid)
         if data:

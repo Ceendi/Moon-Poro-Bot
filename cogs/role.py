@@ -244,6 +244,7 @@ class Role(commands.Cog):
     @app_commands.guilds(discord.Object(id=config.guild_id))
     @app_commands.command(name="napraw_weryfikacje", description="Naprawia role osób z niepoprawną weryfikacją.")
     async def napraw_weryfikacje(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani")
         ids = []
         for row in data:
@@ -255,7 +256,7 @@ class Role(commands.Cog):
                 if unranked_role and unranked_role not in new_roles:
                     new_roles.append(unranked_role)
                 await member.edit(roles=new_roles)
-        await interaction.response.send_message("Skończono naprawianie weryfikacji.")
+        await interaction.followup.send("Skończono naprawianie weryfikacji.")
 
     @napraw_weryfikacje.error
     async def napraw_weryfikacjeError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
