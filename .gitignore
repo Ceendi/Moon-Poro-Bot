@@ -1,4 +1,12 @@
-config.py
+# Secrets
+.env
+
+# Python
 __pycache__/
+.venv/
+
+# IDE
 .DS_Store
+
+# Logs
 discord.log

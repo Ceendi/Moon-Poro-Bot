@@ -1,309 +1,343 @@
-from pulsefire.clients import RiotAPIClient
 import asyncio
+import logging
+from random import randrange
+
 import discord
-from discord.utils import get
-from discord.ext import commands, tasks
 from discord import app_commands
 from discord.app_commands import Choice
-from random import randrange
+from discord.ext import commands, tasks
+from discord.utils import get
+
 import config
-from config import lol_ranks
-from functions import has_rank_roles
+from functions import has_rank_roles, get_member_rank_roles
+from utils.constants import (
+    SERVER_TRANSLATION, SERVERS, API_SERVERS,
+    ROLE_ZWERYFIKOWANY, ROLE_UZYTKOWNIK,
+    get_profile_icon_url
+)
+from utils.riot import get_rank_from_leagues, get_discord_rank_role
+from utils.helpers import has_role, safe_api_call
+from utils.errors import safe_send
+
+logger = logging.getLogger('discord.weryfikacja')
 
 
-class Zweryfikuj(discord.ui.View):
-    def __init__(self, icon_id, nick, puuid, server, bot):
-        super().__init__(timeout=120)
+class ZweryfikujView(discord.ui.View):
+    def __init__(self, icon_id: int, nick: str, puuid: str, server: str, bot: commands.Bot):
+        super().__init__(timeout=config.VERIFICATION_TIMEOUT)
         self.icon_id = icon_id
         self.nick = nick
         self.puuid = puuid
         self.server = server
         self.bot = bot
+        self.message: discord.Message = None
     
-    @discord.ui.button(label="\u200b", style=discord.ButtonStyle.green)
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                embed = discord.Embed(
+                    title="⏰ Czas minął!",
+                    description="Weryfikacja wygasła. Kliknij przycisk ponownie, aby rozpocząć od nowa.",
+                    colour=discord.Colour.orange()
+                )
+                await self.message.edit(embed=embed, view=self)
+            except discord.NotFound:
+                pass
+    
+    @discord.ui.button(label="✓ Zweryfikuj", style=discord.ButtonStyle.green)
     async def zweryfikuj(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
-        if "Zweryfikowany" in str(interaction.user.roles):
+        
+        if has_role(interaction.user, ROLE_ZWERYFIKOWANY):
             await interaction.followup.send("Już jesteś zweryfikowany!", ephemeral=True)
             return
-        summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
-        leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid)
-        # leagues = await client.get_lol_league_v4_entries_by_summoner(region=self.server, summoner_id=summoner["id"])
-        if summoner['profileIconId'] == self.icon_id:
-            if has_rank_roles(interaction.user):
-                for role in interaction.user.roles:
-                    if str(role) in lol_ranks or str(role) == "Nie posiadam konta w lolu":
-                        await interaction.user.remove_roles(role)
-            lol_rank = 'UNRANKED'
-            for league in leagues:
-                if league["queueType"] == 'RANKED_SOLO_5x5':
-                    lol_rank = league["tier"]
-                    break
-            if lol_rank == "GRANDMASTER":
-                discord_new_rank = get(interaction.guild.roles, name='GrandMaster')
-            else:
-                discord_new_rank = get(interaction.guild.roles, name=lol_rank.capitalize())
+        
+        summoner = await safe_api_call(
+            self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=self.server, puuid=self.puuid)
+        )
+        if not summoner:
+            await interaction.followup.send("❌ Wystąpił błąd podczas komunikacji z API Riot. Spróbuj ponownie.", ephemeral=True)
+            return
+        
+        if summoner['profileIconId'] != self.icon_id:
+            await interaction.followup.send("❌ Nie udało się przejść weryfikacji. Upewnij się, że ikonka się zgadza.", ephemeral=True)
+            return
+        
+        leagues = await safe_api_call(
+            self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=self.server, puuid=self.puuid),
+            default=[]
+        )
+        
+        for role in get_member_rank_roles(interaction.user):
+            await interaction.user.remove_roles(role)
+        
+        rank = get_rank_from_leagues(leagues)
+        discord_rank = get_discord_rank_role(interaction.guild, rank)
+        
+        zweryfikowany = get(interaction.guild.roles, name=ROLE_ZWERYFIKOWANY)
+        server_role = get(interaction.guild.roles, name=SERVER_TRANSLATION[self.server])
+        uzytkownik_role = get(interaction.guild.roles, name=ROLE_UZYTKOWNIK)
+        
+        channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
+        embed = discord.Embed(colour=discord.Colour.green())
+        embed.add_field(name="Nick", value=interaction.user.mention)
+        embed.add_field(name="Serwer", value=SERVER_TRANSLATION[self.server])
+        message = await channel.send(embed=embed)
+        
+        await self.bot.pool.execute(
+            "INSERT INTO zweryfikowani(id, message_id, server, puuid) VALUES($1, $2, $3, $4);",
+            interaction.user.id, message.id, self.server, summoner["puuid"]
+        )
+        
+        roles_to_add = [r for r in [discord_rank, server_role, uzytkownik_role, zweryfikowany] if r]
+        await interaction.user.add_roles(*roles_to_add)
+        
+        self.stop()
+        await interaction.followup.send("✅ Udało Ci się przejść weryfikację!", ephemeral=True)
 
-            embed = discord.Embed(colour=discord.Colour.green())
-            embed.add_field(name="Nick", value=interaction.user.mention)
-            embed.add_field(name="Serwer", value=self.server)
-            channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
-            message = await channel.send(embed=embed)
-            await self.bot.pool.execute("INSERT INTO zweryfikowani(id, message_id, server, puuid) VALUES($1, $2, $3, $4);", interaction.user.id, message.id, self.server, summoner["puuid"])
-            zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
-            server_role = get(interaction.guild.roles, name=server_translation[self.server])
-            uzytkownik_role = get(interaction.guild.roles, name="Użytkownik")
-            await interaction.user.add_roles(*[discord_new_rank, server_role, uzytkownik_role, zweryfikowany])
-            await interaction.followup.send("Udało Ci się przejść weryfikację!", ephemeral=True)
-        else:
-            await interaction.followup.send("Nie udało Ci się przejść weryfikacji, upewnij się, że nick oraz ikonka się zgadzają i spróbuj ponownie.", ephemeral=True)
 
-
-class Weryfikacja(discord.ui.Modal, title="Weryfikacja"):
-    def __init__(self, bot):
-        super().__init__(timeout=120)
+class WeryfikacjaModal(discord.ui.Modal, title="Weryfikacja"):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=config.VERIFICATION_TIMEOUT)
         self.bot = bot
 
     game_name = discord.ui.TextInput(label='Nick', required=True, placeholder='Twój nick..', min_length=3, max_length=16)
     tag = discord.ui.TextInput(label='TAG', required=True, placeholder='Twój tag..', min_length=3, max_length=6)
-    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='Serwer twojego konta(EUNE, EUW, NA)..', min_length=2, max_length=4)
+    server = discord.ui.TextInput(label='Server', required=True, default='EUNE', placeholder='EUNE, EUW lub NA', min_length=2, max_length=4)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return (str(self.server.value).lower() in ['eune', 'euw', 'na'])
+        server_lower = str(self.server.value).lower()
+        if server_lower not in SERVERS:
+            await interaction.response.send_message("❌ Nieprawidłowy serwer! Dostępne: EUNE, EUW, NA", ephemeral=True)
+            return False
+        return True
 
     async def on_submit(self, interaction: discord.Interaction):
-        servers = {'eune': 'EUN1', 'euw': 'EUW1', 'na': 'NA1'}
-        api_servers = {'eune': 'europe', 'euw': 'europe', 'na': 'americas'}
-        self.server_translated = servers[str(self.server.value).lower()]
-        self.api_server = api_servers[str(self.server.value).lower()]
-        self.tag_str = str(self.tag.value).replace('#', '')
-        summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=self.game_name.value, tag_line=self.tag_str, region=self.api_server)
-        summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=self.server_translated, puuid=summoner["puuid"])
+        server_lower = str(self.server.value).lower()
+        server_code = SERVERS[server_lower]
+        api_region = API_SERVERS[server_lower]
+        tag_clean = str(self.tag.value).replace('#', '')
+        
+        account = await safe_api_call(
+            self.bot.riot_client.get_account_v1_by_riot_id(game_name=self.game_name.value, tag_line=tag_clean, region=api_region)
+        )
+        if not account:
+            await interaction.response.send_message(f"❌ Nie znaleziono osoby o nicku **{self.game_name.value}#{tag_clean}**!", ephemeral=True)
+            return
+        
+        summoner = await safe_api_call(
+            self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=server_code, puuid=account["puuid"])
+        )
+        if not summoner:
+            await interaction.response.send_message("❌ Wystąpił błąd podczas komunikacji z API Riot.", ephemeral=True)
+            return
+        
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE puuid = $1;", summoner['puuid'])
-        if not data:
+        if data:
+            await interaction.response.send_message("❌ To konto w LoL jest już przypisane do innego użytkownika!", ephemeral=True)
+            return
+        
+        random_icon_id = randrange(0, 28)
+        while summoner['profileIconId'] == random_icon_id:
             random_icon_id = randrange(0, 28)
-            while summoner['profileIconId'] == random_icon_id:
-                random_icon_id = randrange(0, 28)
-            icon_url = f'https://raw.communitydragon.org/12.13/game/assets/ux/summonericons/profileicon{random_icon_id}.png'
-            embed = discord.Embed(title='Weryfikacja', description=f'Na swoim koncie w lolu o nicku **{self.game_name.value}#{self.tag_str}** ustaw ikonkę, która pojawiła się niżej i gdy już to zrobisz, naciśnij na zielony przycisk na dole, żeby zweryfikować konto. Po 5 minutach przycisk przestanie działać!')
-            embed.set_image(url=icon_url)
-            view = Zweryfikuj(random_icon_id, str(self.game_name.value)+"#"+str(self.tag_str), summoner["puuid"], self.server_translated, self.bot)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        else:
-            await interaction.response.send_message("To konto w lolu już jest przypisane do innego użytkownika!", ephemeral=True)
-
+        
+        embed = discord.Embed(
+            title='🔐 Weryfikacja',
+            description=f'Na swoim koncie **{self.game_name.value}#{tag_clean}** ustaw ikonkę widoczną poniżej, a następnie kliknij zielony przycisk.\n\n⏰ Masz {config.VERIFICATION_TIMEOUT // 60} minuty!'
+        )
+        embed.set_image(url=get_profile_icon_url(random_icon_id))
+        
+        view = ZweryfikujView(random_icon_id, f"{self.game_name.value}#{tag_clean}", summoner["puuid"], server_code, self.bot)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        if hasattr(error, 'status') and error.status == 404:
-            await interaction.response.send_message(f"Nie znaleziono osoby o nicku **{self.game_name.value}#{self.tag.value}**!", ephemeral=True)
-        else:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Coś poszło nie tak, spróbuj ponownie później!", ephemeral=True)
-            raise error
+        logger.error(f"Modal error: {error}")
+        await safe_send(interaction, "❌ Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.")
+
 
 class WeryfikacjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sprawdz_zweryfikowanych.start()
 
+    def cog_unload(self):
+        self.sprawdz_zweryfikowanych.cancel()
+
     @commands.Cog.listener()
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
-        if entry.action == discord.AuditLogAction.member_role_update:
-            if "Zweryfikowany" in str(entry.target.roles) and "Zweryfikowany" in str(entry.user.roles):
-                if entry.target == entry.user:
-                    added_role = None
-                    removed_role = None
-                    roles = entry.target.roles
-                    if len(entry.after.roles) == 1:
-                        added_role = entry.after.roles[0]
-                    if len(entry.before.roles) == 1:
-                        removed_role = entry.before.roles[0]
-
-                    if str(added_role) in lol_ranks:
-                        roles.remove(added_role)
-                        if removed_role:
-                            roles.append(removed_role)
-                        await entry.user.edit(roles=roles)
-                        print("Fixed 2 roles on verified user.")
-
+        if entry.action != discord.AuditLogAction.member_role_update:
+            return
+        if entry.target != entry.user:
+            return
+        if not has_role(entry.target, ROLE_ZWERYFIKOWANY):
+            return
+        if len(entry.after.roles) == 1:
+            added_role = entry.after.roles[0]
+            if added_role.name in config.lol_ranks:
+                roles = list(entry.target.roles)
+                roles.remove(added_role)
+                if len(entry.before.roles) == 1:
+                    roles.append(entry.before.roles[0])
+                await entry.user.edit(roles=roles)
     
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", member.id)
-        server_translation = {'EUN1': 'EUNE', 'EUW1': 'EUW', 'NA1': 'NA'}
-        if data:
-            lol_rank = 'UNRANKED'
-            if not data[0]["puuid"]:
-                return
-            leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"])
-            #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data[0]["server"], summoner_id=data[0]["lol_id"])
-            for league in leagues:
-                if league["queueType"] == 'RANKED_SOLO_5x5':
-                    lol_rank = league["tier"]
-                    break
-            if lol_rank == "GRANDMASTER":
-                discord_new_rank = get(member.guild.roles, name='GrandMaster')
-            else:
-                discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
-
-            zweryfikowany = get(member.guild.roles, name='Zweryfikowany')
-            uzytkownik = get(member.guild.roles, name='Użytkownik')
-            server = get(member.guild.roles, name=server_translation[data[0]['server']])
-            await member.add_roles(*[server, uzytkownik, zweryfikowany, discord_new_rank])
-            try:
-                await member.send("Byłeś zweryfikowany, więc bot automatycznie przyznał Ci role, jeśli chcesz usunąć weryfikację użyj komendy /usun_weryfikacje.")
-            except discord.errors.Forbidden:
-                pass
+        if not data or not data[0]["puuid"]:
+            return
+        
+        leagues = await safe_api_call(
+            self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data[0]["server"], puuid=data[0]["puuid"]),
+            default=[]
+        )
+        
+        rank = get_rank_from_leagues(leagues)
+        discord_rank = get_discord_rank_role(member.guild, rank)
+        
+        zweryfikowany = get(member.guild.roles, name=ROLE_ZWERYFIKOWANY)
+        uzytkownik = get(member.guild.roles, name=ROLE_UZYTKOWNIK)
+        server = get(member.guild.roles, name=SERVER_TRANSLATION[data[0]['server']])
+        
+        roles_to_add = [r for r in [server, uzytkownik, zweryfikowany, discord_rank] if r]
+        await member.add_roles(*roles_to_add)
+        
+        try:
+            await member.send("Byłeś zweryfikowany, więc bot automatycznie przyznał Ci role. Jeśli chcesz usunąć weryfikację, użyj komendy `/usun_weryfikacje`.")
+        except discord.errors.Forbidden:
+            pass
 
     @tasks.loop(hours=24.0)
     async def sprawdz_zweryfikowanych(self):
         guild = self.bot.get_guild(config.guild_id)
+        if not guild:
+            return
+            
         datas = await self.bot.pool.fetch("SELECT * FROM zweryfikowani;")
-        datas = [data for data in datas if guild.get_member(data["id"])]
-
+        
         for data in datas:
-            member: discord.Member = guild.get_member(data["id"])
-            if not member:
+            member = guild.get_member(data["id"])
+            if not member or not data["puuid"]:
                 continue
-            old_user_roles = member.roles
-            user_roles = member.roles
             
-            if "Zweryfikowany" not in str(member.roles):
-                zweryfikowany = get(member.guild.roles, name="Zweryfikowany")
-                user_roles.append(zweryfikowany)
+            leagues = await safe_api_call(
+                self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"]),
+                default=None
+            )
+            if leagues is None:
+                logger.warning(f"Failed to fetch leagues for {data['id']}")
+                continue
             
-            if "Użytkownik" not in str(member.roles):
-                uzytkownik = get(member.guild.roles, name="Użytkownik")
-                user_roles.append(uzytkownik)
-
-            for old_role in member.roles:
-                if str(old_role) in lol_ranks:
-                    user_roles.remove(old_role)
-
-            if not data["puuid"]:
-                return
-            leagues = await self.bot.riot_client.get_lol_league_v4_entries_by_puuid(region=data["server"], puuid=data["puuid"])
-            #leagues = await client.get_lol_league_v4_entries_by_summoner(region=data["server"], summoner_id=data["lol_id"])
-
-            lol_rank = 'UNRANKED'
-            for league in leagues:
-                if league["queueType"] == 'RANKED_SOLO_5x5':
-                    lol_rank = league["tier"]
-                    break
-            if lol_rank == "GRANDMASTER":
-                discord_new_rank = get(member.guild.roles, name='GrandMaster')
-            else:
-                discord_new_rank = get(member.guild.roles, name=lol_rank.capitalize())
-
-            user_roles.append(discord_new_rank)
-
-            if old_user_roles != user_roles:
-                await member.edit(roles=user_roles)
-            await asyncio.sleep(0.4)
+            current_roles = list(member.roles)
+            
+            zweryfikowany = get(guild.roles, name=ROLE_ZWERYFIKOWANY)
+            uzytkownik = get(guild.roles, name=ROLE_UZYTKOWNIK)
+            
+            if zweryfikowany and zweryfikowany not in current_roles:
+                current_roles.append(zweryfikowany)
+            if uzytkownik and uzytkownik not in current_roles:
+                current_roles.append(uzytkownik)
+            
+            current_roles = [r for r in current_roles if r.name not in config.lol_ranks]
+            
+            rank = get_rank_from_leagues(leagues)
+            discord_rank = get_discord_rank_role(guild, rank)
+            if discord_rank:
+                current_roles.append(discord_rank)
+            
+            if set(current_roles) != set(member.roles):
+                await member.edit(roles=current_roles)
+            
+            await asyncio.sleep(0.5)
 
     @sprawdz_zweryfikowanych.before_loop
-    async def beofre_sprawdz_zweryfikowanych(self):
+    async def before_sprawdz_zweryfikowanych(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="usun_weryfikacje", description="Usuwa ciebie z listy zweryfikowanych, pamiętaj że twoja rola już nie będzie odświeżana!")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="usun_weryfikacje", description="Usuwa ciebie z listy zweryfikowanych")
     async def usun_weryfikacje(self, interaction: discord.Interaction):
-        data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", interaction.user.id)
-        # if not data:
-        #     await interaction.response.send_message("Nie jesteś na liście zweryfikowanych!", ephemeral=True)
-        #     return
-        zweryfikowany = get(interaction.guild.roles, name="Zweryfikowany")
+        zweryfikowany = get(interaction.guild.roles, name=ROLE_ZWERYFIKOWANY)
         channel = interaction.guild.get_channel(config.zweryfikowani_channel_id)
+        
+        data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani WHERE id=$1;", interaction.user.id)
+        
         if data:
             message = channel.get_partial_message(data[0]['message_id'])
-            await message.delete()
+            try:
+                await message.delete()
+            except discord.NotFound:
+                pass
             await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE id=$1;", interaction.user.id)
-        await interaction.user.remove_roles(zweryfikowany)
-        await interaction.response.send_message("Pomyślnie usunięto Cię z listy zweryfikowanych!", ephemeral=True)
+        
+        if zweryfikowany:
+            await interaction.user.remove_roles(zweryfikowany)
+        
+        await interaction.response.send_message("✅ Pomyślnie usunięto Cię z listy zweryfikowanych!", ephemeral=True)
 
     @app_commands.checks.has_any_role("Administracja")
-    @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="usun_wer_nick", description="Usuwa dany nick z listy zweryfikowanych!")
-    @app_commands.describe(
-        nick = "Nick, jak nick to nazwa#123 to wpisujesz nazwa",
-        tag = "Tag, jak nick to nazwa#123 to wpisujesz 123"
-    )
-    @app_commands.choices(
-    server = [
-        Choice(name = "EUNE", value = 'EUN1'),
-        Choice(name = "EUW", value = 'EUW1'),
-        Choice(name = "NA", value = 'NA1'),
-    ]
-    )
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="usun_wer_nick", description="Usuwa dany nick z listy zweryfikowanych")
+    @app_commands.describe(nick="Nick w grze (bez tagu)", tag="Tag (np. EUW)", server="Serwer konta")
+    @app_commands.choices(server=[Choice(name="EUNE", value='EUN1'), Choice(name="EUW", value='EUW1'), Choice(name="NA", value='NA1')])
     async def usun_wer_nick(self, interaction: discord.Interaction, nick: str, tag: str, server: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
-        tag = tag.replace('#', '')
+        
+        tag_clean = tag.replace('#', '')
+        account = await safe_api_call(
+            self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag_clean, region=API_SERVERS[server])
+        )
+        if not account:
+            await interaction.followup.send(f"❌ Nie znaleziono osoby o nicku **{nick}#{tag_clean}**!", ephemeral=True)
+            return
+        
+        data = await self.bot.pool.fetch("SELECT id, message_id FROM zweryfikowani WHERE puuid=$1;", account["puuid"])
+        if not data:
+            await interaction.followup.send("❌ Ten nick nie jest przypisany jako zweryfikowany.", ephemeral=True)
+            return
+        
+        guild = self.bot.get_guild(config.guild_id)
+        channel = guild.get_channel(config.zweryfikowani_channel_id)
+        
+        member = guild.get_member(data[0]['id'])
+        if member:
+            zweryfikowany = get(guild.roles, name=ROLE_ZWERYFIKOWANY)
+            if zweryfikowany and zweryfikowany in member.roles:
+                await member.remove_roles(zweryfikowany)
+        
         try:
-            summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
-            puuid = summoner["puuid"]
-            summoner = await self.bot.riot_client.get_lol_summoner_v4_by_puuid(region=server, puuid=puuid)
-        except Exception as err:
-            if hasattr(err, 'status') and err.status == 404:
-                await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
-                return
-            else:
-                await interaction.followup.send(f"Wystapil blad, sprobuj ponownie pozniej!", ephemeral=True)
-                return
-        data = await self.bot.pool.fetch("SELECT id, message_id FROM zweryfikowani WHERE puuid=$1;", summoner["puuid"])
-        if data:
-            data = data[0]
-            id = data[0]
-            message_id = data[1]
-            guild = self.bot.get_guild(config.guild_id)
-            channel = guild.get_channel(config.zweryfikowani_channel_id)
-            message = channel.get_partial_message(message_id)
-            member = guild.get_member(id)
-            if member:
-                zweryfikowany = get(guild.roles, name="Zweryfikowany")
-                if zweryfikowany in member.roles:
-                    await member.remove_roles(zweryfikowany)
-            await message.delete()
-            await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE puuid=$1;", summoner['puuid'])
-            await interaction.followup.send(f"Usunieto!", ephemeral=True)
-        else:
-            await interaction.followup.send(f"Ten nick nie jest na serwerze jako zweryfikowany.", ephemeral=True)
+            await channel.get_partial_message(data[0]['message_id']).delete()
+        except discord.NotFound:
+            pass
+        
+        await self.bot.pool.execute("DELETE FROM zweryfikowani WHERE puuid=$1;", account["puuid"])
+        await interaction.followup.send("✅ Usunięto!", ephemeral=True)
 
     @app_commands.checks.has_any_role("Administracja")
-    @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="show_wer_user", description="Pokazuje Discord usera na podstawie nicku i tagu z lola.")
-    @app_commands.describe(
-        nick = "Nick z lola",
-        tag = "Tag z lola"
-    )
-    @app_commands.choices(
-        server = [
-            Choice(name = "EUNE", value = 'EUN1'),
-            Choice(name = "EUW", value = 'EUW1'),
-            Choice(name = "NA", value = 'NA1'),
-        ]
-    )
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="show_wer_user", description="Pokazuje Discord usera na podstawie nicku z LoL")
+    @app_commands.describe(nick="Nick z LoL", tag="Tag z LoL", server="Serwer konta")
+    @app_commands.choices(server=[Choice(name="EUNE", value='EUN1'), Choice(name="EUW", value='EUW1'), Choice(name="NA", value='NA1')])
     async def show_wer_user(self, interaction: discord.Interaction, nick: str, tag: str, server: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        api_servers = {'EUN1': 'europe', 'EUW1': 'europe', 'NA1': 'americas'}
-        tag = tag.replace('#', '')
-        try:
-            summoner = await self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag, region=api_servers[server])
-            puuid = summoner["puuid"]
-        except Exception as err:
-            if hasattr(err, 'status') and err.status == 404:
-                await interaction.followup.send(f"Nie znaleziono osoby o nicku **{nick}#{tag}**!", ephemeral=True)
-            else:
-                await interaction.followup.send(f"Wystąpił błąd podczas komunikacji z API Riot!", ephemeral=True)
+        
+        tag_clean = tag.replace('#', '')
+        account = await safe_api_call(
+            self.bot.riot_client.get_account_v1_by_riot_id(game_name=nick, tag_line=tag_clean, region=API_SERVERS[server])
+        )
+        if not account:
+            await interaction.followup.send(f"❌ Nie znaleziono osoby o nicku **{nick}#{tag_clean}**!", ephemeral=True)
             return
-
-        data = await self.bot.pool.fetch("SELECT id FROM zweryfikowani WHERE puuid=$1;", puuid)
+        
+        data = await self.bot.pool.fetch("SELECT id FROM zweryfikowani WHERE puuid=$1;", account["puuid"])
+        
         if data:
-            user_id = data[0]['id']
-            await interaction.followup.send(f"Użytkownik **{nick}#{tag}** to <@{user_id}> (ID: {user_id})", ephemeral=True)
+            await interaction.followup.send(f"Użytkownik **{nick}#{tag_clean}** to <@{data[0]['id']}> (ID: {data[0]['id']})", ephemeral=True)
         else:
-            await interaction.followup.send(f"Ten nick nie jest przypisany do żadnego zweryfikowanego użytkownika.", ephemeral=True)
+            await interaction.followup.send("❌ Ten nick nie jest przypisany do żadnego zweryfikowanego użytkownika.", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(WeryfikacjaCog(bot), guild = discord.Object(id = config.guild_id))
+    await bot.add_cog(WeryfikacjaCog(bot), guild=discord.Object(id=config.guild_id))

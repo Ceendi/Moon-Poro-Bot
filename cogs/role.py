@@ -1,270 +1,162 @@
+from typing import Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.utils import get
-from typing import Optional
+
 import config
-from config import warns
 import functions
+from utils.errors import handle_app_command_error
+from utils.constants import ROLE_ZWERYFIKOWANY, ROLE_UZYTKOWNIK, ROLE_NPKWL
 
 
-class Role(commands.Cog):
+class RoleCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.checks.has_any_role("Administracja", 'Moderacja')
-    @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="dr", description="Dodaje rolę dla danego użytkownika.")
-    @app_commands.describe(
-        uzytkownik = "Osoba, której dodajesz rolę.",
-        role1 = "Rola, którą chcesz dodać.",
-        role2 = "Druga, opcjonalna rola.",
-        role3 = "Trzecia, opcjonalna rola.",
-        role4 = "Czwarta, opcjonalna rola.",
-        role5 = "Piąta, opcjonalna rola."
-    )
+    @app_commands.checks.has_any_role("Administracja", "Moderacja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="dr", description="Dodaje rolę dla użytkownika")
+    @app_commands.describe(uzytkownik="Osoba", role1="Rola", role2="Rola 2", role3="Rola 3", role4="Rola 4", role5="Rola 5")
     async def daj_role(self, interaction: discord.Interaction, uzytkownik: discord.Member, role1: discord.Role,
-    role2: Optional[discord.Role], role3: Optional[discord.Role], role4: Optional[discord.Role], role5: Optional[discord.Role]):
-        roles = [role1, role2, role3, role4, role5]
-        failed_roles = []
-        succesful_roles = []
+                       role2: Optional[discord.Role] = None, role3: Optional[discord.Role] = None,
+                       role4: Optional[discord.Role] = None, role5: Optional[discord.Role] = None):
+        roles = [r for r in [role1, role2, role3, role4, role5] if r]
+        failed, success = [], []
         for role in roles:
-            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT", "Wild Rift", "Ogłoszenia", "Lol Newsy"]):
+            if role.name in config.ALLOWED_ROLES:
                 if role not in uzytkownik.roles:
-                    if str(role) in config.lol_ranks and functions.has_rank_roles(uzytkownik):
-                        for rank_role in uzytkownik.roles:
-                            if str(rank_role) in config.lol_ranks:
-                                await uzytkownik.remove_roles(rank_role)
-                                break
+                    if role.name in config.lol_ranks and functions.has_rank_roles(uzytkownik):
+                        for r in functions.get_member_rank_roles(uzytkownik):
+                            await uzytkownik.remove_roles(r)
+                            break
                     await uzytkownik.add_roles(role)
-                    succesful_roles.append("**"+str(role)+"**")
-            elif role:
-                failed_roles.append("**"+str(role)+"**")
-        if not failed_roles:
-            await interaction.response.send_message("Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles)) + "."
-        else:
-            message = "Dla " + uzytkownik.mention + " dodano role: " + ', '.join(succesful_roles) + ".\nNie udało się dodać (brak uprawnień): " + ', '.join(failed_roles) + "."
-            await interaction.response.send_message(message)
+                    success.append(f"**{role}**")
+            else:
+                failed.append(f"**{role}**")
+        msg = f"Dla {uzytkownik.mention} dodano role: {', '.join(success)}."
+        if failed:
+            msg += f"\n❌ Brak uprawnień do: {', '.join(failed)}."
+        await interaction.response.send_message(msg)
 
-    @daj_role.error
-    async def daj_roleError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
-
-    @app_commands.checks.has_any_role("Administracja", 'Moderacja')
-    @app_commands.guilds(discord.Object(id = config.guild_id))
-    @app_commands.command(name="ur", description="Usuwa rolę dla danego użytkownika.")
-    @app_commands.describe(
-        uzytkownik = "Osoba, której usuwasz rolę.",
-        role1 = "Rola, którą chcesz usunąć.",
-        role2 = "Druga, opcjonalna rola.",
-        role3 = "Trzecia, opcjonalna rola.",
-        role4 = "Czwarta, opcjonalna rola.",
-        role5 = "Piąta, opcjonalna rola."
-    )
+    @app_commands.checks.has_any_role("Administracja", "Moderacja")
+    @app_commands.guilds(discord.Object(id=config.guild_id))
+    @app_commands.command(name="ur", description="Usuwa rolę użytkownikowi")
+    @app_commands.describe(uzytkownik="Osoba", role1="Rola", role2="Rola 2", role3="Rola 3", role4="Rola 4", role5="Rola 5")
     async def usun_role(self, interaction: discord.Interaction, uzytkownik: discord.Member, role1: discord.Role,
-    role2: Optional[discord.Role], role3: Optional[discord.Role], role4: Optional[discord.Role], role5: Optional[discord.Role]):
-        roles = [role1, role2, role3, role4, role5]
-        failed_roles = []
-        succesful_roles = []
+                        role2: Optional[discord.Role] = None, role3: Optional[discord.Role] = None,
+                        role4: Optional[discord.Role] = None, role5: Optional[discord.Role] = None):
+        roles = [r for r in [role1, role2, role3, role4, role5] if r]
+        failed, success = [], []
         for role in roles:
-            if role and str(role) in (config.lol_other + config.lol_ranks + config.lol_servers + ["Użytkownik", "Nie posiadam konta w lolu", "Valorant", "LOR", "TFT", "Wild Rift", "Ogłoszenia", "Lol Newsy"]):
+            if role.name in config.ALLOWED_ROLES:
                 if role in uzytkownik.roles:
                     await uzytkownik.remove_roles(role)
-                    succesful_roles.append("**"+str(role)+"**")
-            elif role:
-                failed_roles.append("**"+str(role)+"**")
-        if not failed_roles:
-            await interaction.response.send_message('Dla ' + uzytkownik.mention + ' usunięto role: ' + ', '.join(succesful_roles)) + "."
-        else:
-            message = "Dla " + uzytkownik.mention + " usunięto role: " + ', '.join(succesful_roles) + ".\nNie udało się usunąć(brak uprawnień lub błąd w przypadku warna): " + ', '.join(failed_roles) + "."
-            await interaction.response.send_message(message)
-
-    @usun_role.error
-    async def usun_roleError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
-
-    @app_commands.checks.has_any_role('Administracja', 'Moderacja')
-    @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="cw", description="Cofa warny do uprzedniego stanu.")
-    @app_commands.describe(uzytkownik="Osoba, której cofasz warna.")
-    async def cofnij_warna(self, interaction: discord.Interaction, uzytkownik: discord.Member):
-        async with self.bot.pool.acquire() as con:
-            data_active = await con.fetch("SELECT * FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, True)
-            if data_active:
-                data_active = data_active[0]
-                data_not_active = await con.fetch("SELECT * FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, False)
-                if data_not_active:
-                    data_not_active = data_not_active[0]
-                    actual_warn_type = warns[data_active["typ"]]
-                    new_warn_type = warns[data_not_active["typ"]]
-                    actual_warn_role = get(interaction.guild.roles, name=actual_warn_type)
-                    new_warn_role = get(interaction.guild.roles, name=new_warn_type)
-                    channel = interaction.guild.get_channel(config.warn_channel_id)
-                    message = channel.get_partial_message(data_active["message_id"])
-                    embed = discord.Embed(title=str(new_warn_role), description=data_not_active["powod"] + " punkt regulaminu", colour=discord.Colour.red())
-                    if data_not_active["opis"]:
-                        embed.add_field(name="Opis", value=data_not_active["opis"], inline=False)
-                    embed.add_field(name="Data otrzymania", value="<t:"+str(data_not_active["start"].timestamp())[:-2]+":F>")
-                    embed.add_field(name="Data zakończenia", value="<t:"+str(data_not_active["koniec"].timestamp())[:-2]+":F>")
-                    embed.add_field(name="Użytkownik", value=uzytkownik.mention, inline=False)
-                    for autor in data_not_active["autorzy"]:
-                        embed.add_field(name="Mod", value="<@"+str(autor)+">")
-                    await message.edit(embed=embed)
-                    await con.execute("DELETE FROM warn WHERE id=$1 AND active=$2;", uzytkownik.id, True)
-                    await con.execute("UPDATE warn SET active=$1 WHERE id=$2;", True, uzytkownik.id)
-                    await uzytkownik.remove_roles(actual_warn_role)
-                    await uzytkownik.add_roles(new_warn_role)
-                    await interaction.response.send_message(f"Cofnięto warna dla {uzytkownik.mention} z {actual_warn_role} do {new_warn_role}.")
-                else:
-                    warn_type = warns[data_active["typ"]]
-                    warn_role = get(interaction.guild.roles, name=warn_type)
-                    channel = interaction.guild.get_channel(config.warn_channel_id)
-                    message = channel.get_partial_message(data_active["message_id"])
-                    await message.delete()
-                    await con.execute("DELETE FROM warn WHERE id=$1;", uzytkownik.id)
-                    await uzytkownik.remove_roles(warn_role)
-                    await interaction.response.send_message(f"Pomyślnie usunięto role warn dla {uzytkownik.mention}.")
+                    success.append(f"**{role}**")
             else:
-                await interaction.response.send_message("Użytkownik nie ma warna.", ephemeral=True)
-
-    @cofnij_warna.error
-    async def cofnij_warnaError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
+                failed.append(f"**{role}**")
+        msg = f"Dla {uzytkownik.mention} usunięto role: {', '.join(success)}."
+        if failed:
+            msg += f"\n❌ Brak uprawnień do: {', '.join(failed)}."
+        await interaction.response.send_message(msg)
 
     @app_commands.checks.has_any_role("Administracja", "Moderacja")
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="pbr", description="Pokazuje osoby ze zbugowanymi rolami.")
+    @app_commands.command(name="pbr", description="Pokazuje osoby ze zbugowanymi rolami")
     async def pokaz_zbugowanych(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
-        npkwl = get(interaction.guild.roles, name="Nie posiadam konta w lolu")
-        members_bugged = []
-        for member in interaction.guild.members:
-            count_rank_roles = 0
-            if functions.has_rank_roles(member) and functions.has_server_roles(member) and uzytkownik not in member.roles:
-                members_bugged.append(member.mention)
-            elif npkwl in member.roles and (functions.has_rank_roles(member) or functions.has_server_roles(member) or functions.has_other_roles(member)):
-                members_bugged.append(member.mention)
-            elif npkwl in member.roles and uzytkownik not in member.roles:
-                members_bugged.append(member.mention)
-            elif uzytkownik in member.roles and (not functions.has_rank_roles(member) or not functions.has_server_roles(member)) and npkwl not in member.roles:
-                members_bugged.append(member.mention)
-            for role in member.roles:
-                if str(role) in config.lol_ranks:
-                    count_rank_roles += 1
-            if count_rank_roles > 1 and member.mention not in members_bugged:
-                members_bugged.append(member.mention)
-            if len(members_bugged) > 30:
-                message = ', '.join(members_bugged)
-                await interaction.followup.send(message)
-                members_bugged = []
-        if members_bugged:
-            message = ', '.join(members_bugged)
-            await interaction.followup.send(message)
-        await interaction.followup.send("Skończono sprawdzanie roli.")
-            
-
-    @pokaz_zbugowanych.error
-    async def pokaz_zbugowanychError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
+        uzytkownik_role = get(interaction.guild.roles, name=ROLE_UZYTKOWNIK)
+        npkwl_role = get(interaction.guild.roles, name=ROLE_NPKWL)
+        bugged = []
+        for m in interaction.guild.members:
+            is_bug = False
+            if functions.has_rank_roles(m) and functions.has_server_roles(m) and uzytkownik_role not in m.roles:
+                is_bug = True
+            elif npkwl_role in m.roles and (functions.has_rank_roles(m) or functions.has_server_roles(m) or functions.has_other_roles(m)):
+                is_bug = True
+            elif npkwl_role in m.roles and uzytkownik_role not in m.roles:
+                is_bug = True
+            elif uzytkownik_role in m.roles and (not functions.has_rank_roles(m) or not functions.has_server_roles(m)) and npkwl_role not in m.roles:
+                is_bug = True
+            if len(functions.get_member_rank_roles(m)) > 1:
+                is_bug = True
+            if is_bug:
+                bugged.append(m.mention)
+            if len(bugged) > 30:
+                await interaction.followup.send(', '.join(bugged))
+                bugged = []
+        if bugged:
+            await interaction.followup.send(', '.join(bugged))
+        await interaction.followup.send("✅ Skończono sprawdzanie ról.")
 
     @app_commands.checks.has_any_role("Administracja", "Moderacja")
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="nr", description="Naprawia role osób ze zbugowanymi rolami.")
+    @app_commands.command(name="nr", description="Naprawia zbugowane role")
     async def napraw_zbugowane(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        uzytkownik = get(interaction.guild.roles, name="Użytkownik")
-        npkwl = get(interaction.guild.roles, name="Nie posiadam konta w lolu")
-        for member in interaction.guild.members:
-            if functions.has_rank_roles(member) and functions.has_server_roles(member) and uzytkownik not in member.roles:
-                await member.add_roles(uzytkownik)
-            elif npkwl in member.roles and uzytkownik not in member.roles:
-                await member.add_roles(uzytkownik)
-            elif uzytkownik in member.roles and (not functions.has_rank_roles(member) or not functions.has_server_roles(member)) and npkwl not in member.roles:
-                await member.remove_roles(uzytkownik)
-        await interaction.followup.send("Skończono naprawianie roli.")
-
-    @napraw_zbugowane.error
-    async def napraw_zbugowaneError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
+        uzytkownik_role = get(interaction.guild.roles, name=ROLE_UZYTKOWNIK)
+        npkwl_role = get(interaction.guild.roles, name=ROLE_NPKWL)
+        fixed = 0
+        for m in interaction.guild.members:
+            if functions.has_rank_roles(m) and functions.has_server_roles(m) and uzytkownik_role not in m.roles:
+                await m.add_roles(uzytkownik_role)
+                fixed += 1
+            elif npkwl_role in m.roles and uzytkownik_role not in m.roles:
+                await m.add_roles(uzytkownik_role)
+                fixed += 1
+            elif uzytkownik_role in m.roles and (not functions.has_rank_roles(m) or not functions.has_server_roles(m)) and npkwl_role not in m.roles:
+                await m.remove_roles(uzytkownik_role)
+                fixed += 1
+        await interaction.followup.send(f"✅ Naprawiono {fixed} użytkowników.")
 
     @app_commands.checks.has_any_role("Administracja", "Moderacja")
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.describe(rola="Jaką rolę chcesz sprawdzić?")
-    @app_commands.command(name="pr", description="Pokazuje osoby z daną rolą.")
+    @app_commands.command(name="pr", description="Pokazuje niezweryfikowanych z daną rolą")
+    @app_commands.describe(rola="Rola")
     async def pokaz_role(self, interaction: discord.Interaction, rola: discord.Role):
         await interaction.response.defer()
         members = []
-        for member in interaction.guild.members:
-            if rola in member.roles and "Zweryfikowany" not in str(member.roles):
-                members.append(member.mention)
+        for m in interaction.guild.members:
+            if rola in m.roles and ROLE_ZWERYFIKOWANY not in [r.name for r in m.roles]:
+                members.append(m.mention)
             if len(members) > 30:
-                message = ', '.join(members)
-                await interaction.followup.send(message)
+                await interaction.followup.send(', '.join(members))
                 members = []
         if members:
-            message = ', '.join(members)
-            await interaction.followup.send(message)
-        await interaction.followup.send("Skończono pokazywanie osób z tą rolą.")
+            await interaction.followup.send(', '.join(members))
+        await interaction.followup.send("✅ Skończono pokazywanie.")
 
-    @pokaz_role.error
-    async def pokaz_roleError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
-            raise error
-        
-    
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="wylacz_multikonta", description="Wyłącza sprawdzanie multikonta")
+    @app_commands.command(name="wylacz_multikonta", description="Toggle sprawdzania multikont")
     async def wylacz_multikonta(self, interaction: discord.Interaction):
         self.bot.join_check = not self.bot.join_check
-        if self.bot.join_check:
-            await interaction.response.send_message("Włączono sprawdzanie multikont!", ephemeral=True)
-        else:
-            await interaction.response.send_message("Wyłączono sprawdzanie multikont!", ephemeral=True)
+        status = "włączone" if self.bot.join_check else "wyłączone"
+        await interaction.response.send_message(f"Sprawdzanie multikont: **{status}**", ephemeral=True)
 
     @app_commands.checks.has_any_role("Administracja")
     @app_commands.guilds(discord.Object(id=config.guild_id))
-    @app_commands.command(name="napraw_weryfikacje", description="Naprawia role osób z niepoprawną weryfikacją.")
+    @app_commands.command(name="napraw_weryfikacje", description="Naprawia nieprawidłowe weryfikacje")
     async def napraw_weryfikacje(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        data = await self.bot.pool.fetch("SELECT * FROM zweryfikowani")
-        ids = []
-        for row in data:
-            ids.append(row['id'])
-        for member in interaction.guild.members:
-            if any(role.name == "Zweryfikowany" for role in member.roles) and member.id not in ids:
-                new_roles = [role for role in member.roles if role.name != "Zweryfikowany" and role.name not in config.lol_ranks]
-                unranked_role = get(interaction.guild.roles, name="Unranked")
+        data = await self.bot.pool.fetch("SELECT id FROM zweryfikowani")
+        verified_ids = {row['id'] for row in data}
+        unranked_role = get(interaction.guild.roles, name="Unranked")
+        fixed = 0
+        for m in interaction.guild.members:
+            if any(r.name == ROLE_ZWERYFIKOWANY for r in m.roles) and m.id not in verified_ids:
+                new_roles = [r for r in m.roles if r.name != ROLE_ZWERYFIKOWANY and r.name not in config.lol_ranks]
                 if unranked_role and unranked_role not in new_roles:
                     new_roles.append(unranked_role)
-                await member.edit(roles=new_roles)
-        await interaction.followup.send("Skończono naprawianie weryfikacji.")
+                await m.edit(roles=new_roles)
+                fixed += 1
+        await interaction.followup.send(f"✅ Naprawiono {fixed} użytkowników.")
 
-    @napraw_weryfikacje.error
-    async def napraw_weryfikacjeError(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingAnyRole):
-           await interaction.response.send_message("Nie posiadasz permisji do użycia tej komendy.", ephemeral=True)
-        else:
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if not await handle_app_command_error(interaction, error):
             raise error
 
+
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Role(bot), guild = discord.Object(id = config.guild_id))
-    
+    await bot.add_cog(RoleCog(bot), guild=discord.Object(id=config.guild_id))
