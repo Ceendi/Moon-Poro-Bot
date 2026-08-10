@@ -1,0 +1,24 @@
+[Unit]
+Description=Moon Poro Discord Bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=moon-poro
+Group=moon-poro
+WorkingDirectory=/opt/moon-poro
+EnvironmentFile=/opt/moon-poro/.env
+ExecStart=/opt/moon-poro/.venv/bin/python /opt/moon-poro/main.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/moon-poro
+MemoryMax=450M
+
+[Install]
+WantedBy=multi-user.target

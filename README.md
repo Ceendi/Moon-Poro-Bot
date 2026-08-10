@@ -1,37 +1,53 @@
-# Moon-Poro-Bot
+# Moon Poro Bot
 
-Discord bot for League of Legends community server. Handles user verification via Riot API, role management, moderation warnings, and ticket system.
+A modular Discord bot for a League of Legends community, written in Python. It provides Riot
+account verification, rank synchronization, configurable roles, moderation warnings, and
+moderator statistics.
+
+> Moon Poro Bot isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot
+> Games. Riot Games and related properties are trademarks of Riot Games, Inc.
 
 ## Features
 
-- **Verification** - Links Discord account with Riot account, auto-updates rank roles every 24h
-- **Role Management** - Self-assignable server/rank/position roles via buttons
-- **Warn System** - Tiered warnings with automatic expiration
-- **Tickets** - User reports with moderator assignment
-- **Mod Stats** - Monthly statistics for moderator activity
+- Riot ID verification and automatic Solo/Duo rank synchronization;
+- persistent role selection panels;
+- versioned moderation warnings with escalation, rollback, and automatic expiration;
+- monthly moderation statistics;
+- audited administrator lookups for Discord–Riot account links;
+- optional account-age protection, member logs, and message filters.
 
-## Project Structure
+Features, channels, and roles are configured through environment variables. The bot does not
+request the privileged `message_content` intent unless optional message filters are enabled.
 
+## Setup
+
+Python 3.12 or 3.13 and PostgreSQL 17+ are required.
+
+```bash
+python -m pip install uv==0.12.3
+uv sync --frozen
+cp .env.example .env
+uv run python main.py
 ```
-Moon-Poro-Bot/
-├── cogs/           # Command modules
-├── utils/          # Helper functions
-├── config.py       # Configuration loader
-├── functions.py    # Role checking utilities
-├── main.py         # Entry point
-└── requirements.txt
+
+Complete `.env` before starting the bot. Alembic applies pending migrations during startup, so
+create a database backup before the first production deployment.
+
+## Development
+
+```bash
+uv sync --frozen --extra dev
+uv run ruff check .
+uv run pytest
+uv run mypy moon_poro
+uv run pip-audit
 ```
 
-## Commands
+Application code is located in `moon_poro/`, database migrations in `alembic/`, and tests in
+`tests/`.
 
-| Command | Description | Permission |
-|---------|-------------|------------|
-| /w | Issue a warning | Moderacja |
-| /cw | Revert a warning | Moderacja |
-| /dr | Add role to user | Moderacja |
-| /ur | Remove role from user | Moderacja |
-| /usun_weryfikacje | Remove own verification | Everyone |
+## Rights and Riot Games
 
-## License
-
-Private project.
+This repository is not an open-source project. All rights are reserved; see `LICENSE` for details.
+This project is not an official Riot Games product. Usage of the Riot API must comply with the
+current [Riot Developer Policies](https://developer.riotgames.com/policies/general).

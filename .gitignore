@@ -1,12 +1,34 @@
 # Secrets
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
 .venv/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # IDE
 .DS_Store
+.idea/
+.vscode/
 
 # Logs
 discord.log
+*.log.*
+
+# Local database backups
+*.dump
+*.sql
+
+# Local operator files and private release backups
+DEPLOYMENT.md
+discord-avatar-MoonPoro.png
+*.bundle
+.local-backups/
