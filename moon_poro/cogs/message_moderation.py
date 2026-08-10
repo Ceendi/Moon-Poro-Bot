@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import suppress
+
 import discord
 from discord.ext import commands
 
@@ -24,7 +26,11 @@ class ReviewedView(discord.ui.View):
         style=discord.ButtonStyle.green,
         custom_id="moderation:reviewed:v1",
     )
-    async def reviewed(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def reviewed(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[ReviewedView],
+    ) -> None:
         await interaction.response.edit_message(view=None)
 
 
@@ -58,12 +64,11 @@ class MessageModerationCog(commands.Cog):
             await message.delete()
         except discord.Forbidden:
             return
-        try:
+        with suppress(discord.Forbidden):
             await message.author.send(
-                "Na tym kanale nie szukamy graczy do Clash. Skorzystaj z kanału przeznaczonego do Clash."
+                "Na tym kanale nie szukamy graczy do Clash. "
+                "Skorzystaj z kanału przeznaczonego do Clash."
             )
-        except discord.Forbidden:
-            pass
 
     async def _send_boost_alert(self, message: discord.Message) -> None:
         if message.guild is None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from contextlib import suppress
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -26,6 +28,9 @@ from moon_poro.roles import find_role, member_has_role, member_roles_named
 
 logger = logging.getLogger("moon_poro.verification")
 
+type RiotPayload = dict[str, Any]
+type LeagueEntries = list[RiotPayload]
+
 
 def _lookup_reason_choices() -> list[Choice[str]]:
     return [
@@ -36,11 +41,34 @@ def _lookup_reason_choices() -> list[Choice[str]]:
     ]
 
 
+def _server_choices() -> list[Choice[str]]:
+    return [
+        Choice(name="EUNE", value="EUN1"),
+        Choice(name="EUW", value="EUW1"),
+        Choice(name="NA", value="NA1"),
+    ]
+
+
+def _interaction_user_id(interaction: discord.Interaction) -> int:
+    return interaction.user.id
+
+
+async def _get_leagues(bot: MoonPoroBot, platform: str, puuid: str) -> LeagueEntries:
+    leagues: LeagueEntries | None = await riot_api_call(
+        lambda: bot.riot_client.get_lol_league_v4_entries_by_puuid(
+            region=platform,
+            puuid=puuid,
+        ),
+        not_found=[],
+    )
+    return leagues or []
+
+
 async def _apply_verified_roles(
     bot: MoonPoroBot,
     member: discord.Member,
     platform: str,
-    leagues: list[dict],
+    leagues: LeagueEntries,
 ) -> None:
     settings = bot.settings
     rank_role = get_discord_rank_role(member.guild, get_rank_from_leagues(leagues), settings)
@@ -65,13 +93,9 @@ async def _apply_verified_roles(
         await member.add_roles(*to_add, reason="Synchronizacja weryfikacji Riot")
 
 
-async def _remove_verified_roles(
-    bot: MoonPoroBot, member: discord.Member, *, reason: str
-) -> None:
+async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
     settings = bot.settings
-    managed_names = set(
-        settings.lol_ranks + settings.lol_servers + [settings.verified_role_name]
-    )
+    managed_names = set(settings.lol_ranks + settings.lol_servers + [settings.verified_role_name])
     to_remove = member_roles_named(member, managed_names, settings)
     if to_remove:
         await member.remove_roles(*to_remove, reason=reason)
@@ -98,7 +122,7 @@ class ConfirmVerificationView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
         if self.message is not None:
-            try:
+            with suppress(discord.NotFound):
                 await self.message.edit(
                     embed=discord.Embed(
                         title="Czas minął",
@@ -107,11 +131,13 @@ class ConfirmVerificationView(discord.ui.View):
                     ),
                     view=self,
                 )
-            except discord.NotFound:
-                pass
 
     @discord.ui.button(label="✓ Zweryfikuj", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[ConfirmVerificationView],
+    ) -> None:
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -142,12 +168,7 @@ class ConfirmVerificationView(discord.ui.View):
                     ephemeral=True,
                 )
                 return
-            leagues = await riot_api_call(
-                lambda: self.bot.riot_client.get_lol_league_v4_entries_by_puuid(
-                    region=self.platform, puuid=self.puuid
-                ),
-                not_found=[],
-            )
+            leagues = await _get_leagues(self.bot, self.platform, self.puuid)
         except RiotAPIUnavailable:
             await interaction.followup.send(
                 "Riot API jest chwilowo niedostępne. Spróbuj ponownie później.", ephemeral=True
@@ -185,19 +206,19 @@ class ConfirmVerificationView(discord.ui.View):
             )
             return
 
-        await _apply_verified_roles(self.bot, interaction.user, self.platform, leagues or [])
+        await _apply_verified_roles(self.bot, interaction.user, self.platform, leagues)
         self.stop()
         await interaction.followup.send("Konto Riot zostało zweryfikowane.", ephemeral=True)
 
 
 class VerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
-    game_name = discord.ui.TextInput(
+    game_name: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
         label="Riot ID — nazwa", placeholder="Nazwa gracza", min_length=3, max_length=16
     )
-    tag = discord.ui.TextInput(
+    tag: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
         label="Riot ID — tag", placeholder="EUNE", min_length=3, max_length=6
     )
-    server = discord.ui.TextInput(
+    server: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
         label="Region", placeholder="EUNE, EUW lub NA", default="EUNE", min_length=2, max_length=4
     )
 
@@ -265,7 +286,12 @@ class VerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = await interaction.original_response()
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+    async def on_error(
+        self,
+        _interaction: discord.Interaction,
+        error: Exception,
+        *_items: object,
+    ) -> None:
         logger.exception("Verification modal failed", exc_info=error)
 
 
@@ -273,8 +299,12 @@ class VerificationStartView(discord.ui.View):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
-        self.cooldowns = commands.CooldownMapping.from_cooldown(
-            1.0, bot.settings.verification_cooldown, lambda interaction: interaction.user.id
+        self.cooldowns: commands.CooldownMapping[discord.Interaction] = (
+            commands.CooldownMapping.from_cooldown(
+                1.0,
+                bot.settings.verification_cooldown,
+                _interaction_user_id,
+            )
         )
 
     @discord.ui.button(
@@ -282,7 +312,11 @@ class VerificationStartView(discord.ui.View):
         style=discord.ButtonStyle.red,
         custom_id="verification:start:v2",
     )
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def start(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[VerificationStartView],
+    ) -> None:
         retry_after = self.cooldowns.update_rate_limit(interaction)
         if retry_after:
             await interaction.response.send_message(
@@ -330,13 +364,8 @@ class VerificationCog(commands.Cog):
             if member is None or not link.puuid:
                 continue
             try:
-                leagues = await riot_api_call(
-                    lambda link=link: self.bot.riot_client.get_lol_league_v4_entries_by_puuid(
-                        region=link.platform, puuid=link.puuid
-                    ),
-                    not_found=[],
-                )
-                await _apply_verified_roles(self.bot, member, link.platform, leagues or [])
+                leagues = await _get_leagues(self.bot, link.platform, link.puuid)
+                await _apply_verified_roles(self.bot, member, link.platform, leagues)
             except RiotAPIUnavailable:
                 logger.warning("Could not refresh Riot rank for Discord user %s", member.id)
             except discord.HTTPException:
@@ -357,13 +386,8 @@ class VerificationCog(commands.Cog):
         if link is None or not link.puuid:
             return
         try:
-            leagues = await riot_api_call(
-                lambda: self.bot.riot_client.get_lol_league_v4_entries_by_puuid(
-                    region=link.platform, puuid=link.puuid
-                ),
-                not_found=[],
-            )
-            await _apply_verified_roles(self.bot, member, link.platform, leagues or [])
+            leagues = await _get_leagues(self.bot, link.platform, link.puuid)
+            await _apply_verified_roles(self.bot, member, link.platform, leagues)
         except (RiotAPIUnavailable, discord.HTTPException):
             logger.exception("Could not restore verification roles for %s", member.id)
 
@@ -401,13 +425,11 @@ class VerificationCog(commands.Cog):
             if link and self.bot.settings.zweryfikowani_channel_id:
                 channel = interaction.guild.get_channel(self.bot.settings.zweryfikowani_channel_id)
                 if isinstance(channel, discord.abc.Messageable):
-                    try:
+                    with suppress(discord.NotFound):
                         await channel.get_partial_message(link.message_id).delete()
-                    except discord.NotFound:
-                        pass
         await interaction.response.send_message("Usunięto powiązanie konta Riot.", ephemeral=True)
 
-    async def _account_by_riot_id(self, nick: str, tag: str, platform: str) -> dict | None:
+    async def _account_by_riot_id(self, nick: str, tag: str, platform: str) -> RiotPayload | None:
         return await riot_api_call(
             lambda: self.bot.riot_client.get_account_v1_by_riot_id(
                 game_name=nick.strip(),
@@ -419,14 +441,7 @@ class VerificationCog(commands.Cog):
 
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
-    @app_commands.choices(
-        server=[
-            Choice(name="EUNE", value="EUN1"),
-            Choice(name="EUW", value="EUW1"),
-            Choice(name="NA", value="NA1"),
-        ],
-        powod=_lookup_reason_choices(),
-    )
+    @app_commands.choices(server=_server_choices(), powod=_lookup_reason_choices())
     @app_commands.command(name="show_wer_user", description="Znajduje Discord na podstawie Riot ID")
     async def lookup_by_riot_id(
         self,
@@ -512,13 +527,7 @@ class VerificationCog(commands.Cog):
 
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
-    @app_commands.choices(
-        server=[
-            Choice(name="EUNE", value="EUN1"),
-            Choice(name="EUW", value="EUW1"),
-            Choice(name="NA", value="NA1"),
-        ]
-    )
+    @app_commands.choices(server=_server_choices())
     @app_commands.command(
         name="usun_wer_nick", description="Administracyjnie usuwa powiązanie Riot ID"
     )
@@ -564,10 +573,8 @@ class VerificationCog(commands.Cog):
             channel_id = self.bot.settings.zweryfikowani_channel_id
             channel = interaction.guild.get_channel(channel_id) if channel_id else None
             if isinstance(channel, discord.abc.Messageable):
-                try:
+                with suppress(discord.NotFound):
                     await channel.get_partial_message(removed.message_id).delete()
-                except discord.NotFound:
-                    pass
         await interaction.followup.send("Usunięto powiązanie i zapisano operację.", ephemeral=True)
 
 

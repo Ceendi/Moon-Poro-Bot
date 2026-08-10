@@ -31,16 +31,22 @@ uv run python main.py
 ```
 
 Complete `.env` before starting the bot. Alembic applies pending migrations during startup, so
-create a database backup before the first production deployment.
+create a database backup before the first production deployment. On Linux, keep the secrets file
+readable only by the service account (`chmod 600 .env`). The supplied systemd unit writes logs to
+`/var/log/moon-poro` and keeps the application directory read-only.
 
 ## Development
 
 ```bash
 uv sync --frozen --extra dev
+uv run ruff format --check .
 uv run ruff check .
-uv run pytest
+uv run pytest --cov=moon_poro --cov-branch
 uv run mypy moon_poro
-uv run pip-audit
+uv run bandit -r moon_poro
+uv run pylint --disable=all --enable=duplicate-code moon_poro
+uv run detect-secrets-hook $(git ls-files)
+uv run pip-audit --skip-editable
 ```
 
 Application code is located in `moon_poro/`, database migrations in `alembic/`, and tests in

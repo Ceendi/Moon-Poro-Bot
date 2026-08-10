@@ -9,15 +9,35 @@ User=moon-poro
 Group=moon-poro
 WorkingDirectory=/opt/moon-poro
 EnvironmentFile=/opt/moon-poro/.env
+Environment=MOON_PORO_LOG_FILE=/var/log/moon-poro/discord.log
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/moon-poro/.venv/bin/python /opt/moon-poro/main.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+UMask=0077
+LogsDirectory=moon-poro
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/moon-poro
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/log/moon-poro
 MemoryMax=450M
 
 [Install]

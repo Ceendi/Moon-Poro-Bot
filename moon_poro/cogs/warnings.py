@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from contextlib import suppress
 
 import discord
 from discord import app_commands
@@ -18,7 +19,7 @@ logger = logging.getLogger("moon_poro.warnings")
 
 
 def warning_embed(warning: Warning, role_name: str, *, expired: bool = False) -> discord.Embed:
-    colour = discord.Colour.dark_gray() if expired else discord.Colour.red()
+    colour = discord.Colour(0x607D8B) if expired else discord.Colour.red()
     title = f"{role_name} — wygasł" if expired else role_name
     embed = discord.Embed(
         title=title,
@@ -81,9 +82,7 @@ class WarningsCog(commands.Cog):
             return
 
         try:
-            expired_ids = {
-                warning.id for warning in await self.bot.warnings.list_expired(guild.id)
-            }
+            expired_ids = {warning.id for warning in await self.bot.warnings.list_expired(guild.id)}
             active_warnings = await self.bot.warnings.list_active(guild.id)
         except Exception:
             logger.exception("Could not load warning reconciliation data; next run will retry")
@@ -99,12 +98,10 @@ class WarningsCog(commands.Cog):
                 continue
             try:
                 role_name = self.bot.settings.warn_roles[warning.level]
-                try:
+                with suppress(discord.NotFound):
                     await channel.get_partial_message(warning.message_id).edit(
                         embed=warning_embed(warning, role_name, expired=True)
                     )
-                except discord.NotFound:
-                    pass
                 if member is not None:
                     await self._set_warning_role(member, None)
                 await self.bot.warnings.mark_expired(warning.id)
@@ -226,10 +223,8 @@ class WarningsCog(commands.Cog):
             if isinstance(channel, discord.abc.Messageable):
                 message = channel.get_partial_message(current.message_id)
                 if previous is None:
-                    try:
+                    with suppress(discord.NotFound):
                         await message.delete()
-                    except discord.NotFound:
-                        pass
                 else:
                     await message.edit(
                         embed=warning_embed(previous, self.bot.settings.warn_roles[previous.level]),

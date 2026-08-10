@@ -11,7 +11,7 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
         discord_token="discord-secret",
         riot_api_token="riot-secret",
         postgres_user="bot",
-        postgres_password="db-secret",
+        postgres_password="db-secret",  # pragma: allowlist secret
         postgres_host="127.0.0.1",
         postgres_db="bot",
         guild_id=123,

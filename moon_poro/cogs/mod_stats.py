@@ -48,12 +48,20 @@ class StatsPaginator(discord.ui.View):
         return embed
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.blurple)
-    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def previous(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[StatsPaginator],
+    ) -> None:
         self.page = max(0, self.page - 1)
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
     @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.blurple)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def next(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[StatsPaginator],
+    ) -> None:
         self.page = min(len(self.periods) - 1, self.page + 1)
         await interaction.response.edit_message(embed=self.embed(), view=self)
 

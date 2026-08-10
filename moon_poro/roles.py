@@ -17,14 +17,10 @@ def member_roles_named(
     names: list[str] | frozenset[str] | set[str],
     settings: Settings,
 ) -> list[discord.Role]:
-    configured_ids = {
-        settings.role_ids[name] for name in names if name in settings.role_ids
-    }
+    configured_ids = {settings.role_ids[name] for name in names if name in settings.role_ids}
     fallback_names = {name for name in names if name not in settings.role_ids}
     return [
-        role
-        for role in member.roles
-        if role.id in configured_ids or role.name in fallback_names
+        role for role in member.roles if role.id in configured_ids or role.name in fallback_names
     ]
 
 

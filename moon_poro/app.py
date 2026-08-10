@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import os
 
 from pulsefire.clients import RiotAPIClient
 
@@ -20,7 +21,10 @@ def configure_logging() -> None:
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     rotating_file = logging.handlers.RotatingFileHandler(
-        "discord.log", encoding="utf-8", maxBytes=8 * 1024 * 1024, backupCount=2
+        os.getenv("MOON_PORO_LOG_FILE", "discord.log"),
+        encoding="utf-8",
+        maxBytes=8 * 1024 * 1024,
+        backupCount=2,
     )
     rotating_file.setFormatter(formatter)
     logging.basicConfig(level=logging.INFO, handlers=[console, rotating_file])
@@ -44,8 +48,10 @@ async def main() -> None:
                 riot_client=riot_client,
                 intents=create_intents(settings),
             )
-            async with bot:
+            try:
                 await bot.start(settings.discord_token.get_secret_value())
+            finally:
+                await bot.close()
     finally:
         await database.close()
 

@@ -10,16 +10,47 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      TEST_POSTGRES_HOST: 127.0.0.1
+      TEST_POSTGRES_PORT: 5432
+      TEST_POSTGRES_USER: moon_poro_test
+      TEST_POSTGRES_PASSWORD: audit-password # pragma: allowlist secret
+      TEST_POSTGRES_DB: moon_poro_test
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+        env:
+          POSTGRES_USER: moon_poro_test
+          POSTGRES_PASSWORD: audit-password # pragma: allowlist secret
+          POSTGRES_DB: moon_poro_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U moon_poro_test -d moon_poro_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          python-version: "3.12"
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: python -m pip install --upgrade pip
+          cache-dependency-path: uv.lock
       - run: python -m pip install uv==0.12.3
       - run: uv sync --frozen --extra dev
+      - run: uv run ruff format --check .
       - run: uv run ruff check .
-      - run: uv run pytest
       - run: uv run mypy moon_poro
-      - run: uv run pip-audit
+      - run: uv run pytest --cov=moon_poro --cov-branch
+      - run: uv run bandit -r moon_poro
+      - run: uv run pylint --disable=all --enable=duplicate-code moon_poro
+      - run: uv run detect-secrets-hook $(git ls-files)
+      - run: uv run pip-audit --skip-editable

@@ -8,9 +8,13 @@ __pycache__/
 .venv/
 *.py[cod]
 *.egg-info/
+.coverage
+coverage.xml
+htmlcov/
 build/
 dist/
 .pytest_cache/
+.pytest_runtime_cache/
 .ruff_cache/
 .mypy_cache/
 

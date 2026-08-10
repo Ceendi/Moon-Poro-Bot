@@ -25,10 +25,14 @@ Issues = "https://github.com/Ceendi/Moon-Poro-Bot/issues"
 
 [project.optional-dependencies]
 dev = [
+    "bandit>=1.8,<2",
+    "detect-secrets>=1.5,<2",
     "mypy>=1.14,<2",
     "pip-audit>=2.10,<3",
     "pytest>=9.0.3,<10",
     "pytest-asyncio>=1.4,<2",
+    "pytest-cov>=7,<8",
+    "pylint>=4,<5",
     "ruff>=0.9,<1",
 ]
 
@@ -36,8 +40,18 @@ dev = [
 include = ["moon_poro*"]
 
 [tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
 asyncio_mode = "auto"
+cache_dir = ".pytest_runtime_cache"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["moon_poro"]
+
+[tool.coverage.report]
+fail_under = 60
+show_missing = true
 
 [tool.ruff]
 line-length = 100
@@ -50,9 +64,5 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
-check_untyped_defs = true
-disallow_untyped_defs = true
-no_implicit_optional = true
-warn_return_any = true
 ignore_missing_imports = true
-exclude = ["moon_poro/cogs/"]
+strict = true

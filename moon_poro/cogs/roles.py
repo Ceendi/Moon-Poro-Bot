@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Literal
+from enum import StrEnum
 
 import discord
 from discord import app_commands
@@ -9,12 +9,19 @@ from discord.ext import commands
 
 from moon_poro.bot import MoonPoroBot
 from moon_poro.permissions import administrator_only, moderator_only
+from moon_poro.responses import safe_send
 from moon_poro.roles import (
     find_role,
     member_has_role,
     member_roles_named,
     role_is_configured,
 )
+
+
+class RoleCategory(StrEnum):
+    SERVER = "server"
+    POSITION = "position"
+    OPTIONAL = "optional"
 
 
 def _custom_id(prefix: str, value: str) -> str:
@@ -27,9 +34,7 @@ async def _update_member_role(bot: MoonPoroBot, member: discord.Member) -> None:
     member_role = find_role(member.guild, settings.member_role_name, settings)
     if member_role is None:
         return
-    has_required_roles = bool(
-        member_roles_named(member, settings.lol_servers, settings)
-    ) and bool(
+    has_required_roles = bool(member_roles_named(member, settings.lol_servers, settings)) and bool(
         member_roles_named(member, settings.lol_ranks, settings)
     )
     should_have = has_required_roles or member_has_role(member, settings.no_lol_role_name, settings)
@@ -39,21 +44,25 @@ async def _update_member_role(bot: MoonPoroBot, member: discord.Member) -> None:
         await member.remove_roles(member_role, reason="Synchronizacja ról Moon Poro")
 
 
-class RankSelect(discord.ui.View):
+async def _require_guild(interaction: discord.Interaction) -> discord.Guild | None:
+    if interaction.guild is not None:
+        return interaction.guild
+    await safe_send(interaction, "Ta komenda działa tylko na serwerze.")
+    return None
+
+
+class RankDropdown(discord.ui.Select[discord.ui.View]):
     def __init__(self, bot: MoonPoroBot) -> None:
-        super().__init__(timeout=None)
         self.bot = bot
         options = [discord.SelectOption(label=rank) for rank in bot.settings.lol_ranks]
-        select = discord.ui.Select(
+        super().__init__(
             placeholder="Aktualna dywizja Solo/Duo",
             max_values=1,
             options=options,
             custom_id="roles:rank:v2",
         )
-        select.callback = self._select_rank
-        self.add_item(select)
 
-    async def _select_rank(self, interaction: discord.Interaction) -> None:
+    async def callback(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             return
         settings = self.bot.settings
@@ -68,9 +77,7 @@ class RankSelect(discord.ui.View):
             )
             return
 
-        select = self.children[0]
-        assert isinstance(select, discord.ui.Select)
-        new_role = find_role(interaction.guild, select.values[0], settings)
+        new_role = find_role(interaction.guild, self.values[0], settings)
         if new_role is None:
             await interaction.response.send_message(
                 "Skonfigurowana rola nie istnieje.", ephemeral=True
@@ -87,12 +94,18 @@ class RankSelect(discord.ui.View):
         await interaction.followup.send(f"Wybrano rangę **{new_role.name}**.", ephemeral=True)
 
 
-class ToggleRoleButton(discord.ui.Button):
+class RankSelect(discord.ui.View):
+    def __init__(self, bot: MoonPoroBot) -> None:
+        super().__init__(timeout=None)
+        self.add_item(RankDropdown(bot))
+
+
+class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
     def __init__(
         self,
         bot: MoonPoroBot,
         role_name: str,
-        category: Literal["server", "position", "optional"],
+        category: RoleCategory,
         row: int,
     ) -> None:
         styles = {
@@ -114,14 +127,14 @@ class ToggleRoleButton(discord.ui.Button):
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             return
         settings = self.bot.settings
-        if self.category in {"server", "position"} and member_has_role(
+        if self.category in {RoleCategory.SERVER, RoleCategory.POSITION} and member_has_role(
             interaction.user, settings.no_lol_role_name, settings
         ):
             await interaction.response.send_message(
                 f"Najpierw usuń rolę **{settings.no_lol_role_name}**.", ephemeral=True
             )
             return
-        if self.category == "server" and member_has_role(
+        if self.category is RoleCategory.SERVER and member_has_role(
             interaction.user, settings.verified_role_name, settings
         ):
             await interaction.response.send_message(
@@ -151,7 +164,7 @@ class RoleButtons(discord.ui.View):
         self,
         bot: MoonPoroBot,
         roles: list[str],
-        category: Literal["server", "position", "optional"],
+        category: RoleCategory,
     ) -> None:
         super().__init__(timeout=None)
         for index, role_name in enumerate(roles[:25]):
@@ -168,7 +181,11 @@ class MiscRolesView(discord.ui.View):
         style=discord.ButtonStyle.gray,
         custom_id="roles:no-lol:v2",
     )
-    async def no_lol(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def no_lol(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[MiscRolesView],
+    ) -> None:
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             return
         settings = self.bot.settings
@@ -204,7 +221,11 @@ class MiscRolesView(discord.ui.View):
         style=discord.ButtonStyle.gray,
         custom_id="roles:remove-all:v2",
     )
-    async def remove_all(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def remove_all(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[MiscRolesView],
+    ) -> None:
         if not isinstance(interaction.user, discord.Member):
             return
         settings = self.bot.settings
@@ -229,9 +250,9 @@ class RolesCog(commands.Cog):
     def __init__(self, bot: MoonPoroBot) -> None:
         self.bot = bot
         self.rank_view = RankSelect(bot)
-        self.server_view = RoleButtons(bot, bot.settings.lol_servers, "server")
-        self.position_view = RoleButtons(bot, bot.settings.lol_positions, "position")
-        self.optional_view = RoleButtons(bot, bot.settings.optional_roles, "optional")
+        self.server_view = RoleButtons(bot, bot.settings.lol_servers, RoleCategory.SERVER)
+        self.position_view = RoleButtons(bot, bot.settings.lol_positions, RoleCategory.POSITION)
+        self.optional_view = RoleButtons(bot, bot.settings.optional_roles, RoleCategory.OPTIONAL)
         self.misc_view = MiscRolesView(bot)
         for view in (
             self.rank_view,
@@ -242,32 +263,72 @@ class RolesCog(commands.Cog):
         ):
             bot.add_view(view)
 
+    async def _publish_role_panels(
+        self, interaction: discord.Interaction, *, include_all: bool
+    ) -> None:
+        channel = interaction.channel
+        if not isinstance(channel, discord.abc.Messageable):
+            await safe_send(interaction, "Nie można publikować panelu na tym kanale.")
+            return
+
+        await interaction.response.send_message("**Ranga Solo/Duo**", view=RankSelect(self.bot))
+        panels: list[tuple[str, discord.ui.View]] = [
+            (
+                "**Region**",
+                RoleButtons(self.bot, self.bot.settings.lol_servers, RoleCategory.SERVER),
+            )
+        ]
+        if include_all:
+            panels.extend(
+                [
+                    (
+                        "**Pozycje**",
+                        RoleButtons(
+                            self.bot,
+                            self.bot.settings.lol_positions,
+                            RoleCategory.POSITION,
+                        ),
+                    ),
+                    (
+                        "**Role opcjonalne**",
+                        RoleButtons(
+                            self.bot,
+                            self.bot.settings.optional_roles,
+                            RoleCategory.OPTIONAL,
+                        ),
+                    ),
+                ]
+            )
+        panels.append(("**Pozostałe**", MiscRolesView(self.bot)))
+        for content, view in panels:
+            await channel.send(content, view=view)
+
+    def _filter_allowed_roles(
+        self, roles: tuple[discord.Role | None, ...]
+    ) -> tuple[list[discord.Role], list[discord.Role]]:
+        provided = [role for role in roles if role is not None]
+        allowed = [
+            role
+            for role in provided
+            if any(
+                role_is_configured(role, name, self.bot.settings)
+                for name in self.bot.settings.allowed_role_names
+            )
+        ]
+        denied = [role for role in provided if role not in allowed]
+        return allowed, denied
+
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(name="przyznawanie_roli", description="Publikuje panel wyboru ról")
     async def publish_roles(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("**Ranga Solo/Duo**", view=RankSelect(self.bot))
-        await interaction.channel.send(
-            "**Region**", view=RoleButtons(self.bot, self.bot.settings.lol_servers, "server")
-        )
-        await interaction.channel.send(
-            "**Pozycje**", view=RoleButtons(self.bot, self.bot.settings.lol_positions, "position")
-        )
-        await interaction.channel.send(
-            "**Role opcjonalne**",
-            view=RoleButtons(self.bot, self.bot.settings.optional_roles, "optional"),
-        )
-        await interaction.channel.send("**Pozostałe**", view=MiscRolesView(self.bot))
+        await self._publish_role_panels(interaction, include_all=True)
 
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(name="start", description="Publikuje skrócony panel startowy")
     async def publish_start(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("**Ranga Solo/Duo**", view=RankSelect(self.bot))
-        await interaction.channel.send(
-            "**Region**", view=RoleButtons(self.bot, self.bot.settings.lol_servers, "server")
-        )
-        await interaction.channel.send("**Pozostałe**", view=MiscRolesView(self.bot))
+        await self._publish_role_panels(interaction, include_all=False)
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
@@ -282,16 +343,7 @@ class RolesCog(commands.Cog):
         rola4: discord.Role | None = None,
         rola5: discord.Role | None = None,
     ) -> None:
-        roles = [role for role in (rola1, rola2, rola3, rola4, rola5) if role]
-        allowed = [
-            role
-            for role in roles
-            if any(
-                role_is_configured(role, name, self.bot.settings)
-                for name in self.bot.settings.allowed_role_names
-            )
-        ]
-        denied = [role for role in roles if role not in allowed]
+        allowed, denied = self._filter_allowed_roles((rola1, rola2, rola3, rola4, rola5))
         await interaction.response.defer()
         if allowed:
             rank_roles = [
@@ -330,16 +382,8 @@ class RolesCog(commands.Cog):
         rola4: discord.Role | None = None,
         rola5: discord.Role | None = None,
     ) -> None:
-        roles = [role for role in (rola1, rola2, rola3, rola4, rola5) if role]
-        allowed = [
-            role
-            for role in roles
-            if role in uzytkownik.roles
-            and any(
-                role_is_configured(role, name, self.bot.settings)
-                for name in self.bot.settings.allowed_role_names
-            )
-        ]
+        configured, _ = self._filter_allowed_roles((rola1, rola2, rola3, rola4, rola5))
+        allowed = [role for role in configured if role in uzytkownik.roles]
         await interaction.response.defer()
         if allowed:
             await uzytkownik.remove_roles(*allowed, reason=f"Usunięcie przez {interaction.user}")
@@ -359,9 +403,7 @@ class RolesCog(commands.Cog):
             or (
                 has_no_lol
                 and bool(
-                    ranks
-                    + servers
-                    + member_roles_named(member, settings.lol_positions, settings)
+                    ranks + servers + member_roles_named(member, settings.lol_positions, settings)
                 )
             )
             or (has_member != (has_no_lol or (bool(ranks) and bool(servers))))
@@ -372,9 +414,10 @@ class RolesCog(commands.Cog):
     @app_commands.command(name="pbr", description="Pokazuje osoby z niespójnymi rolami")
     async def show_broken_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        members = [
-            member.mention for member in interaction.guild.members if self._role_problem(member)
-        ]
+        guild = await _require_guild(interaction)
+        if guild is None:
+            return
+        members = [member.mention for member in guild.members if self._role_problem(member)]
         if not members:
             await interaction.followup.send("Nie znaleziono niespójnych ról.", ephemeral=True)
             return
@@ -386,8 +429,11 @@ class RolesCog(commands.Cog):
     @app_commands.command(name="nr", description="Naprawia podstawowe zależności ról")
     async def repair_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        guild = await _require_guild(interaction)
+        if guild is None:
+            return
         changed = 0
-        for member in interaction.guild.members:
+        for member in guild.members:
             before = set(member.roles)
             await _update_member_role(self.bot, member)
             if set(member.roles) != before:
@@ -400,10 +446,13 @@ class RolesCog(commands.Cog):
     async def show_unverified_with_role(
         self, interaction: discord.Interaction, rola: discord.Role
     ) -> None:
+        guild = await _require_guild(interaction)
+        if guild is None:
+            return
         settings = self.bot.settings
         members = [
             member.mention
-            for member in interaction.guild.members
+            for member in guild.members
             if rola in member.roles
             and not member_has_role(member, settings.verified_role_name, settings)
         ]
@@ -418,13 +467,16 @@ class RolesCog(commands.Cog):
     )
     async def repair_verifications(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        guild = await _require_guild(interaction)
+        if guild is None:
+            return
         settings = self.bot.settings
-        links = await self.bot.verifications.list_for_guild(interaction.guild_id or 0)
+        links = await self.bot.verifications.list_for_guild(guild.id)
         linked_ids = {link.discord_user_id for link in links}
-        verified_role = find_role(interaction.guild, settings.verified_role_name, settings)
+        verified_role = find_role(guild, settings.verified_role_name, settings)
         fixed = 0
         if verified_role is not None:
-            for member in interaction.guild.members:
+            for member in guild.members:
                 if verified_role not in member.roles or member.id in linked_ids:
                     continue
                 to_remove = [
