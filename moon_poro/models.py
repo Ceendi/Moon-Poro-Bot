@@ -31,6 +31,18 @@ class WarningStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
+class VerificationSessionStatus(StrEnum):
+    CREATED = "CREATED"
+    AWAITING_RIOT = "AWAITING_RIOT"
+    PROCESSING_RIOT = "PROCESSING_RIOT"
+    VERIFIED_PENDING_DISCORD = "VERIFIED_PENDING_DISCORD"
+    APPLYING_DISCORD = "APPLYING_DISCORD"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
 class VerificationLink(Base):
     __tablename__ = "verification_links"
     __table_args__ = (
@@ -39,13 +51,48 @@ class VerificationLink(Base):
 
     guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
     platform: Mapped[str] = mapped_column(String(10), nullable=False)
     puuid: Mapped[str | None] = mapped_column(String(255))
     verification_method: Mapped[str] = mapped_column(String(32), default="PROFILE_ICON")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class VerificationSession(Base):
+    __tablename__ = "verification_sessions"
+    __table_args__ = (
+        Index("ix_verification_sessions_user", "guild_id", "discord_user_id", "created_at"),
+        Index(
+            "ix_verification_sessions_outbox",
+            "status",
+            "next_attempt_at",
+            "updated_at",
+        ),
+        UniqueConstraint("start_token_hash", name="uq_verification_sessions_start_token_hash"),
+        UniqueConstraint("oauth_state_hash", name="uq_verification_sessions_oauth_state_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    start_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    oauth_state_hash: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(10))
+    puuid: Mapped[str | None] = mapped_column(String(255))
+    riot_game_name: Mapped[str | None] = mapped_column(String(100))
+    riot_tag_line: Mapped[str | None] = mapped_column(String(20))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    completion_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class VerificationAccessLog(Base):

@@ -9,7 +9,7 @@ moderator statistics.
 
 ## Features
 
-- Riot ID verification and automatic Solo/Duo rank synchronization;
+- Riot Sign On verification and automatic Solo/Duo rank synchronization;
 - persistent role selection panels;
 - versioned moderation warnings with escalation, rollback, and automatic expiration;
 - monthly moderation statistics;
@@ -30,10 +30,16 @@ cp .env.example .env
 uv run python main.py
 ```
 
-Complete `.env` before starting the bot. Alembic applies pending migrations during startup, so
+Complete `.env` before starting the bot. `RSO_PUBLIC_BASE_URL` is required when verification is
+enabled. Alembic applies pending migrations during startup, so
 create a database backup before the first production deployment. On Linux, keep the secrets file
 readable only by the service account (`chmod 600 .env`). The supplied systemd unit writes logs to
 `/var/log/moon-poro` and keeps the application directory read-only.
+
+The public Astro site is in `site/`; it builds to static files and does not require Node.js on the
+production VM. The isolated RSO callback starts through `rso_main.py` with `.env.rso`. Never place
+RSO client credentials in the bot environment. See `docs/DEPLOYMENT_RSO_GCP.md` and the copy-ready
+Riot submission in `docs/RIOT_RSO_APPLICATION.md`.
 
 ## Development
 

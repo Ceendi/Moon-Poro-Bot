@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Disallow: /verify/
+Disallow: /oauth2/callback

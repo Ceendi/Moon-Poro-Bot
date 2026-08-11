@@ -16,6 +16,10 @@ from moon_poro.repositories import (
     WarningRepository,
 )
 from moon_poro.settings import Settings
+from moon_poro.verification_sessions import (
+    LinkReservationResult,
+    VerificationSessionRepository,
+)
 
 pytestmark = pytest.mark.skipif(
     "TEST_POSTGRES_PORT" not in os.environ,
@@ -69,6 +73,27 @@ async def test_migrations_and_repositories_against_postgres(
         )
         assert await verifications.purge_access_logs(guild_id, retention_days=0) == 1
 
+        rso_sessions = VerificationSessionRepository(connection.session_factory)
+        rso = await rso_sessions.create(guild_id=guild_id, user_id=102, ttl_seconds=600)
+        await rso_sessions.begin_oauth(token=rso.token, state="oauth-state")
+        callback = await rso_sessions.claim_callback("oauth-state")
+        assert (
+            await rso_sessions.reserve_link(
+                session_id=callback.id,
+                platform="EUN1",
+                puuid="rso-integration-puuid",
+                game_name="Moon",
+                tag_line="EUNE",
+            )
+            == LinkReservationResult.RESERVED
+        )
+        pending = await rso_sessions.claim_pending()
+        assert [item.discord_user_id for item in pending] == [102]
+        await rso_sessions.complete_discord(pending[0].id, message_id=202)
+        completed = await rso_sessions.get_by_start_token(rso.token)
+        assert completed is not None and completed.status == "COMPLETED"
+        assert (await verifications.get_by_user(guild_id, 102)).message_id == 202
+
         features = GuildFeatureRepository(connection.session_factory)
         assert not await features.get(guild_id, "feature", default=False)
         await features.set(guild_id, "feature", True, actor_id=501)
@@ -114,5 +139,6 @@ async def test_migrations_and_repositories_against_postgres(
         removed = await verifications.delete_by_user(guild_id, 101)
         assert removed is not None and removed.puuid == "integration-puuid"
         assert await verifications.get_by_user(guild_id, 101) is None
+        await verifications.delete_by_user(guild_id, 102)
     finally:
         await connection.close()

@@ -1,0 +1,39 @@
+{
+	admin off
+}
+
+www.moonporo.pl {
+	redir https://moonporo.pl{uri} permanent
+}
+
+moonporo.pl {
+	encode zstd gzip
+
+	header {
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'none'; style-src 'self'; upgrade-insecure-requests"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	@immutable path /_astro/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		root * /opt/moon-poro/site/dist
+		try_files {path} {path}/index.html /404.html
+		file_server
+	}
+
+	# Access logs remain disabled. The final callback URL will carry short-lived
+	# OAuth codes and state values after Riot issues the RSO client.
+}

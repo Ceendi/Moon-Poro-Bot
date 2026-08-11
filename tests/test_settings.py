@@ -16,6 +16,7 @@ def make_settings(**overrides):
         "warn_channel_id": 1,
         "zweryfikowani_channel_id": 2,
         "komendy_botowe_channel_id": 3,
+        "rso_public_base_url": "https://bot.example.com",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -71,3 +72,18 @@ def test_zero_channel_id_is_normalized_to_missing() -> None:
     settings = make_settings(member_logs_enabled=False, komendy_botowe_channel_id=0)
 
     assert settings.komendy_botowe_channel_id is None
+
+
+def test_verification_requires_public_rso_url() -> None:
+    with pytest.raises(ValidationError, match="RSO_PUBLIC_BASE_URL"):
+        make_settings(rso_public_base_url=None)
+
+
+def test_public_rso_url_requires_https() -> None:
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        make_settings(rso_public_base_url="http://bot.example.com")
+
+
+def test_public_rso_url_rejects_base_path() -> None:
+    with pytest.raises(ValidationError, match="must be an origin"):
+        make_settings(rso_public_base_url="https://bot.example.com/rso")

@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from alembic import command
-from moon_poro.settings import Settings
+from moon_poro.settings import RSOSettings, Settings
+
+type DatabaseConfiguration = Settings | RSOSettings
 
 
-def make_database_url(settings: Settings) -> URL:
+def make_database_url(settings: DatabaseConfiguration) -> URL:
     return URL.create(
         drivername="postgresql+asyncpg",
         username=settings.postgres_user,
@@ -30,7 +32,7 @@ def make_database_url(settings: Settings) -> URL:
 
 
 class Database:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: DatabaseConfiguration) -> None:
         self.engine: AsyncEngine = create_async_engine(
             make_database_url(settings),
             pool_size=settings.database_pool_size,
@@ -49,7 +51,7 @@ class Database:
         await self.engine.dispose()
 
 
-def _upgrade_database(settings: Settings) -> None:
+def _upgrade_database(settings: DatabaseConfiguration) -> None:
     root = Path(__file__).resolve().parent.parent
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
@@ -59,5 +61,5 @@ def _upgrade_database(settings: Settings) -> None:
     command.upgrade(config, "head")
 
 
-async def upgrade_database(settings: Settings) -> None:
+async def upgrade_database(settings: DatabaseConfiguration) -> None:
     await asyncio.to_thread(_upgrade_database, settings)
