@@ -1,3 +1,6 @@
+# The temporary profile-icon flow intentionally parallels the RSO cog so it can
+# be removed cleanly after the RSO rollout without coupling both implementations.
+# pylint: disable=duplicate-code
 from __future__ import annotations
 
 import asyncio
