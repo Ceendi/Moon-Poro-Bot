@@ -60,7 +60,7 @@ Po wykonaniu migracji przez konto właściciela bazy utwórz osobny login callba
 bazy i hasło:
 
 ```sql
-CREATE ROLE moon_poro_rso LOGIN PASSWORD 'WYGENEROWANE-DLUGIE-HASLO';
+CREATE ROLE moon_poro_rso LOGIN PASSWORD 'WYGENEROWANE-DLUGIE-HASLO'; -- pragma: allowlist secret
 GRANT CONNECT ON DATABASE moon_poro TO moon_poro_rso;
 GRANT USAGE ON SCHEMA public TO moon_poro_rso;
 GRANT SELECT, INSERT, UPDATE, DELETE
