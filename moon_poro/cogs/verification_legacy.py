@@ -66,9 +66,7 @@ async def _get_summoner(bot: MoonPoroBot, platform: str, puuid: str) -> RiotPayl
     )
 
 
-async def _remove_verified_marker(
-    bot: MoonPoroBot, member: discord.Member, *, reason: str
-) -> None:
+async def _remove_verified_marker(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
     verified_role = find_role(member.guild, bot.settings.verified_role_name, bot.settings)
     if verified_role is not None and verified_role in member.roles:
         await member.remove_roles(verified_role, reason=reason)
@@ -443,12 +441,10 @@ class LegacyVerificationCog(VerificationCog):
             ]
         )
         before_ids = {
-            role.id
-            for role in member_roles_named(before, protected_names, self.bot.settings)
+            role.id for role in member_roles_named(before, protected_names, self.bot.settings)
         }
         after_ids = {
-            role.id
-            for role in member_roles_named(after, protected_names, self.bot.settings)
+            role.id for role in member_roles_named(after, protected_names, self.bot.settings)
         }
         if before_ids == after_ids:
             return
