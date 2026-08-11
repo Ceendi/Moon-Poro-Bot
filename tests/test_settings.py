@@ -79,6 +79,16 @@ def test_verification_requires_public_rso_url() -> None:
         make_settings(rso_public_base_url=None)
 
 
+def test_profile_icon_verification_does_not_require_rso_url() -> None:
+    settings = make_settings(
+        verification_mode="legacy_icon",
+        rso_public_base_url=None,
+    )
+
+    assert settings.verification_mode == "legacy_icon"
+    assert settings.rso_public_base_url is None
+
+
 def test_public_rso_url_requires_https() -> None:
     with pytest.raises(ValidationError, match="must use HTTPS"):
         make_settings(rso_public_base_url="http://bot.example.com")

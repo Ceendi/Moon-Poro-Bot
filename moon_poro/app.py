@@ -27,15 +27,15 @@ def configure_logging() -> None:
         backupCount=2,
     )
     rotating_file.setFormatter(formatter)
-    logging.basicConfig(level=logging.INFO, handlers=[console, rotating_file])
+    logging.basicConfig(level=logging.INFO, handlers=[console, rotating_file], force=True)
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 async def main() -> None:
-    configure_logging()
     settings = Settings()
     await upgrade_database(settings)
+    configure_logging()
     database = Database(settings)
 
     try:

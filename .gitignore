@@ -43,3 +43,4 @@ DEPLOYMENT.md
 discord-avatar-MoonPoro.png
 *.bundle
 .local-backups/
+.codex-migration-staging/

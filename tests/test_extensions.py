@@ -72,3 +72,46 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
             await bot.unload_extension(f"moon_poro.cogs.{extension}")
 
     await database.close()
+
+
+async def test_legacy_verification_reuses_current_management_commands() -> None:
+    settings = Settings(
+        _env_file=None,
+        discord_token="discord-secret",
+        riot_api_token="riot-secret",
+        postgres_user="bot",
+        postgres_password="db-secret",  # pragma: allowlist secret
+        postgres_host="127.0.0.1",
+        postgres_db="bot",
+        guild_id=123,
+        warn_channel_id=1,
+        zweryfikowani_channel_id=2,
+        komendy_botowe_channel_id=3,
+        verification_mode="legacy_icon",
+        rso_public_base_url=None,
+    )
+    database = Database(settings)
+    riot_client = RiotAPIClient(default_headers={"X-Riot-Token": "validation-only"})
+    bot = MoonPoroBot(
+        settings=settings,
+        database=database,
+        riot_client=riot_client,
+        intents=create_intents(settings),
+    )
+
+    async with bot:
+        await bot.load_extension("moon_poro.cogs.verification_legacy")
+        commands = {command.name for command in bot.tree.get_commands()}
+        assert commands == {
+            "show_wer_discord",
+            "show_wer_user",
+            "usun_wer_nick",
+            "usun_weryfikacje",
+            "weryfikacja",
+        }
+        cog = bot.get_cog("LegacyVerificationCog")
+        assert cog is not None
+        assert not cog.complete_rso_verifications.is_running()
+        await bot.unload_extension("moon_poro.cogs.verification_legacy")
+
+    await database.close()

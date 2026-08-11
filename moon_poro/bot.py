@@ -44,7 +44,11 @@ class MoonPoroBot(commands.Bot):
         if self.settings.roles_enabled:
             extensions.append("roles")
         if self.settings.verification_enabled:
-            extensions.append("verification")
+            extensions.append(
+                "verification_legacy"
+                if self.settings.verification_mode == "legacy_icon"
+                else "verification"
+            )
         if self.settings.warnings_enabled:
             extensions.append("warnings")
         if self.settings.mod_stats_enabled:
