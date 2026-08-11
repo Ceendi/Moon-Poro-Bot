@@ -15,6 +15,7 @@ from moon_poro.repositories import (
 )
 from moon_poro.responses import install_error_handler
 from moon_poro.settings import Settings
+from moon_poro.verification_sessions import VerificationSessionRepository
 
 logger = logging.getLogger("moon_poro.bot")
 
@@ -33,6 +34,7 @@ class MoonPoroBot(commands.Bot):
         self.database = database
         self.riot_client = riot_client
         self.verifications = VerificationRepository(database.session_factory)
+        self.verification_sessions = VerificationSessionRepository(database.session_factory)
         self.warnings = WarningRepository(database.session_factory)
         self.moderation_stats = ModerationStatsRepository(database.session_factory)
         self.guild_features = GuildFeatureRepository(database.session_factory)

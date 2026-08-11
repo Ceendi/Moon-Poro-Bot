@@ -19,6 +19,7 @@ def build_settings(**overrides: object) -> Settings:
         "warn_channel_id": 1,
         "zweryfikowani_channel_id": 2,
         "komendy_botowe_channel_id": 3,
+        "rso_public_base_url": "https://bot.example.com",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import cached_property
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -68,7 +69,11 @@ class Settings(BaseSettings):
     view_timeout: int = Field(default=180, ge=30, le=3600)
     rank_refresh_interval_hours: int = Field(default=24, ge=1, le=168)
     verification_access_log_retention_days: int = Field(default=90, ge=30, le=3650)
+    verification_session_retention_days: int = Field(default=7, ge=1, le=30)
     privacy_policy_url: AnyHttpUrl | None = None
+    rso_public_base_url: AnyHttpUrl | None = None
+    rso_session_ttl_seconds: int = Field(default=600, ge=180, le=1800)
+    rso_completion_interval_seconds: int = Field(default=3, ge=1, le=30)
 
     verified_role_name: str = "Zweryfikowany"
     member_role_name: str = "Użytkownik"
@@ -140,8 +145,12 @@ class Settings(BaseSettings):
             (self.clash_filter_enabled, self.szukanie_gry_channel_id, "SZUKANIE_GRY_CHANNEL_ID"),
         ]
         missing = [name for enabled, value, name in required if enabled and value is None]
+        if self.verification_enabled and self.rso_public_base_url is None:
+            missing.append("RSO_PUBLIC_BASE_URL")
         if missing:
             raise ValueError(f"Enabled features require: {', '.join(missing)}")
+        if self.rso_public_base_url is not None:
+            _validate_public_rso_url(self.rso_public_base_url)
         expected_levels = {1, 2, 3}
         if set(self.warn_roles) != expected_levels:
             raise ValueError("WARN_ROLES must define exactly levels 1, 2 and 3")
@@ -173,3 +182,82 @@ class Settings(BaseSettings):
             + self.optional_roles
             + [self.member_role_name, self.no_lol_role_name]
         )
+
+    @cached_property
+    def rso_base_url(self) -> str:
+        if self.rso_public_base_url is None:
+            raise RuntimeError("RSO_PUBLIC_BASE_URL is not configured")
+        return str(self.rso_public_base_url).rstrip("/")
+
+
+class RSOSettings(BaseSettings):
+    """Minimal configuration loaded by the isolated RSO web process."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env.rso",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    postgres_user: str
+    postgres_password: SecretStr
+    postgres_host: str
+    postgres_port: int = 5432
+    postgres_db: str
+    database_pool_size: int = Field(default=1, ge=1, le=3)
+    database_max_overflow: int = Field(default=1, ge=0, le=2)
+    guild_id: int = Field(gt=0)
+
+    rso_client_id: str = Field(min_length=3, max_length=255)
+    rso_client_auth_method: Literal["private_key_jwt", "client_secret_basic"] = "private_key_jwt"
+    rso_client_assertion: SecretStr | None = None
+    rso_client_secret: SecretStr | None = None
+    rso_public_base_url: AnyHttpUrl
+    rso_scope: str = "openid cpid"
+    rso_allowed_platforms: list[str] = Field(default_factory=lambda: ["EUN1", "EUW1", "NA1"])
+    rso_session_ttl_seconds: int = Field(default=600, ge=180, le=1800)
+    rso_http_timeout_seconds: float = Field(default=10.0, ge=2.0, le=30.0)
+    rso_host: str = "127.0.0.1"
+    rso_port: int = Field(default=8080, ge=1024, le=65535)
+
+    @model_validator(mode="after")
+    def validate_rso_configuration(self) -> RSOSettings:
+        _validate_public_rso_url(self.rso_public_base_url)
+        scopes = set(self.rso_scope.split())
+        if not {"openid", "cpid"}.issubset(scopes):
+            raise ValueError("RSO_SCOPE must include openid and cpid")
+        if "offline_access" in scopes:
+            raise ValueError("offline_access is not used; Moon Poro never stores refresh tokens")
+        if self.rso_client_auth_method == "private_key_jwt":
+            if self.rso_client_assertion is None:
+                raise ValueError("private_key_jwt requires RSO_CLIENT_ASSERTION")
+        elif self.rso_client_secret is None:
+            raise ValueError("client_secret_basic requires RSO_CLIENT_SECRET")
+        normalized_platforms = [platform.strip().upper() for platform in self.rso_allowed_platforms]
+        if not normalized_platforms or any(not value for value in normalized_platforms):
+            raise ValueError("RSO_ALLOWED_PLATFORMS cannot be empty")
+        unsupported = set(normalized_platforms) - {"EUN1", "EUW1", "NA1"}
+        if unsupported:
+            raise ValueError(
+                "RSO_ALLOWED_PLATFORMS contains platforms without configured Discord roles: "
+                + ", ".join(sorted(unsupported))
+            )
+        self.rso_allowed_platforms = list(dict.fromkeys(normalized_platforms))
+        return self
+
+    @cached_property
+    def rso_base_url(self) -> str:
+        return str(self.rso_public_base_url).rstrip("/")
+
+    @cached_property
+    def rso_callback_url(self) -> str:
+        return f"{self.rso_base_url}/oauth2/callback"
+
+
+def _validate_public_rso_url(url: AnyHttpUrl) -> None:
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    if url.scheme != "https" and url.host not in local_hosts:
+        raise ValueError("RSO_PUBLIC_BASE_URL must use HTTPS outside local development")
+    if url.path not in (None, "", "/") or url.query or url.fragment or url.username or url.password:
+        raise ValueError("RSO_PUBLIC_BASE_URL must be an origin without path, query or credentials")

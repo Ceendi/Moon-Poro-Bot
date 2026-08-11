@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from contextlib import suppress
 from typing import Any
 
@@ -10,18 +9,16 @@ import discord
 from discord import app_commands
 from discord.app_commands import Choice
 from discord.ext import commands, tasks
-from sqlalchemy.exc import IntegrityError
 
 from moon_poro.bot import MoonPoroBot
+from moon_poro.models import VerificationSession
 from moon_poro.permissions import administrator_only
 from moon_poro.riot import (
     API_SERVERS,
     SERVER_TRANSLATION,
-    SERVERS,
     RiotAPIUnavailable,
     get_discord_rank_role,
     get_rank_from_leagues,
-    profile_icon_url,
     riot_api_call,
 )
 from moon_poro.roles import find_role, member_has_role, member_roles_named
@@ -101,200 +98,6 @@ async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, re
         await member.remove_roles(*to_remove, reason=reason)
 
 
-class ConfirmVerificationView(discord.ui.View):
-    def __init__(
-        self,
-        *,
-        bot: MoonPoroBot,
-        expected_icon_id: int,
-        puuid: str,
-        platform: str,
-    ) -> None:
-        super().__init__(timeout=bot.settings.verification_timeout)
-        self.bot = bot
-        self.expected_icon_id = expected_icon_id
-        self.puuid = puuid
-        self.platform = platform
-        self.message: discord.InteractionMessage | None = None
-
-    async def on_timeout(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self.message is not None:
-            with suppress(discord.NotFound):
-                await self.message.edit(
-                    embed=discord.Embed(
-                        title="Czas minął",
-                        description="Rozpocznij weryfikację ponownie.",
-                        colour=discord.Colour.orange(),
-                    ),
-                    view=self,
-                )
-
-    @discord.ui.button(label="✓ Zweryfikuj", style=discord.ButtonStyle.green)
-    async def confirm(
-        self,
-        interaction: discord.Interaction,
-        _button: discord.ui.Button[ConfirmVerificationView],
-    ) -> None:
-        if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        settings = self.bot.settings
-        if member_has_role(interaction.user, settings.verified_role_name, settings):
-            await interaction.followup.send(
-                "To konto Discord jest już zweryfikowane.", ephemeral=True
-            )
-            return
-        if await self.bot.verifications.get_by_user(interaction.guild.id, interaction.user.id):
-            await interaction.followup.send(
-                "To konto Discord ma już zapisane powiązanie.", ephemeral=True
-            )
-            return
-        if await self.bot.verifications.get_by_puuid(interaction.guild.id, self.puuid):
-            await interaction.followup.send("To konto Riot jest już powiązane.", ephemeral=True)
-            return
-
-        try:
-            summoner = await riot_api_call(
-                lambda: self.bot.riot_client.get_lol_summoner_v4_by_puuid(
-                    region=self.platform, puuid=self.puuid
-                )
-            )
-            if summoner is None or summoner["profileIconId"] != self.expected_icon_id:
-                await interaction.followup.send(
-                    "Ikona profilu nie jest zgodna. Ustaw wskazaną ikonę i spróbuj ponownie.",
-                    ephemeral=True,
-                )
-                return
-            leagues = await _get_leagues(self.bot, self.platform, self.puuid)
-        except RiotAPIUnavailable:
-            await interaction.followup.send(
-                "Riot API jest chwilowo niedostępne. Spróbuj ponownie później.", ephemeral=True
-            )
-            return
-
-        channel_id = settings.zweryfikowani_channel_id
-        channel = interaction.guild.get_channel(channel_id) if channel_id else None
-        if not isinstance(channel, discord.abc.Messageable):
-            await interaction.followup.send(
-                "Kanał weryfikacji jest źle skonfigurowany.", ephemeral=True
-            )
-            return
-        embed = discord.Embed(title="Zweryfikowane konto", colour=discord.Colour.green())
-        embed.add_field(
-            name="Discord", value=f"{interaction.user.mention} (`{interaction.user.id}`)"
-        )
-        embed.add_field(name="Region", value=SERVER_TRANSLATION[self.platform])
-        audit_message = await channel.send(
-            embed=embed, allowed_mentions=discord.AllowedMentions.none()
-        )
-        try:
-            await self.bot.verifications.create(
-                guild_id=interaction.guild.id,
-                user_id=interaction.user.id,
-                message_id=audit_message.id,
-                platform=self.platform,
-                puuid=self.puuid,
-            )
-        except IntegrityError:
-            await audit_message.delete()
-            await interaction.followup.send(
-                "Weryfikacja została w tym samym czasie zapisana przez inną operację.",
-                ephemeral=True,
-            )
-            return
-
-        await _apply_verified_roles(self.bot, interaction.user, self.platform, leagues)
-        self.stop()
-        await interaction.followup.send("Konto Riot zostało zweryfikowane.", ephemeral=True)
-
-
-class VerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
-    game_name: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
-        label="Riot ID — nazwa", placeholder="Nazwa gracza", min_length=3, max_length=16
-    )
-    tag: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
-        label="Riot ID — tag", placeholder="EUNE", min_length=3, max_length=6
-    )
-    server: discord.ui.TextInput[VerificationModal] = discord.ui.TextInput(
-        label="Region", placeholder="EUNE, EUW lub NA", default="EUNE", min_length=2, max_length=4
-    )
-
-    def __init__(self, bot: MoonPoroBot) -> None:
-        super().__init__(timeout=bot.settings.verification_timeout)
-        self.bot = bot
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        server_key = str(self.server.value).casefold()
-        if server_key not in SERVERS:
-            await interaction.followup.send("Dostępne regiony: EUNE, EUW i NA.", ephemeral=True)
-            return
-        platform = SERVERS[server_key]
-        routing = API_SERVERS[server_key]
-        tag = str(self.tag.value).replace("#", "").strip()
-
-        try:
-            account = await riot_api_call(
-                lambda: self.bot.riot_client.get_account_v1_by_riot_id(
-                    game_name=str(self.game_name.value).strip(), tag_line=tag, region=routing
-                ),
-                not_found=None,
-            )
-            if account is None:
-                await interaction.followup.send("Nie znaleziono podanego Riot ID.", ephemeral=True)
-                return
-            if await self.bot.verifications.get_by_puuid(
-                interaction.guild_id or 0, account["puuid"]
-            ):
-                await interaction.followup.send("To konto Riot jest już powiązane.", ephemeral=True)
-                return
-            summoner = await riot_api_call(
-                lambda: self.bot.riot_client.get_lol_summoner_v4_by_puuid(
-                    region=platform, puuid=account["puuid"]
-                ),
-                not_found=None,
-            )
-        except RiotAPIUnavailable:
-            await interaction.followup.send("Riot API jest chwilowo niedostępne.", ephemeral=True)
-            return
-        if summoner is None:
-            await interaction.followup.send(
-                "To konto nie ma profilu LoL w tym regionie.", ephemeral=True
-            )
-            return
-
-        candidates = [icon_id for icon_id in range(28) if icon_id != summoner["profileIconId"]]
-        expected_icon = secrets.choice(candidates)
-        view = ConfirmVerificationView(
-            bot=self.bot,
-            expected_icon_id=expected_icon,
-            puuid=account["puuid"],
-            platform=platform,
-        )
-        embed = discord.Embed(
-            title="Potwierdź kontrolę nad kontem",
-            description=(
-                "Ustaw na koncie Riot ikonę widoczną poniżej, a następnie kliknij **Zweryfikuj**. "
-                f"Masz {self.bot.settings.verification_timeout // 60} min."
-            ),
-            colour=discord.Colour.blue(),
-        )
-        embed.set_image(url=profile_icon_url(expected_icon))
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        view.message = await interaction.original_response()
-
-    async def on_error(
-        self,
-        _interaction: discord.Interaction,
-        error: Exception,
-        *_items: object,
-    ) -> None:
-        logger.exception("Verification modal failed", exc_info=error)
-
-
 class VerificationStartView(discord.ui.View):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
@@ -308,9 +111,9 @@ class VerificationStartView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="🔐 Weryfikacja",
+        label="🔐 Zweryfikuj przez Riot",
         style=discord.ButtonStyle.red,
-        custom_id="verification:start:v2",
+        custom_id="verification:start:rso:v1",
     )
     async def start(
         self,
@@ -331,7 +134,47 @@ class VerificationStartView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(VerificationModal(self.bot))
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "Weryfikację rozpocznij na serwerze Discord.", ephemeral=True
+            )
+            return
+        if await self.bot.verifications.get_by_user(interaction.guild.id, interaction.user.id):
+            await interaction.response.send_message(
+                "To konto Discord ma już zapisane powiązanie. Użyj `/usun_weryfikacje`, "
+                "jeśli chcesz połączyć inne konto Riot.",
+                ephemeral=True,
+            )
+            return
+
+        session = await self.bot.verification_sessions.create(
+            guild_id=interaction.guild.id,
+            user_id=interaction.user.id,
+            ttl_seconds=self.bot.settings.rso_session_ttl_seconds,
+        )
+        verification_url = f"{self.bot.settings.rso_base_url}/verify/start/{session.token}"
+        link_view = discord.ui.View(timeout=self.bot.settings.rso_session_ttl_seconds)
+        link_view.add_item(
+            discord.ui.Button(
+                label="Przejdź do bezpiecznego logowania Riot",
+                style=discord.ButtonStyle.link,
+                url=verification_url,
+            )
+        )
+        minutes = self.bot.settings.rso_session_ttl_seconds // 60
+        embed = discord.Embed(
+            title="Połącz konto przez Riot Sign On",
+            description=(
+                "Kliknij przycisk poniżej i zaloguj się bezpośrednio na stronie Riot. "
+                "Moon Poro nie widzi Twojego hasła i nie zapisuje tokenów logowania. "
+                f"Jednorazowy link wygaśnie za {minutes} min."
+            ),
+            colour=discord.Colour.from_rgb(116, 211, 224),
+        )
+        embed.set_footer(
+            text="Po zakończeniu wróć do Discorda — role zostaną nadane automatycznie."
+        )
+        await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
 
 class VerificationCog(commands.Cog):
@@ -339,10 +182,105 @@ class VerificationCog(commands.Cog):
         self.bot = bot
         bot.add_view(VerificationStartView(bot))
         self.refresh_verified.change_interval(hours=bot.settings.rank_refresh_interval_hours)
+        self.complete_rso_verifications.change_interval(
+            seconds=bot.settings.rso_completion_interval_seconds
+        )
         self.refresh_verified.start()
+        self.complete_rso_verifications.start()
 
     async def cog_unload(self) -> None:
         self.refresh_verified.cancel()
+        self.complete_rso_verifications.cancel()
+
+    @tasks.loop(seconds=3, reconnect=True)
+    async def complete_rso_verifications(self) -> None:
+        records = await self.bot.verification_sessions.claim_pending(limit=5)
+        for record in records:
+            try:
+                await self._complete_rso_verification(record)
+            except Exception:
+                logger.exception("Unexpected RSO completion error for session %s", record.id)
+                await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
+
+    async def _complete_rso_verification(self, record: VerificationSession) -> None:
+        if record.platform is None or record.puuid is None:
+            await self.bot.verification_sessions.fail_discord(record.id, "INCOMPLETE_RSO_DATA")
+            return
+        guild = self.bot.get_guild(record.guild_id)
+        if guild is None:
+            await self.bot.verification_sessions.fail_discord(record.id, "GUILD_NOT_FOUND")
+            return
+        member = guild.get_member(record.discord_user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(record.discord_user_id)
+            except discord.NotFound:
+                await self.bot.verification_sessions.fail_discord(record.id, "MEMBER_LEFT_GUILD")
+                return
+            except discord.HTTPException:
+                await self._retry_rso_completion(record, "DISCORD_MEMBER_UNAVAILABLE")
+                return
+
+        try:
+            leagues = await _get_leagues(self.bot, record.platform, record.puuid)
+            await _apply_verified_roles(self.bot, member, record.platform, leagues)
+        except RiotAPIUnavailable:
+            await self._retry_rso_completion(record, "RIOT_API_UNAVAILABLE")
+            return
+        except discord.HTTPException:
+            await self._retry_rso_completion(record, "DISCORD_ROLES_UNAVAILABLE")
+            return
+
+        audit_message_id: int | None = None
+        channel_id = self.bot.settings.zweryfikowani_channel_id
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if isinstance(channel, discord.abc.Messageable):
+            embed = discord.Embed(title="Zweryfikowane konto — RSO", colour=discord.Colour.green())
+            embed.add_field(name="Discord", value=f"<@{member.id}> (`{member.id}`)")
+            embed.add_field(name="Region", value=SERVER_TRANSLATION[record.platform])
+            if record.riot_game_name and record.riot_tag_line:
+                embed.add_field(
+                    name="Riot ID",
+                    value=f"{record.riot_game_name}#{record.riot_tag_line}",
+                    inline=False,
+                )
+            try:
+                audit_message = await channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                audit_message_id = audit_message.id
+            except discord.HTTPException:
+                logger.exception("Could not publish RSO audit message for session %s", record.id)
+        else:
+            logger.error("Verification audit channel %s is unavailable", channel_id)
+
+        completed = await self.bot.verification_sessions.complete_discord(
+            record.id, message_id=audit_message_id
+        )
+        if not completed:
+            await _remove_verified_roles(
+                self.bot,
+                member,
+                reason="Weryfikacja RSO została anulowana w trakcie finalizacji",
+            )
+            if audit_message_id is not None and isinstance(channel, discord.abc.Messageable):
+                with suppress(discord.NotFound, discord.HTTPException):
+                    await channel.get_partial_message(audit_message_id).delete()
+            return
+        with suppress(discord.Forbidden, discord.HTTPException):
+            await member.send(
+                "Twoje konto Riot zostało zweryfikowane przez Riot Sign On. "
+                f"Na serwerze **{guild.name}** zaktualizowano role regionu i rangi."
+            )
+
+    async def _retry_rso_completion(self, record: VerificationSession, error_code: str) -> None:
+        delay = min(5 * (2 ** max(record.completion_attempts - 1, 0)), 300)
+        await self.bot.verification_sessions.retry_discord(
+            record.id,
+            error_code=error_code,
+            delay_seconds=delay,
+        )
 
     @tasks.loop(hours=24, reconnect=True)
     async def refresh_verified(self) -> None:
@@ -353,12 +291,20 @@ class VerificationCog(commands.Cog):
             removed_logs = await self.bot.verifications.purge_access_logs(
                 guild.id, self.bot.settings.verification_access_log_retention_days
             )
+            (
+                expired_sessions,
+                purged_sessions,
+            ) = await self.bot.verification_sessions.expire_and_purge(
+                retention_days=self.bot.settings.verification_session_retention_days
+            )
             links = await self.bot.verifications.list_for_guild(guild.id)
         except Exception:
             logger.exception("Could not load verification refresh data; next run will retry")
             return
         if removed_logs:
             logger.info("Removed %s expired verification access logs", removed_logs)
+        if expired_sessions or purged_sessions:
+            logger.info("Expired %s and purged %s RSO sessions", expired_sessions, purged_sessions)
         for link in links:
             member = guild.get_member(link.discord_user_id)
             if member is None or not link.puuid:
@@ -376,9 +322,17 @@ class VerificationCog(commands.Cog):
     async def before_refresh(self) -> None:
         await self.bot.wait_until_ready()
 
+    @complete_rso_verifications.before_loop
+    async def before_rso_completion(self) -> None:
+        await self.bot.wait_until_ready()
+
     @refresh_verified.error
     async def refresh_error(self, error: BaseException) -> None:
         logger.exception("Rank refresh loop failed", exc_info=error)
+
+    @complete_rso_verifications.error
+    async def rso_completion_error(self, error: BaseException) -> None:
+        logger.exception("RSO completion loop failed", exc_info=error)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
@@ -395,16 +349,18 @@ class VerificationCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(name="weryfikacja", description="Publikuje panel weryfikacji Riot")
     async def publish_verification(self, interaction: discord.Interaction) -> None:
-        privacy_reference = (
-            f"Polityka prywatności: {self.bot.settings.privacy_policy_url}"
-            if self.bot.settings.privacy_policy_url
-            else "Pełną politykę prywatności udostępnia administracja serwera."
+        privacy_url = self.bot.settings.privacy_policy_url or (
+            f"{self.bot.settings.rso_base_url}/privacy"
         )
+        privacy_reference = f"Polityka prywatności: {privacy_url}."
         content = (
-            "**Weryfikacja konta Riot**\n"
-            "Bot zapisuje identyfikator PUUID i powiązanie z kontem Discord, aby aktualizować rangę. "
-            "Dane nie są publiczne. Uprawnieni administratorzy mogą wykonać audytowany lookup "
-            f"w celach moderacyjnych lub pomocy technicznej. {privacy_reference}"
+            "**Weryfikacja konta przez Riot Sign On**\n"
+            "Po kliknięciu otrzymasz prywatny, jednorazowy link do oficjalnego logowania Riot. "
+            "Bot nie widzi hasła i nie zapisuje tokenów logowania. Zapisujemy PUUID, region i "
+            "powiązanie z Discordem, aby nadawać oraz aktualizować rangę. Dane nie są publiczne. "
+            "Uprawnieni administratorzy mogą wykonać audytowany lookup wyłącznie dla moderacji "
+            f"lub pomocy technicznej. {privacy_reference} "
+            f"Warunki korzystania: {self.bot.settings.rso_base_url}/terms"
         )
         await interaction.response.send_message(content, view=VerificationStartView(self.bot))
 
@@ -415,6 +371,9 @@ class VerificationCog(commands.Cog):
         link = await self.bot.verifications.delete_by_user(
             interaction.guild_id or 0, interaction.user.id
         )
+        await self.bot.verification_sessions.cancel_for_user(
+            interaction.guild_id or 0, interaction.user.id
+        )
         if interaction.guild is not None:
             if isinstance(interaction.user, discord.Member):
                 await _remove_verified_roles(
@@ -422,7 +381,7 @@ class VerificationCog(commands.Cog):
                     interaction.user,
                     reason="Usunięcie weryfikacji przez użytkownika",
                 )
-            if link and self.bot.settings.zweryfikowani_channel_id:
+            if link and link.message_id and self.bot.settings.zweryfikowani_channel_id:
                 channel = interaction.guild.get_channel(self.bot.settings.zweryfikowani_channel_id)
                 if isinstance(channel, discord.abc.Messageable):
                     with suppress(discord.NotFound):
@@ -564,6 +523,9 @@ class VerificationCog(commands.Cog):
         if removed is None:
             await interaction.followup.send("To konto nie było powiązane.", ephemeral=True)
             return
+        await self.bot.verification_sessions.cancel_for_user(
+            interaction.guild_id or 0, removed.discord_user_id
+        )
         if interaction.guild is not None:
             member = interaction.guild.get_member(removed.discord_user_id)
             if member:
@@ -572,7 +534,7 @@ class VerificationCog(commands.Cog):
                 )
             channel_id = self.bot.settings.zweryfikowani_channel_id
             channel = interaction.guild.get_channel(channel_id) if channel_id else None
-            if isinstance(channel, discord.abc.Messageable):
+            if removed.message_id and isinstance(channel, discord.abc.Messageable):
                 with suppress(discord.NotFound):
                     await channel.get_partial_message(removed.message_id).delete()
         await interaction.followup.send("Usunięto powiązanie i zapisano operację.", ephemeral=True)

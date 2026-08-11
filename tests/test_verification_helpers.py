@@ -5,12 +5,12 @@ import pytest
 
 from moon_poro.cogs import verification
 from moon_poro.cogs.verification import (
-    ConfirmVerificationView,
     VerificationStartView,
     _apply_verified_roles,
     _get_leagues,
     _remove_verified_roles,
 )
+from moon_poro.verification_sessions import CreatedVerificationSession
 
 
 class FakeRole:
@@ -87,42 +87,82 @@ async def test_remove_verified_roles_removes_every_managed_role(
     member.remove_roles.assert_awaited_once_with(*managed, reason="test")
 
 
-async def test_confirmation_timeout_disables_button() -> None:
-    bot = SimpleNamespace(settings=SimpleNamespace(verification_timeout=60))
-    view = ConfirmVerificationView(
-        bot=bot,
-        expected_icon_id=7,
-        puuid="puuid",
-        platform="EUN1",
-    )
-    view.message = SimpleNamespace(edit=AsyncMock())
-
-    await view.on_timeout()
-
-    assert all(item.disabled for item in view.children)
-    view.message.edit.assert_awaited_once()
-
-
-async def test_verification_start_opens_modal(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_verification_start_creates_one_time_rso_link() -> None:
+    member = Mock(spec=verification.discord.Member)
+    member.id = 101
+    member.roles = []
+    guild = SimpleNamespace(id=123)
+    response = SimpleNamespace(send_message=AsyncMock())
     bot = SimpleNamespace(
         settings=SimpleNamespace(
-            verification_timeout=60,
             verification_cooldown=30,
             verified_role_name="Verified",
-        )
+            role_ids={},
+            rso_session_ttl_seconds=600,
+            rso_base_url="https://bot.example.com",
+        ),
+        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_sessions=SimpleNamespace(
+            create=AsyncMock(
+                return_value=CreatedVerificationSession(
+                    token="a" * 43,
+                    expires_at=verification.discord.utils.utcnow(),
+                )
+            )
+        ),
     )
     view = VerificationStartView(bot)
-    modal = object()
-    monkeypatch.setattr(verification, "VerificationModal", Mock(return_value=modal))
     interaction = SimpleNamespace(
-        user=SimpleNamespace(id=101),
-        response=SimpleNamespace(send_modal=AsyncMock(), send_message=AsyncMock()),
+        user=member,
+        guild=guild,
+        response=response,
     )
     button = view.children[0]
 
     await button.callback(interaction)
-    await button.callback(interaction)
 
-    interaction.response.send_modal.assert_awaited_once_with(modal)
-    interaction.response.send_message.assert_awaited_once()
-    assert "Spróbuj ponownie" in interaction.response.send_message.await_args.args[0]
+    bot.verification_sessions.create.assert_awaited_once_with(
+        guild_id=123,
+        user_id=101,
+        ttl_seconds=600,
+    )
+    response.send_message.assert_awaited_once()
+    sent_view = response.send_message.await_args.kwargs["view"]
+    assert sent_view.children[0].url == "https://bot.example.com/verify/start/" + "a" * 43
+    assert response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+async def test_verification_start_is_rate_limited() -> None:
+    member = Mock(spec=verification.discord.Member)
+    member.id = 101
+    member.roles = []
+    response = SimpleNamespace(send_message=AsyncMock())
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            verification_cooldown=30,
+            verified_role_name="Verified",
+            role_ids={},
+            rso_session_ttl_seconds=600,
+            rso_base_url="https://bot.example.com",
+        ),
+        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_sessions=SimpleNamespace(
+            create=AsyncMock(
+                return_value=CreatedVerificationSession(
+                    token="a" * 43,
+                    expires_at=verification.discord.utils.utcnow(),
+                )
+            )
+        ),
+    )
+    view = VerificationStartView(bot)
+    interaction = SimpleNamespace(
+        user=member,
+        guild=SimpleNamespace(id=123),
+        response=response,
+    )
+
+    await view.children[0].callback(interaction)
+    await view.children[0].callback(interaction)
+
+    assert "Spróbuj ponownie" in response.send_message.await_args_list[1].args[0]

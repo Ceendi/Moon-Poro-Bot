@@ -18,6 +18,7 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
         warn_channel_id=1,
         zweryfikowani_channel_id=2,
         komendy_botowe_channel_id=3,
+        rso_public_base_url="https://bot.example.com",
     )
     database = Database(settings)
     riot_client = RiotAPIClient(default_headers={"X-Riot-Token": "validation-only"})
