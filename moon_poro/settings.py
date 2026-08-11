@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     mod_alert_channel_id: int | None = None
 
     verification_enabled: bool = True
+    verification_mode: Literal["legacy_icon", "rso"] = "rso"
     roles_enabled: bool = True
     warnings_enabled: bool = True
     mod_stats_enabled: bool = True
@@ -145,7 +146,11 @@ class Settings(BaseSettings):
             (self.clash_filter_enabled, self.szukanie_gry_channel_id, "SZUKANIE_GRY_CHANNEL_ID"),
         ]
         missing = [name for enabled, value, name in required if enabled and value is None]
-        if self.verification_enabled and self.rso_public_base_url is None:
+        if (
+            self.verification_enabled
+            and self.verification_mode == "rso"
+            and self.rso_public_base_url is None
+        ):
             missing.append("RSO_PUBLIC_BASE_URL")
         if missing:
             raise ValueError(f"Enabled features require: {', '.join(missing)}")
