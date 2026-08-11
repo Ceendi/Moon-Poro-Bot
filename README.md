@@ -41,6 +41,28 @@ production VM. The isolated RSO callback starts through `rso_main.py` with `.env
 RSO client credentials in the bot environment. See `docs/DEPLOYMENT_RSO_GCP.md` and the copy-ready
 Riot submission in `docs/RIOT_RSO_APPLICATION.md`.
 
+## Production updates
+
+The `moon-poro-web` deployment uses a clean Git checkout at `/opt/moon-poro-prod`, systemd, and a
+pinned `uv` tool environment. Install the deployment and daily backup helpers once from the checked
+out repository:
+
+```bash
+sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh
+```
+
+After a pull request has passed CI and been merged into `master`, deploy it with:
+
+```bash
+sudo /usr/local/sbin/deploy-moon-poro-prod
+```
+
+The deployment refuses local tracked changes and non-fast-forward updates. Before changing code it
+creates a custom-format dump of `moon_poro_prod`, verifies it with `pg_restore --list`, and writes a
+SHA-256 checksum. Daily backups use the same procedure through
+`moon-poro-prod-backup.timer`. Backups remain in `/var/backups/moon-poro-prod` and are never deleted
+automatically.
+
 ## Development
 
 ```bash

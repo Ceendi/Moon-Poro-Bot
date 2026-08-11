@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified Moon Poro production PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=moon-poro-prod-backup.service
+
+[Install]
+WantedBy=timers.target
