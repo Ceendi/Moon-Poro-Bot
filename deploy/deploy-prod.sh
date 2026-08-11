@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 readonly REPOSITORY="/opt/moon-poro-prod"
 readonly SERVICE="moon-poro-prod.service"
-readonly BACKUP_SERVICE="moon-poro-prod-backup.service"
+readonly BACKUP_SERVICE="moon-poro-prod-pre-deploy-backup.service"
 readonly UV="/opt/moon-poro-deploy-tools/bin/uv"
 readonly UV_RUNTIME="/opt/moon-poro-prod-runtime"
 readonly EXPECTED_REMOTE="https://github.com/Ceendi/Moon-Poro-Bot.git"

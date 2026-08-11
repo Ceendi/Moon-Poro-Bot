@@ -1,5 +1,5 @@
 [Unit]
-Description=Verified daily Moon Poro production PostgreSQL backup
+Description=Verified pre-deploy Moon Poro production PostgreSQL backup
 After=postgresql-moon-poro-test.service
 Requires=postgresql-moon-poro-test.service
 
@@ -7,7 +7,7 @@ Requires=postgresql-moon-poro-test.service
 Type=oneshot
 User=postgres
 Group=postgres
-ExecStart=/usr/local/sbin/backup-moon-poro-prod-db daily
+ExecStart=/usr/local/sbin/backup-moon-poro-prod-db pre-deploy
 UMask=0077
 Nice=10
 IOSchedulingClass=best-effort

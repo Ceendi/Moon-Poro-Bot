@@ -60,8 +60,10 @@ sudo /usr/local/sbin/deploy-moon-poro-prod
 The deployment refuses local tracked changes and non-fast-forward updates. Before changing code it
 creates a custom-format dump of `moon_poro_prod`, verifies it with `pg_restore --list`, and writes a
 SHA-256 checksum. Daily backups use the same procedure through
-`moon-poro-prod-backup.timer`. Backups remain in `/var/backups/moon-poro-prod` and are never deleted
-automatically.
+`moon-poro-prod-backup.timer`. Daily backup pairs remain for 90 days in
+`/var/backups/moon-poro-prod/daily`; cleanup runs only after a new dump and checksum have been
+verified. Backups made before deployments remain in `/var/backups/moon-poro-prod/pre-deploy` and
+are never deleted automatically.
 
 ## Development
 

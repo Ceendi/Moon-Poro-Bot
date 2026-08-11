@@ -4,8 +4,21 @@ set -Eeuo pipefail
 umask 0077
 
 readonly DATABASE="moon_poro_prod"
-readonly BACKUP_DIR="/var/backups/moon-poro-prod"
+readonly BACKUP_ROOT="/var/backups/moon-poro-prod"
+readonly BACKUP_KIND="${1:-}"
+readonly RETENTION_DAYS=90
 readonly MIN_FREE_KIB=$((1024 * 1024))
+readonly BACKUP_NAME_PATTERN='^moon_poro_prod-[0-9]{8}T[0-9]{6}Z\.dump$'
+
+case "$BACKUP_KIND" in
+    daily | pre-deploy) ;;
+    *)
+        echo "Usage: $0 {daily|pre-deploy}" >&2
+        exit 1
+        ;;
+esac
+
+readonly BACKUP_DIR="$BACKUP_ROOT/$BACKUP_KIND"
 
 if [[ "$(id -un)" != "postgres" ]]; then
     echo "This backup must run as the postgres system user." >&2
@@ -17,7 +30,7 @@ if [[ ! -d "$BACKUP_DIR" || ! -w "$BACKUP_DIR" ]]; then
     exit 1
 fi
 
-exec 9>"$BACKUP_DIR/.backup.lock"
+exec 9>"$BACKUP_ROOT/.backup.lock"
 if ! flock -n 9; then
     echo "Another Moon Poro database backup is already running." >&2
     exit 1
@@ -52,6 +65,29 @@ fi
 cleanup_partial() {
     rm -f -- "$partial_path"
 }
+
+prune_expired_daily_backups() {
+    local old_dump old_name old_checksum
+
+    while IFS= read -r -d '' old_dump; do
+        old_name="${old_dump##*/}"
+        if [[ ! "$old_name" =~ $BACKUP_NAME_PATTERN ]]; then
+            echo "Skipping unexpected daily backup name: $old_name" >&2
+            continue
+        fi
+        old_checksum="${old_dump}.sha256"
+        if [[ ! -f "$old_checksum" ]]; then
+            echo "Skipping daily backup without checksum: $old_name" >&2
+            continue
+        fi
+        rm -- "$old_dump" "$old_checksum"
+        echo "Removed expired daily backup pair: $old_name"
+    done < <(
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name "${DATABASE}-*.dump" \
+            -mtime "+$RETENTION_DAYS" -print0
+    )
+}
+
 trap cleanup_partial EXIT
 
 pg_dump --dbname="$DATABASE" --format=custom --file="$partial_path"
@@ -64,5 +100,9 @@ mv -- "$partial_path" "$dump_path"
 chmod 0600 -- "$dump_path" "$checksum_path"
 trap - EXIT
 
-echo "Verified PostgreSQL backup created: $dump_path"
+if [[ "$BACKUP_KIND" == "daily" ]]; then
+    prune_expired_daily_backups
+fi
+
+echo "Verified $BACKUP_KIND PostgreSQL backup created: $dump_path"
 echo "Checksum: $checksum_path"
