@@ -1,0 +1,23 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { siteConfig } from "../config";
+---
+
+<BaseLayout title="Jak działa Riot Sign On" description="Dokładny przepływ weryfikacji Moon Poro: jednorazowy link Discord, autoryzacja Riot, callback i automatyczne role.">
+  <section class="page-hero">
+    <p class="eyebrow">Riot Sign On · OAuth 2.0 / OpenID</p>
+    <h1>Jak działa weryfikacja przez Riot Sign On</h1>
+    <p class="lead">Moon Poro używa przepływu Authorization Code. Dane logowania wpisujesz wyłącznie na stronie Riot, a po autoryzacji wracasz do Moon Poro.</p>
+  </section>
+  <section class="article">
+    <aside class="legal-aside">Dokument przepływu<br />App ID: {siteConfig.appId}<br />Callback: /oauth2/callback</aside>
+    <div class="article-content">
+      <section><h2>1. Prywatny link z Discorda</h2><p>Użytkownik klika „Zweryfikuj przez Riot”. Bot zapisuje sesję ważną 10 minut i wysyła link widoczny tylko dla tej osoby. Token linku ma 256 bitów entropii i w bazie istnieje wyłącznie jako skrót SHA‑256.</p><p>Otworzenie strony nie zużywa linku. Dopiero świadome kliknięcie formularza rozpoczyna RSO, więc automatyczne skanery linków nie blokują użytkownika.</p></section>
+      <section><h2>2. Autoryzacja po stronie Riot</h2><p>Przeglądarka trafia do <span class="mono">auth.riotgames.com/authorize</span>. Żądamy tylko dwóch zakresów:</p><span class="scope-code">openid cpid</span><p><span class="mono">openid</span> identyfikuje konto, a <span class="mono">cpid</span> zwraca platformę League of Legends. Nie żądamy <span class="mono">offline_access</span>, ponieważ nie odświeżamy ani nie zapisujemy tokenów.</p></section>
+      <section><h2>3. Callback i potwierdzenie konta</h2><p>Riot wraca na dokładnie zarejestrowany adres callback. Serwer porównuje jednorazowy parametr <span class="mono">state</span>, wymienia kod połączeniem server‑to‑server i pobiera konto z <span class="mono">/riot/account/v1/accounts/me</span> oraz platformę z <span class="mono">/userinfo</span>.</p><p>Access token pozostaje w pamięci tylko na czas tych żądań. Nie trafia do bazy, ciasteczka, logów ani procesu Discorda.</p></section>
+      <section><h2>4. Role w Discordzie</h2><p>Callback rezerwuje unikalne powiązanie PUUID ↔ Discord. Bot pobiera oficjalną rangę Solo/Duo, nadaje role i wysyła prywatne potwierdzenie. Jeśli Riot lub Discord ma chwilową awarię, zadanie jest ponawiane z rosnącym odstępem.</p></section>
+      <div class="review-box"><h3>Informacja dla Riot Developer Relations</h3><p>To jest publiczny opis kompletnego przepływu produktu dla istniejącej aplikacji produkcyjnej <strong>ID {siteConfig.appId}</strong>. Dane testowe i dostęp do serwera recenzenckiego są przekazywane prywatnie w korespondencji z Developer Relations. Dokładny redirect URI to <span class="mono">{siteConfig.siteUrl}/oauth2/callback</span>.</p></div>
+      <div class="actions"><a class="button" href={siteConfig.discordInviteUrl}>Rozpocznij w Discordzie <span aria-hidden="true">→</span></a><a class="button secondary" href="/privacy/">Prywatność</a></div>
+    </div>
+  </section>
+</BaseLayout>

@@ -1,0 +1,25 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+---
+
+<BaseLayout
+  lang="en"
+  canonicalPath="/oauth2/callback"
+  title="Riot Sign On callback"
+  description="The registered Moon Poro Riot Sign On redirect endpoint."
+>
+  <section class="not-found">
+    <div>
+      <p class="eyebrow">Riot Sign On · registered redirect endpoint</p>
+      <h1>Authorization has not been started</h1>
+      <p class="lead muted">
+        This HTTPS endpoint is reserved for the Riot Sign On callback. The interactive callback
+        will be enabled as soon as Riot issues the RSO client credentials for Moon Poro Bot.
+      </p>
+      <div class="actions">
+        <a class="button" href="/en/rso/">Review the complete verification flow</a>
+        <a class="button secondary" href="/en/">Return to Moon Poro</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

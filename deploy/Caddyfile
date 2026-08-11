@@ -1,0 +1,53 @@
+{
+    admin off
+}
+
+www.moonporo.pl {
+    redir https://moonporo.pl{uri} permanent
+}
+
+moonporo.pl {
+    encode zstd gzip
+
+    handle /verify/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle /oauth2/callback {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle /healthz {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle /readyz {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle {
+        root * /opt/moon-poro/site/dist
+        try_files {path} {path}/index.html /404.html
+        file_server
+
+        header {
+            Content-Security-Policy "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'none'; style-src 'self'; upgrade-insecure-requests"
+            Cross-Origin-Opener-Policy "same-origin"
+            Cross-Origin-Resource-Policy "same-origin"
+            Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+            Referrer-Policy "strict-origin-when-cross-origin"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+        }
+    }
+
+    @immutable path /_astro/*
+    header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    header -Server
+
+    # Access logging stays disabled: verification tokens live in the URL path and
+    # OAuth codes/state live in the callback query. Application logs contain only
+    # status codes and internal session IDs, never credentials.
+}

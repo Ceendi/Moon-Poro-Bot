@@ -1,22 +1,20 @@
 [Unit]
-Description=Moon Poro Discord Bot
-After=network-online.target postgresql.service
+Description=Moon Poro Riot Sign On callback
+After=network-online.target postgresql.service moon-poro.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=moon-poro-bot
-Group=moon-poro-bot
+User=moon-poro-rso
+Group=moon-poro-rso
 WorkingDirectory=/opt/moon-poro
-EnvironmentFile=/etc/moon-poro/bot.env
-Environment=MOON_PORO_LOG_FILE=/var/log/moon-poro/discord.log
+EnvironmentFile=/etc/moon-poro/rso.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/moon-poro/.venv/bin/python /opt/moon-poro/main.py
+ExecStart=/opt/moon-poro/.venv/bin/python /opt/moon-poro/rso_main.py
 Restart=on-failure
-RestartSec=5
-TimeoutStopSec=30
+RestartSec=3
+TimeoutStopSec=20
 UMask=0077
-LogsDirectory=moon-poro
 NoNewPrivileges=true
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -30,6 +28,8 @@ ProtectHostname=true
 ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
@@ -37,9 +37,8 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
-ReadWritePaths=/var/log/moon-poro
-MemoryHigh=320M
-MemoryMax=400M
+MemoryHigh=96M
+MemoryMax=128M
 
 [Install]
 WantedBy=multi-user.target
