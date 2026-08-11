@@ -38,8 +38,8 @@ readable only by the service account (`chmod 600 .env`). The supplied systemd un
 
 The public Astro site is in `site/`; it builds to static files and does not require Node.js on the
 production VM. The isolated RSO callback starts through `rso_main.py` with `.env.rso`. Never place
-RSO client credentials in the bot environment. See `docs/DEPLOYMENT_RSO_GCP.md` and the copy-ready
-Riot submission in `docs/RIOT_RSO_APPLICATION.md`.
+RSO client credentials in the bot environment. See `docs/DEPLOYMENT_RSO_GCP.md` for deployment
+instructions.
 
 ## Production updates
 
