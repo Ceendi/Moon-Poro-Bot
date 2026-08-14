@@ -105,6 +105,7 @@ def test_rank_refresh_is_staggered_with_durable_retry_defaults() -> None:
     assert settings.rank_refresh_worker_interval_seconds == 10
     assert settings.rank_refresh_retry_base_seconds == 300
     assert settings.rank_refresh_claim_timeout_seconds == 300
+    assert settings.riot_monitoring_interval_seconds == 300
 
 
 def test_public_rso_url_requires_https() -> None:

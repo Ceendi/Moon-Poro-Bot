@@ -58,7 +58,11 @@ async def test_main_starts_and_closes_all_resources(
     await app.main()
 
     app.upgrade_database.assert_awaited_once_with(settings)
-    riot_client_factory.assert_called_once_with(settings.riot_api_token.get_secret_value())
+    riot_monitor = bot_class.call_args.kwargs["riot_monitor"]
+    assert isinstance(riot_monitor, app.RiotAPIMonitor)
+    riot_client_factory.assert_called_once_with(
+        settings.riot_api_token.get_secret_value(), monitor=riot_monitor
+    )
     assert bot_class.call_args.kwargs["riot_client"] is riot_context.client
     bot.start.assert_awaited_once_with(settings.discord_token.get_secret_value())
     bot.close.assert_awaited_once_with()

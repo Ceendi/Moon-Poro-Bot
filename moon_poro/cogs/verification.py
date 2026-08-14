@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
@@ -164,6 +165,54 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
     )
 
 
+def _utc_timestamp(value: datetime | None, *, missing: str) -> str:
+    if value is None:
+        return missing
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat(timespec="seconds")
+
+
+async def _report_riot_monitoring(
+    bot: MoonPoroBot,
+    *,
+    now: datetime | None = None,
+) -> None:
+    metrics = bot.riot_monitor.snapshot()
+    queue_due: int | str = "unknown"
+    oldest_due_at: datetime | None = None
+    oldest_overdue_seconds: int | str = "unknown"
+    try:
+        queue = await bot.verifications.rank_refresh_queue_stats(bot.settings.guild_id)
+    except Exception:
+        logger.exception("Could not read the rank refresh queue for Riot monitoring")
+    else:
+        queue_due = queue.due_count
+        oldest_due_at = queue.oldest_due_at
+        if oldest_due_at is None:
+            oldest_overdue_seconds = 0
+        else:
+            current = now or datetime.now(UTC)
+            if oldest_due_at.tzinfo is None:
+                oldest_due_at = oldest_due_at.replace(tzinfo=UTC)
+            oldest_overdue_seconds = max(0, int((current - oldest_due_at).total_seconds()))
+
+    logger.info(
+        "Riot monitoring: responses_429_since_start=%s responses_401_since_start=%s "
+        "responses_403_since_start=%s responses_5xx_since_start=%s "
+        "rank_refresh_queue_due=%s rank_refresh_oldest_due_at_utc=%s "
+        "rank_refresh_oldest_overdue_seconds=%s last_successful_riot_response_utc=%s",
+        metrics.responses_429,
+        metrics.responses_401,
+        metrics.responses_403,
+        metrics.responses_5xx,
+        queue_due,
+        _utc_timestamp(oldest_due_at, missing="none"),
+        oldest_overdue_seconds,
+        _utc_timestamp(metrics.last_success_at, missing="never"),
+    )
+
+
 async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Member) -> None:
     if member.guild.id != cog.bot.settings.guild_id:
         return
@@ -314,14 +363,19 @@ class VerificationCog(commands.Cog):
         self.complete_rso_verifications.change_interval(
             seconds=bot.settings.rso_completion_interval_seconds
         )
+        self.report_riot_monitoring.change_interval(
+            seconds=bot.settings.riot_monitoring_interval_seconds
+        )
         self.refresh_verified.start()
         self.verification_maintenance.start()
         self.complete_rso_verifications.start()
+        self.report_riot_monitoring.start()
 
     async def cog_unload(self) -> None:
         self.refresh_verified.cancel()
         self.verification_maintenance.cancel()
         self.complete_rso_verifications.cancel()
+        self.report_riot_monitoring.cancel()
 
     async def apply_verified_roles(
         self,
@@ -439,6 +493,10 @@ class VerificationCog(commands.Cog):
         except Exception:
             logger.exception("Unexpected rank refresh worker error; next run will retry")
 
+    @tasks.loop(minutes=5, reconnect=True)
+    async def report_riot_monitoring(self) -> None:
+        await _report_riot_monitoring(self.bot)
+
     @tasks.loop(hours=24, reconnect=True)
     async def verification_maintenance(self) -> None:
         guild = self.bot.get_guild(self.bot.settings.guild_id)
@@ -468,6 +526,10 @@ class VerificationCog(commands.Cog):
 
     @verification_maintenance.before_loop
     async def before_maintenance(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @report_riot_monitoring.before_loop
+    async def before_riot_monitoring(self) -> None:
         await self.bot.wait_until_ready()
 
     @complete_rso_verifications.before_loop

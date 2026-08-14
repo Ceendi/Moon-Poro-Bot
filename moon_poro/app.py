@@ -7,7 +7,7 @@ import os
 
 from moon_poro.bot import MoonPoroBot, create_intents
 from moon_poro.database import Database, upgrade_database
-from moon_poro.riot import create_riot_api_client
+from moon_poro.riot import RiotAPIMonitor, create_riot_api_client
 from moon_poro.settings import Settings
 
 
@@ -36,15 +36,17 @@ async def main() -> None:
     await upgrade_database(settings)
     configure_logging()
     database = Database(settings)
+    riot_monitor = RiotAPIMonitor()
 
     try:
         async with create_riot_api_client(
-            settings.riot_api_token.get_secret_value()
+            settings.riot_api_token.get_secret_value(), monitor=riot_monitor
         ) as riot_client:
             bot = MoonPoroBot(
                 settings=settings,
                 database=database,
                 riot_client=riot_client,
+                riot_monitor=riot_monitor,
                 intents=create_intents(settings),
             )
             try:

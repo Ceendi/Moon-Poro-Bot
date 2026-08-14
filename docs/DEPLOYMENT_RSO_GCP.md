@@ -154,7 +154,20 @@ Zmiana chronionej roli oraz ponowne wejście użytkownika korzystają z ostatnie
 bazie i nie wykonują dodatkowego zapytania do Riot API. Okres odświeżania pojedynczego użytkownika
 kontroluje `RANK_REFRESH_INTERVAL_HOURS`.
 
-## 10. Rollback
+## 10. Monitoring Riot API i kolejki rang
+
+Bot zapisuje co 5 minut pojedynczy raport ze statusem odpowiedzi Riot i kolejki odświeżania rang:
+
+```bash
+journalctl -u moon-poro-bot.service --since today --grep='Riot monitoring:'
+```
+
+Liczniki odpowiedzi 429, 401, 403 i 5xx obejmują okres od ostatniego uruchomienia procesu. Długość
+kolejki, termin najstarszego zaległego sprawdzenia i jego opóźnienie są odczytywane na żywo z
+PostgreSQL. `last_successful_riot_response_utc` pokazuje czas ostatniej odpowiedzi 2xx. Częstotliwość
+raportu kontroluje `RIOT_MONITORING_INTERVAL_SECONDS`, domyślnie 300 sekund.
+
+## 11. Rollback
 
 Po problemie z RSO ustaw `VERIFICATION_MODE=legacy_icon`, zatrzymaj `moon-poro-rso` i opublikuj panel
 weryfikacji ikoną. Nie cofaj migracji `20260810_0002` ani `20260814_0003`, jeżeli istnieją już

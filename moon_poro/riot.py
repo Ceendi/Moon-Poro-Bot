@@ -5,6 +5,8 @@ import logging
 import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
@@ -53,6 +55,52 @@ RANK_TO_ROLE = {
 
 class RiotAPIUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RiotAPIMetricsSnapshot:
+    responses_429: int
+    responses_401: int
+    responses_403: int
+    responses_5xx: int
+    last_success_at: datetime | None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class RiotAPIMonitor:
+    """Process-local counters for raw Riot HTTP responses."""
+
+    def __init__(self, *, clock: Callable[[], datetime] = _utc_now) -> None:
+        self._clock = clock
+        self._responses_429 = 0
+        self._responses_401 = 0
+        self._responses_403 = 0
+        self._responses_5xx = 0
+        self._last_success_at: datetime | None = None
+
+    def record_status(self, status: int) -> None:
+        if 200 <= status < 300:
+            self._last_success_at = self._clock()
+        elif status == 429:
+            self._responses_429 += 1
+        elif status == 401:
+            self._responses_401 += 1
+        elif status == 403:
+            self._responses_403 += 1
+        elif 500 <= status < 600:
+            self._responses_5xx += 1
+
+    def snapshot(self) -> RiotAPIMetricsSnapshot:
+        return RiotAPIMetricsSnapshot(
+            responses_429=self._responses_429,
+            responses_401=self._responses_401,
+            responses_403=self._responses_403,
+            responses_5xx=self._responses_5xx,
+            last_success_at=self._last_success_at,
+        )
 
 
 class RiotCircuitBreaker:
@@ -130,12 +178,28 @@ def riot_circuit_breaker_middleware(circuit_breaker: RiotCircuitBreaker) -> Midd
     return constructor
 
 
+def riot_api_monitoring_middleware(monitor: RiotAPIMonitor) -> Middleware:
+    def constructor(next_call: MiddlewareCallable) -> MiddlewareCallable:
+        async def middleware(invocation: Invocation) -> Any:
+            response = await next_call(invocation)
+            status = getattr(response, "status", None)
+            if isinstance(status, int):
+                monitor.record_status(status)
+            return response
+
+        return middleware
+
+    return constructor
+
+
 def create_riot_api_client(
     api_token: str,
     *,
     circuit_breaker: RiotCircuitBreaker | None = None,
+    monitor: RiotAPIMonitor | None = None,
 ) -> RiotAPIClient:
     shared_breaker = circuit_breaker or RiotCircuitBreaker()
+    shared_monitor = monitor or RiotAPIMonitor()
     return RiotAPIClient(
         default_headers={"X-Riot-Token": api_token},
         middlewares=[
@@ -145,6 +209,7 @@ def create_riot_api_client(
             # Keep the shared gate closest to the transport so a request delayed by
             # Pulsefire's adaptive limiter checks the breaker immediately before I/O.
             riot_circuit_breaker_middleware(shared_breaker),
+            riot_api_monitoring_middleware(shared_monitor),
         ],
     )
 

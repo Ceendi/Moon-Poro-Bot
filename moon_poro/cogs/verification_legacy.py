@@ -600,12 +600,17 @@ class LegacyVerificationCog(VerificationCog):
         self.refresh_verified.change_interval(
             seconds=bot.settings.rank_refresh_worker_interval_seconds
         )
+        self.report_riot_monitoring.change_interval(
+            seconds=bot.settings.riot_monitoring_interval_seconds
+        )
         self.refresh_verified.start()
         self.verification_maintenance.start()
+        self.report_riot_monitoring.start()
 
     async def cog_unload(self) -> None:
         self.refresh_verified.cancel()
         self.verification_maintenance.cancel()
+        self.report_riot_monitoring.cancel()
 
     async def apply_verified_roles(
         self,

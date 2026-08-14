@@ -2,6 +2,7 @@ from pulsefire.clients import RiotAPIClient
 
 from moon_poro.bot import MoonPoroBot, create_intents
 from moon_poro.database import Database
+from moon_poro.riot import RiotAPIMonitor
 from moon_poro.settings import Settings
 
 
@@ -26,6 +27,7 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
         settings=settings,
         database=database,
         riot_client=riot_client,
+        riot_monitor=RiotAPIMonitor(),
         intents=create_intents(settings),
     )
     extensions = ["core_events", "roles", "verification", "warnings", "mod_stats"]
@@ -96,6 +98,7 @@ async def test_legacy_verification_reuses_current_management_commands() -> None:
         settings=settings,
         database=database,
         riot_client=riot_client,
+        riot_monitor=RiotAPIMonitor(),
         intents=create_intents(settings),
     )
 

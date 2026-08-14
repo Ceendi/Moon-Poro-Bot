@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -5,11 +6,13 @@ from pulsefire.invocation import Invocation
 
 from moon_poro import riot
 from moon_poro.riot import (
+    RiotAPIMonitor,
     RiotAPIUnavailable,
     RiotCircuitBreaker,
     get_rank_from_leagues,
     profile_icon_url,
     riot_api_call,
+    riot_api_monitoring_middleware,
     riot_circuit_breaker_middleware,
 )
 
@@ -135,32 +138,66 @@ async def test_circuit_breaker_uses_safe_fallback_for_invalid_retry_after() -> N
     assert breaker.retry_after("na1") == 1.0
 
 
-def test_riot_client_places_shared_breaker_inside_http_retry(
+async def test_riot_monitor_counts_selected_raw_responses_and_last_success() -> None:
+    successful_at = datetime(2026, 8, 14, 20, 30, tzinfo=UTC)
+    monitor = RiotAPIMonitor(clock=lambda: successful_at)
+    next_call = AsyncMock(
+        side_effect=[
+            RiotResponse(429),
+            RiotResponse(401),
+            RiotResponse(403),
+            RiotResponse(500),
+            RiotResponse(503),
+            RiotResponse(404),
+            RiotResponse(200),
+        ]
+    )
+    middleware = riot_api_monitoring_middleware(monitor)(next_call)
+    invocation = Invocation("GET", "https://{region}.api.riotgames.com", {"region": "EUN1"})
+
+    for _ in range(7):
+        await middleware(invocation)
+
+    metrics = monitor.snapshot()
+    assert metrics.responses_429 == 1
+    assert metrics.responses_401 == 1
+    assert metrics.responses_403 == 1
+    assert metrics.responses_5xx == 2
+    assert metrics.last_success_at == successful_at
+
+
+def test_riot_client_places_monitor_and_shared_breaker_near_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     json_middleware = object()
     http_error = object()
     breaker_middleware = object()
+    monitoring_middleware = object()
     rate_limiter = object()
     client = object()
     client_class = Mock(return_value=client)
     breaker_factory = Mock(return_value=breaker_middleware)
+    monitoring_factory = Mock(return_value=monitoring_middleware)
     breaker = RiotCircuitBreaker()
+    monitor = RiotAPIMonitor()
     monkeypatch.setattr(riot, "RiotAPIClient", client_class)
     monkeypatch.setattr(riot, "json_response_middleware", Mock(return_value=json_middleware))
     monkeypatch.setattr(riot, "http_error_middleware", Mock(return_value=http_error))
     monkeypatch.setattr(riot, "riot_circuit_breaker_middleware", breaker_factory)
+    monkeypatch.setattr(riot, "riot_api_monitoring_middleware", monitoring_factory)
     monkeypatch.setattr(riot, "rate_limiter_middleware", Mock(return_value=rate_limiter))
 
-    result = riot.create_riot_api_client("test-token", circuit_breaker=breaker)
+    result = riot.create_riot_api_client("test-token", circuit_breaker=breaker, monitor=monitor)
 
     assert result is client
     breaker_factory.assert_called_once_with(breaker)
+    monitoring_factory.assert_called_once_with(monitor)
     assert client_class.call_args.kwargs["middlewares"] == [
         json_middleware,
         http_error,
         rate_limiter,
         breaker_middleware,
+        monitoring_middleware,
     ]
 
 

@@ -64,12 +64,16 @@ async def test_migrations_and_repositories_against_postgres(
         assert [link.discord_user_id for link in await verifications.list_for_guild(guild_id)] == [
             101
         ]
+        queue = await verifications.rank_refresh_queue_stats(guild_id)
+        assert queue.due_count == 1
+        assert queue.oldest_due_at is not None
         due_refreshes = await verifications.claim_due_rank_refreshes(
             guild_id,
             limit=1,
             claim_timeout_seconds=300,
         )
         assert [link.discord_user_id for link in due_refreshes] == [101]
+        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         assert (
             await verifications.retry_rank_refresh(
                 guild_id,
@@ -78,6 +82,7 @@ async def test_migrations_and_repositories_against_postgres(
             )
             == 300
         )
+        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 0
         assert (
             await verifications.claim_due_rank_refreshes(
                 guild_id,
@@ -95,12 +100,14 @@ async def test_migrations_and_repositories_against_postgres(
                 claim_timeout_seconds=300,
             )
         ] == [101]
+        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         assert await verifications.complete_rank_refresh(
             guild_id,
             101,
             rank_tier="EMERALD",
             refresh_interval_hours=24,
         )
+        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 0
         refreshed = await verifications.get_by_user(guild_id, 101)
         assert refreshed is not None
         assert refreshed.last_known_rank == "EMERALD"
@@ -118,8 +125,9 @@ async def test_migrations_and_repositories_against_postgres(
 
         rso_sessions = VerificationSessionRepository(connection.session_factory)
         rso = await rso_sessions.create(guild_id=guild_id, user_id=102, ttl_seconds=600)
-        await rso_sessions.begin_oauth(token=rso.token, state="oauth-state")
-        callback = await rso_sessions.claim_callback("oauth-state")
+        oauth_state = f"oauth-state-{guild_id}"
+        await rso_sessions.begin_oauth(token=rso.token, state=oauth_state)
+        callback = await rso_sessions.claim_callback(oauth_state)
         assert (
             await rso_sessions.reserve_link(
                 session_id=callback.id,

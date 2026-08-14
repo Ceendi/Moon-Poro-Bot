@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,6 +19,12 @@ from moon_poro.models import (
     WarningModerator,
     WarningStatus,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RankRefreshQueueStats:
+    due_count: int
+    oldest_due_at: datetime | None
 
 
 class VerificationRepository:
@@ -109,6 +116,26 @@ class VerificationRepository:
             for link in links:
                 link.rank_refresh_claimed_at = now
             return links
+
+    async def rank_refresh_queue_stats(self, guild_id: int) -> RankRefreshQueueStats:
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            row = (
+                await session.execute(
+                    select(
+                        func.count(VerificationLink.discord_user_id),
+                        func.min(VerificationLink.rank_next_refresh_at),
+                    ).where(
+                        VerificationLink.guild_id == guild_id,
+                        VerificationLink.puuid.is_not(None),
+                        VerificationLink.rank_next_refresh_at <= now,
+                    )
+                )
+            ).one()
+        return RankRefreshQueueStats(
+            due_count=int(row[0]),
+            oldest_due_at=cast(datetime | None, row[1]),
+        )
 
     async def complete_rank_refresh(
         self,
