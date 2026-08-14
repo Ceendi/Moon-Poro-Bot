@@ -64,6 +64,49 @@ async def test_migrations_and_repositories_against_postgres(
         assert [link.discord_user_id for link in await verifications.list_for_guild(guild_id)] == [
             101
         ]
+        due_refreshes = await verifications.claim_due_rank_refreshes(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in due_refreshes] == [101]
+        assert (
+            await verifications.retry_rank_refresh(
+                guild_id,
+                101,
+                base_delay_seconds=300,
+            )
+            == 300
+        )
+        assert (
+            await verifications.claim_due_rank_refreshes(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            )
+            == []
+        )
+        assert await verifications.schedule_rank_refresh_now(guild_id, 101)
+        assert [
+            link.discord_user_id
+            for link in await verifications.claim_due_rank_refreshes(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            )
+        ] == [101]
+        assert await verifications.complete_rank_refresh(
+            guild_id,
+            101,
+            rank_tier="EMERALD",
+            refresh_interval_hours=24,
+        )
+        refreshed = await verifications.get_by_user(guild_id, 101)
+        assert refreshed is not None
+        assert refreshed.last_known_rank == "EMERALD"
+        assert refreshed.rank_refresh_failures == 0
+        assert refreshed.rank_last_checked_at is not None
+        assert refreshed.rank_refresh_claimed_at is None
         await verifications.log_access(
             guild_id=guild_id,
             actor_id=501,

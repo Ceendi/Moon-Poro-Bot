@@ -59,7 +59,10 @@ class VerificationRepository:
         platform: str,
         puuid: str,
         method: str = "PROFILE_ICON",
+        rank_tier: str | None = None,
+        refresh_interval_hours: int = 24,
     ) -> VerificationLink:
+        now = datetime.now(UTC)
         link = VerificationLink(
             guild_id=guild_id,
             discord_user_id=user_id,
@@ -67,10 +70,130 @@ class VerificationRepository:
             platform=platform,
             puuid=puuid,
             verification_method=method,
+            last_known_rank=rank_tier,
+            rank_last_checked_at=now if rank_tier is not None else None,
+            rank_next_refresh_at=(
+                now + timedelta(hours=refresh_interval_hours) if rank_tier is not None else now
+            ),
         )
         async with self._sessions.begin() as session:
             session.add(link)
         return link
+
+    async def claim_due_rank_refreshes(
+        self,
+        guild_id: int,
+        *,
+        limit: int,
+        claim_timeout_seconds: int,
+    ) -> list[VerificationLink]:
+        now = datetime.now(UTC)
+        stale_claim = now - timedelta(seconds=claim_timeout_seconds)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(VerificationLink)
+                .where(
+                    VerificationLink.guild_id == guild_id,
+                    VerificationLink.puuid.is_not(None),
+                    VerificationLink.rank_next_refresh_at <= now,
+                    (
+                        VerificationLink.rank_refresh_claimed_at.is_(None)
+                        | (VerificationLink.rank_refresh_claimed_at <= stale_claim)
+                    ),
+                )
+                .order_by(VerificationLink.rank_next_refresh_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            links = list(result)
+            for link in links:
+                link.rank_refresh_claimed_at = now
+            return links
+
+    async def complete_rank_refresh(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        rank_tier: str,
+        refresh_interval_hours: int,
+    ) -> bool:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return False
+            link.last_known_rank = rank_tier
+            link.rank_last_checked_at = now
+            link.rank_next_refresh_at = now + timedelta(hours=refresh_interval_hours)
+            link.rank_refresh_claimed_at = None
+            link.rank_refresh_failures = 0
+            return True
+
+    async def retry_rank_refresh(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        base_delay_seconds: int,
+        max_delay_seconds: int = 21_600,
+    ) -> int | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return None
+            failures = min(int(link.rank_refresh_failures) + 1, 16)
+            link.rank_refresh_failures = failures
+            delay: int = min(
+                base_delay_seconds * (2 ** (failures - 1)),
+                max_delay_seconds,
+            )
+            link.rank_next_refresh_at = now + timedelta(seconds=delay)
+            link.rank_refresh_claimed_at = None
+            return delay
+
+    async def defer_rank_refresh(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        delay_seconds: int,
+    ) -> bool:
+        next_refresh = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return False
+            link.rank_next_refresh_at = next_refresh
+            link.rank_refresh_claimed_at = None
+            return True
+
+    async def schedule_rank_refresh_now(self, guild_id: int, user_id: int) -> bool:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return False
+            if link.rank_next_refresh_at > now:
+                link.rank_next_refresh_at = now
+            return True
 
     async def delete_by_user(self, guild_id: int, user_id: int) -> VerificationLink | None:
         async with self._sessions.begin() as session:

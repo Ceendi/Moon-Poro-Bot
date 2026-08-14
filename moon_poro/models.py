@@ -47,6 +47,12 @@ class VerificationLink(Base):
     __tablename__ = "verification_links"
     __table_args__ = (
         UniqueConstraint("guild_id", "puuid", name="uq_verification_links_guild_puuid"),
+        Index(
+            "ix_verification_links_rank_refresh_due",
+            "guild_id",
+            "rank_next_refresh_at",
+            postgresql_where=text("puuid IS NOT NULL"),
+        ),
     )
 
     guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -55,6 +61,15 @@ class VerificationLink(Base):
     platform: Mapped[str] = mapped_column(String(10), nullable=False)
     puuid: Mapped[str | None] = mapped_column(String(255))
     verification_method: Mapped[str] = mapped_column(String(32), default="PROFILE_ICON")
+    last_known_rank: Mapped[str | None] = mapped_column(String(32))
+    rank_last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_refresh_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_next_refresh_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    rank_refresh_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

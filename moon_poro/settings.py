@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     verification_global_rate_period_seconds: int = Field(default=10, ge=1, le=300)
     view_timeout: int = Field(default=180, ge=30, le=3600)
     rank_refresh_interval_hours: int = Field(default=24, ge=1, le=168)
+    rank_refresh_worker_interval_seconds: int = Field(default=10, ge=5, le=300)
+    rank_refresh_retry_base_seconds: int = Field(default=300, ge=30, le=3600)
+    rank_refresh_claim_timeout_seconds: int = Field(default=300, ge=60, le=3600)
     verification_access_log_retention_days: int = Field(default=90, ge=30, le=3650)
     verification_session_retention_days: int = Field(default=7, ge=1, le=30)
     privacy_policy_url: AnyHttpUrl | None = None

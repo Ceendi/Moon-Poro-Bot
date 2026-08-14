@@ -3,7 +3,6 @@
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import secrets
@@ -15,7 +14,7 @@ from typing import Any
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 from sqlalchemy.exc import IntegrityError
 
 from moon_poro.bot import MoonPoroBot
@@ -23,6 +22,8 @@ from moon_poro.cogs.verification import (
     VerificationCog,
     _apply_verified_roles,
     _get_leagues,
+    _reconcile_cached_role_change,
+    _restore_cached_roles_on_join,
 )
 from moon_poro.permissions import administrator_only
 from moon_poro.riot import (
@@ -33,7 +34,7 @@ from moon_poro.riot import (
     profile_icon_url,
     riot_api_call,
 )
-from moon_poro.roles import find_role, member_has_role, member_roles_named
+from moon_poro.roles import find_role, member_has_role
 
 logger = logging.getLogger("moon_poro.verification_legacy")
 
@@ -562,6 +563,8 @@ class LegacyIconConfirmationView(discord.ui.View):
                 platform=self.platform,
                 puuid=self.puuid,
                 method="PROFILE_ICON",
+                rank_tier=get_rank_from_leagues(leagues).upper(),
+                refresh_interval_hours=self.bot.settings.rank_refresh_interval_hours,
             )
             cog = self.bot.get_cog("LegacyVerificationCog")
             if isinstance(cog, LegacyVerificationCog):
@@ -594,11 +597,15 @@ class LegacyVerificationCog(VerificationCog):
             global_period_seconds=bot.settings.verification_global_rate_period_seconds,
         )
         bot.add_view(LegacyVerificationStartView(bot, self.rate_limiter))
-        self.refresh_verified.change_interval(hours=bot.settings.rank_refresh_interval_hours)
+        self.refresh_verified.change_interval(
+            seconds=bot.settings.rank_refresh_worker_interval_seconds
+        )
         self.refresh_verified.start()
+        self.verification_maintenance.start()
 
     async def cog_unload(self) -> None:
         self.refresh_verified.cancel()
+        self.verification_maintenance.cancel()
 
     async def apply_verified_roles(
         self,
@@ -612,79 +619,13 @@ class LegacyVerificationCog(VerificationCog):
         finally:
             self._managed_role_updates.discard(member.id)
 
-    @tasks.loop(hours=24, reconnect=True)
-    async def refresh_verified(self) -> None:  # type: ignore[override]
-        guild = self.bot.get_guild(self.bot.settings.guild_id)
-        if guild is None:
-            return
-        try:
-            await self.bot.verifications.purge_access_logs(
-                guild.id, self.bot.settings.verification_access_log_retention_days
-            )
-            links = await self.bot.verifications.list_for_guild(guild.id)
-        except Exception:
-            logger.exception("Could not load profile verification refresh data")
-            return
-        for link in links:
-            member = guild.get_member(link.discord_user_id)
-            if member is None or not link.puuid:
-                continue
-            try:
-                leagues = await _get_leagues(self.bot, link.platform, link.puuid)
-                await self.apply_verified_roles(member, link.platform, leagues)
-            except (RiotAPIUnavailable, discord.HTTPException):
-                logger.exception("Could not refresh verification roles for %s", member.id)
-            await asyncio.sleep(0.6)
-
-    @refresh_verified.before_loop
-    async def before_refresh(self) -> None:
-        await self.bot.wait_until_ready()
-
-    @refresh_verified.error
-    async def refresh_error(self, error: BaseException) -> None:
-        logger.exception("Profile verification refresh loop failed", exc_info=error)
-
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
-        if member.guild.id != self.bot.settings.guild_id:
-            return
-        link = await self.bot.verifications.get_by_user(member.guild.id, member.id)
-        if link is None or not link.puuid:
-            return
-        try:
-            leagues = await _get_leagues(self.bot, link.platform, link.puuid)
-            await self.apply_verified_roles(member, link.platform, leagues)
-        except (RiotAPIUnavailable, discord.HTTPException):
-            logger.exception("Could not restore verification roles for %s", member.id)
+        await _restore_cached_roles_on_join(self, member)
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
-        if after.guild.id != self.bot.settings.guild_id or after.id in self._managed_role_updates:
-            return
-        protected_names = set(
-            self.bot.settings.lol_ranks
-            + self.bot.settings.lol_servers
-            + [
-                self.bot.settings.verified_role_name,
-                self.bot.settings.member_role_name,
-            ]
-        )
-        before_ids = {
-            role.id for role in member_roles_named(before, protected_names, self.bot.settings)
-        }
-        after_ids = {
-            role.id for role in member_roles_named(after, protected_names, self.bot.settings)
-        }
-        if before_ids == after_ids:
-            return
-        link = await self.bot.verifications.get_by_user(after.guild.id, after.id)
-        if link is None or not link.puuid:
-            return
-        try:
-            leagues = await _get_leagues(self.bot, link.platform, link.puuid)
-            await self.apply_verified_roles(after, link.platform, leagues)
-        except (RiotAPIUnavailable, discord.HTTPException):
-            logger.exception("Could not restore protected verification roles for %s", after.id)
+        await _reconcile_cached_role_change(self, before, after)
 
     @administrator_only()
     @app_commands.default_permissions(administrator=True)

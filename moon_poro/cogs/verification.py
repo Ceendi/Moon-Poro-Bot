@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import suppress
 from typing import Any
@@ -11,7 +10,7 @@ from discord.app_commands import Choice
 from discord.ext import commands, tasks
 
 from moon_poro.bot import MoonPoroBot
-from moon_poro.models import VerificationSession
+from moon_poro.models import VerificationLink, VerificationSession
 from moon_poro.permissions import administrator_only
 from moon_poro.riot import (
     API_SERVERS,
@@ -98,6 +97,133 @@ async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, re
         await member.remove_roles(*to_remove, reason=reason)
 
 
+def _cached_rank_leagues(link: VerificationLink) -> LeagueEntries | None:
+    if link.last_known_rank is None:
+        return None
+    return [{"queueType": "RANKED_SOLO_5x5", "tier": link.last_known_rank}]
+
+
+async def _refresh_next_verified(cog: VerificationCog) -> None:
+    bot = cog.bot
+    guild = bot.get_guild(bot.settings.guild_id)
+    if guild is None:
+        return
+    links = await bot.verifications.claim_due_rank_refreshes(
+        guild.id,
+        limit=1,
+        claim_timeout_seconds=bot.settings.rank_refresh_claim_timeout_seconds,
+    )
+    if not links:
+        return
+
+    link = links[0]
+    member = guild.get_member(link.discord_user_id)
+    if member is None:
+        await bot.verifications.defer_rank_refresh(
+            guild.id,
+            link.discord_user_id,
+            delay_seconds=bot.settings.rank_refresh_interval_hours * 3600,
+        )
+        return
+    if link.puuid is None:
+        return
+
+    try:
+        leagues = await _get_leagues(bot, link.platform, link.puuid)
+        await cog.apply_verified_roles(member, link.platform, leagues)
+    except RiotAPIUnavailable:
+        delay = await bot.verifications.retry_rank_refresh(
+            guild.id,
+            link.discord_user_id,
+            base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
+        )
+        logger.warning(
+            "Could not refresh Riot rank for Discord user %s; retrying in %s seconds",
+            member.id,
+            delay,
+        )
+        return
+    except discord.HTTPException:
+        delay = await bot.verifications.retry_rank_refresh(
+            guild.id,
+            link.discord_user_id,
+            base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
+        )
+        logger.exception(
+            "Could not refresh Discord roles for user %s; retrying in %s seconds",
+            member.id,
+            delay,
+        )
+        return
+
+    await bot.verifications.complete_rank_refresh(
+        guild.id,
+        link.discord_user_id,
+        rank_tier=get_rank_from_leagues(leagues).upper(),
+        refresh_interval_hours=bot.settings.rank_refresh_interval_hours,
+    )
+
+
+async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Member) -> None:
+    if member.guild.id != cog.bot.settings.guild_id:
+        return
+    link = await cog.bot.verifications.get_by_user(member.guild.id, member.id)
+    if link is None or not link.puuid:
+        return
+    leagues = _cached_rank_leagues(link)
+    if leagues is None:
+        await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
+        return
+    try:
+        await cog.apply_verified_roles(member, link.platform, leagues)
+    except discord.HTTPException:
+        logger.exception("Could not restore cached verification roles for %s", member.id)
+
+
+async def _reconcile_cached_role_change(
+    cog: VerificationCog,
+    before: discord.Member,
+    after: discord.Member,
+) -> None:
+    if after.guild.id != cog.bot.settings.guild_id or after.id in cog._managed_role_updates:
+        return
+    settings = cog.bot.settings
+    protected_names = set(
+        settings.lol_ranks
+        + settings.lol_servers
+        + [settings.verified_role_name, settings.member_role_name]
+    )
+    before_roles = set(member_roles_named(before, protected_names, settings))
+    after_roles = set(member_roles_named(after, protected_names, settings))
+    if before_roles == after_roles:
+        return
+
+    link = await cog.bot.verifications.get_by_user(after.guild.id, after.id)
+    if link is None or not link.puuid:
+        return
+    leagues = _cached_rank_leagues(link)
+    if leagues is not None:
+        try:
+            await cog.apply_verified_roles(after, link.platform, leagues)
+        except discord.HTTPException:
+            logger.exception("Could not restore cached verification roles for %s", after.id)
+        return
+
+    cog._managed_role_updates.add(after.id)
+    try:
+        to_remove = after_roles - before_roles
+        to_add = before_roles - after_roles
+        if to_remove:
+            await after.remove_roles(*to_remove, reason="Ochrona ról weryfikacji Riot")
+        if to_add:
+            await after.add_roles(*to_add, reason="Ochrona ról weryfikacji Riot")
+    except discord.HTTPException:
+        logger.exception("Could not restore previous verification roles for %s", after.id)
+    finally:
+        cog._managed_role_updates.discard(after.id)
+    await cog.bot.verifications.schedule_rank_refresh_now(after.guild.id, after.id)
+
+
 class VerificationStartView(discord.ui.View):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
@@ -180,17 +306,34 @@ class VerificationStartView(discord.ui.View):
 class VerificationCog(commands.Cog):
     def __init__(self, bot: MoonPoroBot) -> None:
         self.bot = bot
+        self._managed_role_updates: set[int] = set()
         bot.add_view(VerificationStartView(bot))
-        self.refresh_verified.change_interval(hours=bot.settings.rank_refresh_interval_hours)
+        self.refresh_verified.change_interval(
+            seconds=bot.settings.rank_refresh_worker_interval_seconds
+        )
         self.complete_rso_verifications.change_interval(
             seconds=bot.settings.rso_completion_interval_seconds
         )
         self.refresh_verified.start()
+        self.verification_maintenance.start()
         self.complete_rso_verifications.start()
 
     async def cog_unload(self) -> None:
         self.refresh_verified.cancel()
+        self.verification_maintenance.cancel()
         self.complete_rso_verifications.cancel()
+
+    async def apply_verified_roles(
+        self,
+        member: discord.Member,
+        platform: str,
+        leagues: LeagueEntries,
+    ) -> None:
+        self._managed_role_updates.add(member.id)
+        try:
+            await _apply_verified_roles(self.bot, member, platform, leagues)
+        finally:
+            self._managed_role_updates.discard(member.id)
 
     @tasks.loop(seconds=3, reconnect=True)
     async def complete_rso_verifications(self) -> None:
@@ -223,13 +366,20 @@ class VerificationCog(commands.Cog):
 
         try:
             leagues = await _get_leagues(self.bot, record.platform, record.puuid)
-            await _apply_verified_roles(self.bot, member, record.platform, leagues)
+            await self.apply_verified_roles(member, record.platform, leagues)
         except RiotAPIUnavailable:
             await self._retry_rso_completion(record, "RIOT_API_UNAVAILABLE")
             return
         except discord.HTTPException:
             await self._retry_rso_completion(record, "DISCORD_ROLES_UNAVAILABLE")
             return
+
+        await self.bot.verifications.complete_rank_refresh(
+            record.guild_id,
+            record.discord_user_id,
+            rank_tier=get_rank_from_leagues(leagues).upper(),
+            refresh_interval_hours=self.bot.settings.rank_refresh_interval_hours,
+        )
 
         audit_message_id: int | None = None
         channel_id = self.bot.settings.zweryfikowani_channel_id
@@ -282,8 +432,15 @@ class VerificationCog(commands.Cog):
             delay_seconds=delay,
         )
 
-    @tasks.loop(hours=24, reconnect=True)
+    @tasks.loop(seconds=10, reconnect=True)
     async def refresh_verified(self) -> None:
+        try:
+            await _refresh_next_verified(self)
+        except Exception:
+            logger.exception("Unexpected rank refresh worker error; next run will retry")
+
+    @tasks.loop(hours=24, reconnect=True)
+    async def verification_maintenance(self) -> None:
         guild = self.bot.get_guild(self.bot.settings.guild_id)
         if guild is None:
             return
@@ -297,29 +454,20 @@ class VerificationCog(commands.Cog):
             ) = await self.bot.verification_sessions.expire_and_purge(
                 retention_days=self.bot.settings.verification_session_retention_days
             )
-            links = await self.bot.verifications.list_for_guild(guild.id)
         except Exception:
-            logger.exception("Could not load verification refresh data; next run will retry")
+            logger.exception("Could not run verification maintenance; next run will retry")
             return
         if removed_logs:
             logger.info("Removed %s expired verification access logs", removed_logs)
         if expired_sessions or purged_sessions:
             logger.info("Expired %s and purged %s RSO sessions", expired_sessions, purged_sessions)
-        for link in links:
-            member = guild.get_member(link.discord_user_id)
-            if member is None or not link.puuid:
-                continue
-            try:
-                leagues = await _get_leagues(self.bot, link.platform, link.puuid)
-                await _apply_verified_roles(self.bot, member, link.platform, leagues)
-            except RiotAPIUnavailable:
-                logger.warning("Could not refresh Riot rank for Discord user %s", member.id)
-            except discord.HTTPException:
-                logger.exception("Could not refresh Discord roles for user %s", member.id)
-            await asyncio.sleep(0.6)
 
     @refresh_verified.before_loop
     async def before_refresh(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @verification_maintenance.before_loop
+    async def before_maintenance(self) -> None:
         await self.bot.wait_until_ready()
 
     @complete_rso_verifications.before_loop
@@ -330,20 +478,21 @@ class VerificationCog(commands.Cog):
     async def refresh_error(self, error: BaseException) -> None:
         logger.exception("Rank refresh loop failed", exc_info=error)
 
+    @verification_maintenance.error
+    async def maintenance_error(self, error: BaseException) -> None:
+        logger.exception("Verification maintenance loop failed", exc_info=error)
+
     @complete_rso_verifications.error
     async def rso_completion_error(self, error: BaseException) -> None:
         logger.exception("RSO completion loop failed", exc_info=error)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
-        link = await self.bot.verifications.get_by_user(member.guild.id, member.id)
-        if link is None or not link.puuid:
-            return
-        try:
-            leagues = await _get_leagues(self.bot, link.platform, link.puuid)
-            await _apply_verified_roles(self.bot, member, link.platform, leagues)
-        except (RiotAPIUnavailable, discord.HTTPException):
-            logger.exception("Could not restore verification roles for %s", member.id)
+        await _restore_cached_roles_on_join(self, member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        await _reconcile_cached_role_change(self, before, after)
 
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
