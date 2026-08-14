@@ -2,13 +2,17 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 from moon_poro.cogs import verification_legacy
 from moon_poro.cogs.verification_legacy import (
     LegacyVerificationCog,
-    _normalize_platform,
+    LegacyVerificationModal,
+    LegacyVerificationRetryView,
+    _normalize_riot_id_parts,
     _remove_verified_marker,
+    _riot_id_validation_error,
 )
 
 
@@ -18,11 +22,105 @@ class FakeRole:
         self.name = name
 
 
-def test_normalize_platform_accepts_supported_aliases() -> None:
-    assert _normalize_platform("eune") == "EUN1"
-    assert _normalize_platform("EUW1") == "EUW1"
-    assert _normalize_platform("na") == "NA1"
-    assert _normalize_platform("BR") is None
+def _modal_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_timeout=120,
+            view_timeout=180,
+        )
+    )
+
+
+def test_riot_id_input_normalizes_whitespace_and_optional_hash() -> None:
+    assert _normalize_riot_id_parts(" Moon Poro ", " #EUNE ") == ("Moon Poro", "EUNE")
+
+
+@pytest.mark.parametrize(
+    ("game_name", "tag_line", "expected_fragment"),
+    [
+        ("ab", "EUNE", "3 do 16"),
+        ("Moon#Poro", "EUNE", "przed znakiem"),
+        ("Moon Poro", "EU", "3 do 5"),
+        ("Moon Poro", "EU-NE", "litery i cyfry"),
+    ],
+)
+def test_riot_id_input_rejects_invalid_parts(
+    game_name: str, tag_line: str, expected_fragment: str
+) -> None:
+    assert expected_fragment in (_riot_id_validation_error(game_name, tag_line) or "")
+
+
+def test_riot_id_input_accepts_documented_lengths_and_unicode() -> None:
+    assert _riot_id_validation_error("Poro", "ABC") is None
+    assert _riot_id_validation_error("Księżycowy Poro", "ŁÓDŹ") is None
+
+
+def test_legacy_modal_uses_constrained_inputs_and_region_select() -> None:
+    modal = LegacyVerificationModal(_modal_bot())
+
+    assert modal.game_name.min_length == 3
+    assert modal.game_name.max_length == 16
+    assert modal.tag_line.min_length == 3
+    assert modal.tag_line.max_length == 6
+    assert modal.platform.required
+    assert [option.value for option in modal.platform.options] == ["EUN1", "EUW1", "NA1"]
+    components = modal.to_components()
+    assert [component["type"] for component in components] == [
+        discord.ComponentType.label.value,
+        discord.ComponentType.label.value,
+        discord.ComponentType.label.value,
+    ]
+    assert components[2]["component"]["type"] == discord.ComponentType.string_select.value
+
+
+async def test_legacy_modal_passes_normalized_values_and_offers_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    modal = LegacyVerificationModal(bot)
+    modal.game_name._value = " Moon Poro "
+    modal.tag_line._value = " #EUNE "
+    modal.platform._values = ["EUN1"]
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    followup = SimpleNamespace(send=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=response,
+        followup=followup,
+    )
+    account_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(verification_legacy, "_get_account", account_lookup)
+
+    await modal.on_submit(interaction)
+
+    response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    account_lookup.assert_awaited_once_with(bot, "Moon Poro", "EUNE", "EUN1")
+    assert isinstance(followup.send.await_args.kwargs["view"], LegacyVerificationRetryView)
+    assert "Moon Poro#EUNE" in followup.send.await_args.args[0]
+
+
+async def test_retry_view_reopens_prefilled_modal() -> None:
+    view = LegacyVerificationRetryView(
+        _modal_bot(),
+        owner_id=101,
+        game_name="Moon Poro",
+        tag_line="EUNE",
+        platform="EUN1",
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=101),
+        response=SimpleNamespace(send_modal=AsyncMock()),
+    )
+
+    await view.children[0].callback(interaction)
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, LegacyVerificationModal)
+    assert modal.game_name.default == "Moon Poro"
+    assert modal.tag_line.default == "EUNE"
+    assert [option.value for option in modal.platform.options if option.default] == ["EUN1"]
 
 
 async def test_remove_own_verification_marker_keeps_rank_and_region(

@@ -35,18 +35,28 @@ logger = logging.getLogger("moon_poro.verification_legacy")
 
 type RiotPayload = dict[str, Any]
 
+RIOT_GAME_NAME_MIN_LENGTH = 3
+RIOT_GAME_NAME_MAX_LENGTH = 16
+RIOT_TAG_LINE_MIN_LENGTH = 3
+RIOT_TAG_LINE_MAX_LENGTH = 5
 
-def _normalize_platform(value: str) -> str | None:
-    normalized = value.strip().upper().replace(" ", "")
-    aliases = {
-        "EUNE": "EUN1",
-        "EUN1": "EUN1",
-        "EUW": "EUW1",
-        "EUW1": "EUW1",
-        "NA": "NA1",
-        "NA1": "NA1",
-    }
-    return aliases.get(normalized)
+
+def _normalize_riot_id_parts(game_name: str, tag_line: str) -> tuple[str, str]:
+    normalized_name = game_name.strip()
+    normalized_tag = tag_line.strip().removeprefix("#").strip()
+    return normalized_name, normalized_tag
+
+
+def _riot_id_validation_error(game_name: str, tag_line: str) -> str | None:
+    if not RIOT_GAME_NAME_MIN_LENGTH <= len(game_name) <= RIOT_GAME_NAME_MAX_LENGTH:
+        return "Nazwa w Riot ID musi mieć od 3 do 16 znaków."
+    if "#" in game_name:
+        return "W polu nazwy wpisz tylko część Riot ID przed znakiem `#`."
+    if not RIOT_TAG_LINE_MIN_LENGTH <= len(tag_line) <= RIOT_TAG_LINE_MAX_LENGTH:
+        return "Tag w Riot ID musi mieć od 3 do 5 znaków."
+    if not tag_line.isalnum():
+        return "Tag w Riot ID może zawierać wyłącznie litery i cyfry."
+    return None
 
 
 async def _get_account(
@@ -129,39 +139,116 @@ class LegacyVerificationStartView(discord.ui.View):
 
 
 class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
-    game_name: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
-        label="Nazwa Riot",
-        placeholder="np. Moon Poro",
-        min_length=1,
-        max_length=100,
-    )
-    tag_line: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
-        label="Tag",
-        placeholder="np. EUNE (bez #)",
-        min_length=1,
-        max_length=20,
-    )
-    platform: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
-        label="Region",
-        placeholder="EUNE, EUW albo NA",
-        min_length=2,
-        max_length=4,
-    )
-
-    def __init__(self, bot: MoonPoroBot) -> None:
-        super().__init__(timeout=bot.settings.verification_timeout)
+    def __init__(
+        self,
+        bot: MoonPoroBot,
+        *,
+        game_name: str = "",
+        tag_line: str = "",
+        platform: str | None = None,
+    ) -> None:
+        super().__init__(
+            timeout=bot.settings.verification_timeout,
+            custom_id="verification:legacy-account:v2",
+        )
         self.bot = bot
+        self.game_name: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
+            custom_id="verification:riot-game-name:v2",
+            placeholder="np. Moon Poro",
+            default=game_name or None,
+            min_length=RIOT_GAME_NAME_MIN_LENGTH,
+            max_length=RIOT_GAME_NAME_MAX_LENGTH,
+        )
+        self.tag_line: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
+            custom_id="verification:riot-tag-line:v2",
+            placeholder="Część po #",
+            default=tag_line or None,
+            min_length=RIOT_TAG_LINE_MIN_LENGTH,
+            # Six characters let us tolerate an accidentally pasted leading '#'.
+            max_length=RIOT_TAG_LINE_MAX_LENGTH + 1,
+        )
+        self.platform: discord.ui.Select[LegacyVerificationModal] = discord.ui.Select(
+            custom_id="verification:platform:v2",
+            placeholder="Wybierz serwer",
+            min_values=1,
+            max_values=1,
+            required=True,
+            options=[
+                discord.SelectOption(
+                    label="EUNE",
+                    value="EUN1",
+                    description="Europa Północna i Wschodnia",
+                    default=platform == "EUN1",
+                ),
+                discord.SelectOption(
+                    label="EUW",
+                    value="EUW1",
+                    description="Europa Zachodnia",
+                    default=platform == "EUW1",
+                ),
+                discord.SelectOption(
+                    label="NA",
+                    value="NA1",
+                    description="Ameryka Północna",
+                    default=platform == "NA1",
+                ),
+            ],
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Nazwa Riot ID",
+                description="Część przed #",
+                component=self.game_name,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Tag Riot ID",
+                description="Część po #, od 3 do 5 liter lub cyfr",
+                component=self.tag_line,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Serwer LoL",
+                component=self.platform,
+            )
+        )
+
+    def _retry_view(
+        self, interaction: discord.Interaction, game_name: str, tag_line: str, platform: str
+    ) -> LegacyVerificationRetryView:
+        return LegacyVerificationRetryView(
+            self.bot,
+            owner_id=interaction.user.id,
+            game_name=game_name,
+            tag_line=tag_line,
+            platform=platform,
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        platform = _normalize_platform(str(self.platform))
-        if platform is None:
-            await interaction.response.send_message(
-                "Nieprawidłowy region. Wpisz EUNE, EUW albo NA.", ephemeral=True
-            )
-            return
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
                 "Weryfikacja jest dostępna wyłącznie na skonfigurowanym serwerze.",
+                ephemeral=True,
+            )
+            return
+        if len(self.platform.values) != 1 or self.platform.values[0] not in SERVER_TRANSLATION:
+            await interaction.response.send_message(
+                "Wybierz jeden z dostępnych serwerów League of Legends.", ephemeral=True
+            )
+            return
+
+        platform = self.platform.values[0]
+        game_name, tag_line = _normalize_riot_id_parts(
+            self.game_name.value,
+            self.tag_line.value,
+        )
+        validation_error = _riot_id_validation_error(game_name, tag_line)
+        if validation_error is not None:
+            await interaction.response.send_message(
+                f"❌ {validation_error}",
+                view=self._retry_view(interaction, game_name, tag_line, platform),
                 ephemeral=True,
             )
             return
@@ -170,12 +257,19 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         try:
             account = await _get_account(
                 self.bot,
-                str(self.game_name),
-                str(self.tag_line),
+                game_name,
+                tag_line,
                 platform,
             )
             if account is None:
-                await interaction.followup.send("Nie znaleziono takiego Riot ID.", ephemeral=True)
+                await interaction.followup.send(
+                    f"Nie znaleziono Riot ID **{discord.utils.escape_markdown(game_name)}#"
+                    f"{discord.utils.escape_markdown(tag_line)}** w regionie "
+                    f"**{SERVER_TRANSLATION[platform]}**. Sprawdź dane z profilu Riot "
+                    "(nie nazwę logowania) oraz wybrany serwer LoL.",
+                    view=self._retry_view(interaction, game_name, tag_line, platform),
+                    ephemeral=True,
+                )
                 return
             puuid = str(account["puuid"])
             if await self.bot.verifications.get_by_puuid(interaction.guild_id, puuid):
@@ -192,7 +286,9 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             return
         if summoner is None:
             await interaction.followup.send(
-                "To konto nie ma profilu League of Legends w wybranym regionie.",
+                "Riot ID istnieje, ale nie ma profilu League of Legends w wybranym regionie. "
+                "Sprawdź wybrany serwer.",
+                view=self._retry_view(interaction, game_name, tag_line, platform),
                 ephemeral=True,
             )
             return
@@ -208,8 +304,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         )
         embed.add_field(
             name="Riot ID",
-            value=f"{account.get('gameName', str(self.game_name))}#"
-            f"{account.get('tagLine', str(self.tag_line))}",
+            value=f"{account.get('gameName', game_name)}#{account.get('tagLine', tag_line)}",
             inline=False,
         )
         embed.add_field(name="Region", value=SERVER_TRANSLATION[platform])
@@ -219,11 +314,52 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             owner_id=interaction.user.id,
             platform=platform,
             puuid=puuid,
-            game_name=str(account.get("gameName", self.game_name)),
-            tag_line=str(account.get("tagLine", self.tag_line)),
+            game_name=str(account.get("gameName", game_name)),
+            tag_line=str(account.get("tagLine", tag_line)),
             expected_icon_id=icon_id,
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class LegacyVerificationRetryView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MoonPoroBot,
+        *,
+        owner_id: int,
+        game_name: str,
+        tag_line: str,
+        platform: str,
+    ) -> None:
+        super().__init__(timeout=bot.settings.view_timeout)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.game_name = game_name
+        self.tag_line = tag_line
+        self.platform = platform
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "Ten przycisk należy do innego użytkownika.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="Popraw dane", emoji="✏️", style=discord.ButtonStyle.secondary)
+    async def retry(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[LegacyVerificationRetryView],
+    ) -> None:
+        await interaction.response.send_modal(
+            LegacyVerificationModal(
+                self.bot,
+                game_name=self.game_name,
+                tag_line=self.tag_line,
+                platform=self.platform,
+            )
+        )
 
 
 class LegacyIconConfirmationView(discord.ui.View):
@@ -310,7 +446,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             return
 
         audit_embed = discord.Embed(
-            title="Weryfikacja konta — ikona profilu",
+            title="Weryfikacja konta: ikona profilu",
             colour=discord.Colour.green(),
         )
         audit_embed.add_field(
