@@ -2,13 +2,18 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 from moon_poro.cogs import verification_legacy
 from moon_poro.cogs.verification_legacy import (
     LegacyVerificationCog,
-    _normalize_platform,
+    LegacyVerificationModal,
+    LegacyVerificationRateLimiter,
+    LegacyVerificationRetryView,
+    _normalize_riot_id_parts,
     _remove_verified_marker,
+    _riot_id_validation_error,
 )
 
 
@@ -18,11 +23,178 @@ class FakeRole:
         self.name = name
 
 
-def test_normalize_platform_accepts_supported_aliases() -> None:
-    assert _normalize_platform("eune") == "EUN1"
-    assert _normalize_platform("EUW1") == "EUW1"
-    assert _normalize_platform("na") == "NA1"
-    assert _normalize_platform("BR") is None
+def _modal_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_timeout=120,
+            verification_cooldown=30,
+            verification_icon_check_cooldown=5,
+            view_timeout=180,
+        )
+    )
+
+
+def _rate_limiter(
+    *,
+    global_rate: int = 4,
+    global_period_seconds: float = 10,
+    clock: Callable[[], float] | None = None,
+) -> LegacyVerificationRateLimiter:
+    if clock is None:
+        return LegacyVerificationRateLimiter(
+            global_rate=global_rate,
+            global_period_seconds=global_period_seconds,
+        )
+    return LegacyVerificationRateLimiter(
+        global_rate=global_rate,
+        global_period_seconds=global_period_seconds,
+        clock=clock,
+    )
+
+
+def test_riot_id_input_normalizes_whitespace_and_optional_hash() -> None:
+    assert _normalize_riot_id_parts(" Moon Poro ", " #EUNE ") == ("Moon Poro", "EUNE")
+
+
+@pytest.mark.parametrize(
+    ("game_name", "tag_line", "expected_fragment"),
+    [
+        ("ab", "EUNE", "3 do 16"),
+        ("Moon#Poro", "EUNE", "przed znakiem"),
+        ("Moon Poro", "EU", "3 do 5"),
+        ("Moon Poro", "EU-NE", "litery i cyfry"),
+    ],
+)
+def test_riot_id_input_rejects_invalid_parts(
+    game_name: str, tag_line: str, expected_fragment: str
+) -> None:
+    assert expected_fragment in (_riot_id_validation_error(game_name, tag_line) or "")
+
+
+def test_riot_id_input_accepts_documented_lengths_and_unicode() -> None:
+    assert _riot_id_validation_error("Poro", "ABC") is None
+    assert _riot_id_validation_error("Księżycowy Poro", "ŁÓDŹ") is None
+
+
+def test_legacy_modal_uses_constrained_inputs_and_region_select() -> None:
+    modal = LegacyVerificationModal(_modal_bot(), _rate_limiter())
+
+    assert modal.game_name.min_length == 3
+    assert modal.game_name.max_length == 16
+    assert modal.tag_line.min_length == 3
+    assert modal.tag_line.max_length == 6
+    assert modal.platform.required
+    assert [option.value for option in modal.platform.options] == ["EUN1", "EUW1", "NA1"]
+    components = modal.to_components()
+    assert [component["type"] for component in components] == [
+        discord.ComponentType.label.value,
+        discord.ComponentType.label.value,
+        discord.ComponentType.label.value,
+    ]
+    assert components[2]["component"]["type"] == discord.ComponentType.string_select.value
+
+
+async def test_legacy_modal_passes_normalized_values_and_offers_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    modal = LegacyVerificationModal(bot, _rate_limiter())
+    modal.game_name._value = " Moon Poro "
+    modal.tag_line._value = " #EUNE "
+    modal.platform._values = ["EUN1"]
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    followup = SimpleNamespace(send=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=response,
+        followup=followup,
+    )
+    account_lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(verification_legacy, "_get_account", account_lookup)
+
+    await modal.on_submit(interaction)
+
+    response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    account_lookup.assert_awaited_once_with(bot, "Moon Poro", "EUNE", "EUN1")
+    assert isinstance(followup.send.await_args.kwargs["view"], LegacyVerificationRetryView)
+    assert "Moon Poro#EUNE" in followup.send.await_args.args[0]
+
+
+async def test_retry_view_reopens_prefilled_modal() -> None:
+    view = LegacyVerificationRetryView(
+        _modal_bot(),
+        _rate_limiter(),
+        owner_id=101,
+        game_name="Moon Poro",
+        tag_line="EUNE",
+        platform="EUN1",
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=101),
+        response=SimpleNamespace(send_modal=AsyncMock()),
+    )
+
+    await view.children[0].callback(interaction)
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, LegacyVerificationModal)
+    assert modal.game_name.default == "Moon Poro"
+    assert modal.tag_line.default == "EUNE"
+    assert [option.value for option in modal.platform.options if option.default] == ["EUN1"]
+
+
+def test_legacy_rate_limiter_applies_per_user_and_scope() -> None:
+    now = [100.0]
+    limiter = _rate_limiter(clock=lambda: now[0])
+
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) == 30
+    assert limiter.update_rate_limit("icon", 101, user_cooldown_seconds=5) is None
+
+    now[0] += 30
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+
+
+def test_legacy_rate_limiter_applies_global_window_without_consuming_denied_attempt() -> None:
+    now = [100.0]
+    limiter = _rate_limiter(global_rate=2, clock=lambda: now[0])
+
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 102, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 103, user_cooldown_seconds=30) == 10
+
+    now[0] += 10
+    assert limiter.update_rate_limit("account", 103, user_cooldown_seconds=30) is None
+
+
+async def test_legacy_modal_rate_limit_blocks_riot_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    limiter = _rate_limiter()
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    modal = LegacyVerificationModal(bot, limiter)
+    modal.game_name._value = "Moon Poro"
+    modal.tag_line._value = "EUNE"
+    modal.platform._values = ["EUN1"]
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=response,
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    account_lookup = AsyncMock()
+    monkeypatch.setattr(verification_legacy, "_get_account", account_lookup)
+
+    await modal.on_submit(interaction)
+
+    account_lookup.assert_not_awaited()
+    response.defer.assert_not_awaited()
+    assert "Zbyt wiele prób" in response.send_message.await_args.args[0]
+    assert isinstance(response.send_message.await_args.kwargs["view"], LegacyVerificationRetryView)
 
 
 async def test_remove_own_verification_marker_keeps_rank_and_region(
@@ -93,37 +265,43 @@ async def test_apply_verified_roles_marks_internal_role_update(
     assert cog._managed_role_updates == set()
 
 
-async def test_member_join_restores_verified_roles(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_member_join_restores_cached_verified_roles_without_riot_lookup() -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
-    link = SimpleNamespace(platform="EUN1", puuid="account-puuid")
+    link = SimpleNamespace(
+        platform="EUN1",
+        puuid="account-puuid",
+        last_known_rank="EMERALD",
+    )
     bot = SimpleNamespace(
         settings=SimpleNamespace(guild_id=123),
-        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=link)),
+        verifications=SimpleNamespace(
+            get_by_user=AsyncMock(return_value=link),
+            schedule_rank_refresh_now=AsyncMock(),
+        ),
     )
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = bot
     cog._managed_role_updates = set()
     cog.apply_verified_roles = AsyncMock()
     leagues = [{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]
-    monkeypatch.setattr(verification_legacy, "_get_leagues", AsyncMock(return_value=leagues))
 
     await cog.on_member_join(member)
 
     bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
     cog.apply_verified_roles.assert_awaited_once_with(member, "EUN1", leagues)
+    bot.verifications.schedule_rank_refresh_now.assert_not_awaited()
 
 
-async def test_rank_refresh_loads_only_configured_guild_records() -> None:
+async def test_rank_refresh_claims_only_configured_guild_records() -> None:
     guild = SimpleNamespace(id=123)
     verifications = SimpleNamespace(
-        purge_access_logs=AsyncMock(),
-        list_for_guild=AsyncMock(return_value=[]),
+        claim_due_rank_refreshes=AsyncMock(return_value=[]),
     )
     bot = SimpleNamespace(
         settings=SimpleNamespace(
             guild_id=123,
-            verification_access_log_retention_days=30,
+            rank_refresh_claim_timeout_seconds=300,
         ),
         get_guild=Mock(return_value=guild),
         verifications=verifications,
@@ -134,8 +312,11 @@ async def test_rank_refresh_loads_only_configured_guild_records() -> None:
     await LegacyVerificationCog.refresh_verified.coro(cog)
 
     bot.get_guild.assert_called_once_with(123)
-    verifications.purge_access_logs.assert_awaited_once_with(123, 30)
-    verifications.list_for_guild.assert_awaited_once_with(123)
+    verifications.claim_due_rank_refreshes.assert_awaited_once_with(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
 
 
 async def test_remove_own_verification_deletes_link_and_audit_only(
@@ -186,16 +367,14 @@ async def test_remove_own_verification_deletes_link_and_audit_only(
     )
 
 
-async def test_manual_rank_change_is_reconciled_from_riot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_manual_rank_change_is_reconciled_from_cached_rank() -> None:
     emerald = FakeRole(1, "Emerald")
     iron = FakeRole(2, "Iron")
     verified = FakeRole(3, "Zweryfikowany")
     guild = SimpleNamespace(id=123)
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald, verified])
     after = SimpleNamespace(id=101, guild=guild, roles=[emerald, iron, verified])
-    link = SimpleNamespace(platform="EUN1", puuid="puuid")
+    link = SimpleNamespace(platform="EUN1", puuid="puuid", last_known_rank="EMERALD")
     settings = SimpleNamespace(
         guild_id=123,
         lol_ranks=["Iron", "Emerald"],
@@ -213,9 +392,48 @@ async def test_manual_rank_change_is_reconciled_from_riot(
     cog._managed_role_updates = set()
     cog.apply_verified_roles = AsyncMock()
     leagues = [{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]
-    monkeypatch.setattr(verification_legacy, "_get_leagues", AsyncMock(return_value=leagues))
 
     await cog.on_member_update(before, after)
 
     bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
     cog.apply_verified_roles.assert_awaited_once_with(after, "EUN1", leagues)
+
+
+async def test_manual_rank_change_without_cache_restores_previous_roles_and_schedules_refresh() -> (
+    None
+):
+    emerald = FakeRole(1, "Emerald")
+    iron = FakeRole(2, "Iron")
+    verified = FakeRole(3, "Zweryfikowany")
+    guild = SimpleNamespace(id=123)
+    before = SimpleNamespace(id=101, guild=guild, roles=[emerald, verified])
+    after = SimpleNamespace(
+        id=101,
+        guild=guild,
+        roles=[emerald, iron, verified],
+        remove_roles=AsyncMock(),
+        add_roles=AsyncMock(),
+    )
+    link = SimpleNamespace(platform="EUN1", puuid="puuid", last_known_rank=None)
+    settings = SimpleNamespace(
+        guild_id=123,
+        lol_ranks=["Iron", "Emerald"],
+        lol_servers=["EUNE"],
+        verified_role_name="Zweryfikowany",
+        member_role_name="Użytkownik",
+        role_ids={},
+    )
+    verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=link),
+        schedule_rank_refresh_now=AsyncMock(),
+    )
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(settings=settings, verifications=verifications)
+    cog._managed_role_updates = set()
+
+    await cog.on_member_update(before, after)
+
+    after.remove_roles.assert_awaited_once_with(iron, reason="Ochrona ról weryfikacji Riot")
+    after.add_roles.assert_not_awaited()
+    verifications.schedule_rank_refresh_now.assert_awaited_once_with(123, 101)
+    assert cog._managed_role_updates == set()

@@ -14,6 +14,7 @@ from moon_poro.repositories import (
     WarningRepository,
 )
 from moon_poro.responses import install_error_handler
+from moon_poro.riot import RiotAPIMonitor
 from moon_poro.settings import Settings
 from moon_poro.verification_sessions import VerificationSessionRepository
 
@@ -27,12 +28,14 @@ class MoonPoroBot(commands.Bot):
         settings: Settings,
         database: Database,
         riot_client: RiotAPIClient,
+        riot_monitor: RiotAPIMonitor,
         intents: discord.Intents,
     ) -> None:
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.settings = settings
         self.database = database
         self.riot_client = riot_client
+        self.riot_monitor = riot_monitor
         self.verifications = VerificationRepository(database.session_factory)
         self.verification_sessions = VerificationSessionRepository(database.session_factory)
         self.warnings = WarningRepository(database.session_factory)

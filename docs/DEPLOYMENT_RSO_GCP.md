@@ -15,9 +15,8 @@ klienta RSO; tylko `moon-poro-bot` czyta token Discord i produkcyjny klucz Riot 
 kod tylko do odczytu i baza z oddzielnymi loginami.
 
 > [!IMPORTANT]
-> Ten branch usuwa stary panel weryfikacji ikoną. Przed otrzymaniem danych klienta RSO nie
-> uruchamiaj go jako produkcyjnego bota. Podczas konsolidacji VM zachowaj działającą wersję
-> legacy w oddzielnym katalogu i usłudze; `moon-poro-rso.service` pozostaw wyłączone.
+> Repozytorium zawiera tymczasową weryfikację ikoną oraz docelowe RSO. Do czasu otrzymania danych
+> klienta Riot używaj `VERIFICATION_MODE=legacy_icon` i pozostaw `moon-poro-rso.service` wyłączone.
 
 ## 1. Warunki wstępne
 
@@ -97,8 +96,8 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 ## 6. Kolejność pierwszego wdrożenia
 
 1. Przed zatrzymaniem starego bota wykonaj snapshot oraz zweryfikowany logiczny backup bazy.
-2. Podczas migracji VM przenieś działającą wersję legacy do oddzielnego katalogu i potwierdź
-   działanie starej weryfikacji. Nie uruchamiaj jeszcze kodu RSO.
+2. Ustaw `VERIFICATION_MODE=legacy_icon` i potwierdź działanie weryfikacji ikoną. Nie uruchamiaj
+   jeszcze usługi RSO.
 3. Po otrzymaniu danych klienta wdróż kod RSO oraz zbudowany poza VM katalog `site/dist`.
 4. Zatrzymaj legacy bota na czas finalnego przełączenia i uruchom migracje Alembic kontem
    właściciela schematu.
@@ -107,7 +106,8 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 7. Sprawdź Caddy, uruchom callback i testuj pełny przepływ na prywatnym kanale.
 8. Jeżeli Riot zażąda weryfikacji domeny, umieść dokładny tekst w `site/dist/riot.txt` i usuń
    plik po zakończeniu.
-9. Dopiero po udanych testach opublikuj nowy panel `/weryfikacja` i usuń panel z ikonką.
+9. Dopiero po udanych testach ustaw `VERIFICATION_MODE=rso`, zrestartuj bota i opublikuj nowy panel
+   `/weryfikacja`.
 10. W razie niepowodzenia wyłącz RSO i przywróć legacy bota bez cofania migracji
     `20260810_0002`.
 
@@ -143,9 +143,32 @@ przed OOM (nie jako zamiennik RAM), alert dla pamięci >85%, dysku >80% i restar
 Static Astro nie zużywa pamięci aplikacyjnej. Caddy kompresuje pliki raz przy odpowiedzi, a strona
 nie ładuje fontów, bibliotek JS, analityki ani zasobów zewnętrznych.
 
-## 9. Rollback
+## 9. Odświeżanie rang
 
-Kod starego panelu ikonkowego został celowo usunięty; nie przywracaj go po publicznym przejściu na
-RSO bez ponownej oceny bezpieczeństwa. Techniczny rollback aplikacji może użyć poprzedniego wydania,
-ale migracji `20260810_0002` nie cofaj, jeżeli istnieją już rekordy RSO. Wyłącz nowy panel, zatrzymaj
-`moon-poro-rso`, przywróć poprzednią usługę bota i zbadaj problem na kopii bazy.
+Migracja `20260814_0003` rozkłada istniejące powiązania równomiernie na pierwsze 24 godziny. Bot
+przechowuje termin następnego sprawdzenia i ostatnią znaną rangę w `verification_links`. Worker
+domyślnie pobiera najwyżej jeden należny rekord co 10 sekund. Po błędzie stosuje rosnące opóźnienie,
+a niedokończone zadanie może zostać bezpiecznie przejęte po wygaśnięciu czasu claimu.
+
+Zmiana chronionej roli oraz ponowne wejście użytkownika korzystają z ostatniej rangi zapisanej w
+bazie i nie wykonują dodatkowego zapytania do Riot API. Okres odświeżania pojedynczego użytkownika
+kontroluje `RANK_REFRESH_INTERVAL_HOURS`.
+
+## 10. Monitoring Riot API i kolejki rang
+
+Bot zapisuje co 5 minut pojedynczy raport ze statusem odpowiedzi Riot i kolejki odświeżania rang:
+
+```bash
+journalctl -u moon-poro-bot.service --since today --grep='Riot monitoring:'
+```
+
+Liczniki odpowiedzi 429, 401, 403 i 5xx obejmują okres od ostatniego uruchomienia procesu. Długość
+kolejki, termin najstarszego zaległego sprawdzenia i jego opóźnienie są odczytywane na żywo z
+PostgreSQL. `last_successful_riot_response_utc` pokazuje czas ostatniej odpowiedzi 2xx. Częstotliwość
+raportu kontroluje `RIOT_MONITORING_INTERVAL_SECONDS`, domyślnie 300 sekund.
+
+## 11. Rollback
+
+Po problemie z RSO ustaw `VERIFICATION_MODE=legacy_icon`, zatrzymaj `moon-poro-rso` i opublikuj panel
+weryfikacji ikoną. Nie cofaj migracji `20260810_0002` ani `20260814_0003`, jeżeli istnieją już
+rekordy produkcyjne. Problem analizuj na kopii bazy.

@@ -50,13 +50,19 @@ async def test_main_starts_and_closes_all_resources(
     monkeypatch.setattr(app, "Settings", Mock(return_value=settings))
     monkeypatch.setattr(app, "upgrade_database", AsyncMock())
     monkeypatch.setattr(app, "Database", Mock(return_value=database))
-    monkeypatch.setattr(app, "RiotAPIClient", Mock(return_value=riot_context))
+    riot_client_factory = Mock(return_value=riot_context)
+    monkeypatch.setattr(app, "create_riot_api_client", riot_client_factory)
     monkeypatch.setattr(app, "MoonPoroBot", bot_class)
     monkeypatch.setattr(app, "create_intents", Mock(return_value="intents"))
 
     await app.main()
 
     app.upgrade_database.assert_awaited_once_with(settings)
+    riot_monitor = bot_class.call_args.kwargs["riot_monitor"]
+    assert isinstance(riot_monitor, app.RiotAPIMonitor)
+    riot_client_factory.assert_called_once_with(
+        settings.riot_api_token.get_secret_value(), monitor=riot_monitor
+    )
     assert bot_class.call_args.kwargs["riot_client"] is riot_context.client
     bot.start.assert_awaited_once_with(settings.discord_token.get_secret_value())
     bot.close.assert_awaited_once_with()
@@ -74,7 +80,7 @@ async def test_main_closes_resources_when_bot_fails(
     monkeypatch.setattr(app, "Settings", Mock(return_value=settings))
     monkeypatch.setattr(app, "upgrade_database", AsyncMock())
     monkeypatch.setattr(app, "Database", Mock(return_value=database))
-    monkeypatch.setattr(app, "RiotAPIClient", Mock(return_value=RiotClientContext()))
+    monkeypatch.setattr(app, "create_riot_api_client", Mock(return_value=RiotClientContext()))
     monkeypatch.setattr(app, "MoonPoroBot", Mock(return_value=bot))
     monkeypatch.setattr(app, "create_intents", Mock(return_value="intents"))
 

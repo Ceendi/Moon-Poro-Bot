@@ -89,6 +89,25 @@ def test_profile_icon_verification_does_not_require_rso_url() -> None:
     assert settings.rso_public_base_url is None
 
 
+def test_profile_icon_verification_has_conservative_rate_limits() -> None:
+    settings = make_settings(verification_mode="legacy_icon")
+
+    assert settings.verification_cooldown == 30
+    assert settings.verification_icon_check_cooldown == 5
+    assert settings.verification_global_rate_limit == 4
+    assert settings.verification_global_rate_period_seconds == 10
+
+
+def test_rank_refresh_is_staggered_with_durable_retry_defaults() -> None:
+    settings = make_settings()
+
+    assert settings.rank_refresh_interval_hours == 24
+    assert settings.rank_refresh_worker_interval_seconds == 10
+    assert settings.rank_refresh_retry_base_seconds == 300
+    assert settings.rank_refresh_claim_timeout_seconds == 300
+    assert settings.riot_monitoring_interval_seconds == 300
+
+
 def test_public_rso_url_requires_https() -> None:
     with pytest.raises(ValidationError, match="must use HTTPS"):
         make_settings(rso_public_base_url="http://bot.example.com")

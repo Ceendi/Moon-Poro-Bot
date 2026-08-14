@@ -221,6 +221,7 @@ class VerificationSessionRepository:
                         platform=platform,
                         puuid=puuid,
                         verification_method="RSO",
+                        rank_next_refresh_at=now + timedelta(hours=24),
                     )
                 )
                 record.platform = platform

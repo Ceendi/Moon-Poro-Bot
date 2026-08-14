@@ -8,6 +8,7 @@ from moon_poro.cogs.verification import (
     VerificationStartView,
     _apply_verified_roles,
     _get_leagues,
+    _refresh_next_verified,
     _remove_verified_roles,
 )
 from moon_poro.verification_sessions import CreatedVerificationSession
@@ -166,3 +167,106 @@ async def test_verification_start_is_rate_limited() -> None:
     await view.children[0].callback(interaction)
 
     assert "Spróbuj ponownie" in response.send_message.await_args_list[1].args[0]
+
+
+def _rank_refresh_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        guild_id=123,
+        rank_refresh_claim_timeout_seconds=300,
+        rank_refresh_interval_hours=24,
+        rank_refresh_retry_base_seconds=300,
+    )
+
+
+async def test_rank_refresh_worker_updates_one_due_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(discord_user_id=101, platform="EUN1", puuid="puuid")
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        complete_rank_refresh=AsyncMock(return_value=True),
+        retry_rank_refresh=AsyncMock(),
+        defer_rank_refresh=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+    leagues = [{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]
+    monkeypatch.setattr(verification, "_get_leagues", AsyncMock(return_value=leagues))
+
+    await _refresh_next_verified(cog)
+
+    verifications.claim_due_rank_refreshes.assert_awaited_once_with(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    cog.apply_verified_roles.assert_awaited_once_with(member, "EUN1", leagues)
+    verifications.complete_rank_refresh.assert_awaited_once_with(
+        123,
+        101,
+        rank_tier="EMERALD",
+        refresh_interval_hours=24,
+    )
+    verifications.retry_rank_refresh.assert_not_awaited()
+
+
+async def test_rank_refresh_worker_retries_riot_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(discord_user_id=101, platform="EUN1", puuid="puuid")
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        complete_rank_refresh=AsyncMock(),
+        retry_rank_refresh=AsyncMock(return_value=300),
+        defer_rank_refresh=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(side_effect=verification.RiotAPIUnavailable),
+    )
+
+    await _refresh_next_verified(cog)
+
+    verifications.retry_rank_refresh.assert_awaited_once_with(
+        123,
+        101,
+        base_delay_seconds=300,
+    )
+    verifications.complete_rank_refresh.assert_not_awaited()
+
+
+async def test_rank_refresh_worker_defers_member_outside_guild() -> None:
+    link = SimpleNamespace(discord_user_id=101, platform="EUN1", puuid="puuid")
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=None))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        defer_rank_refresh=AsyncMock(return_value=True),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+    )
+
+    await _refresh_next_verified(SimpleNamespace(bot=bot))
+
+    verifications.defer_rank_refresh.assert_awaited_once_with(
+        123,
+        101,
+        delay_seconds=86_400,
+    )

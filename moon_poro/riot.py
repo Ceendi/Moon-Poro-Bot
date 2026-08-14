@@ -2,15 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import math
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
+from pulsefire.clients import RiotAPIClient
+from pulsefire.invocation import Invocation
+from pulsefire.middlewares import (
+    Middleware,
+    MiddlewareCallable,
+    http_error_middleware,
+    json_response_middleware,
+    rate_limiter_middleware,
+)
+from pulsefire.ratelimiters import RiotAPIRateLimiter
 
 from moon_poro.roles import find_role
 from moon_poro.settings import Settings
 
 logger = logging.getLogger("moon_poro.riot")
+
+DEFAULT_RETRY_AFTER_SECONDS = 1.0
 
 SERVER_TRANSLATION = {"EUN1": "EUNE", "EUW1": "EUW", "NA1": "NA"}
 SERVERS = {"eune": "EUN1", "euw": "EUW1", "na": "NA1"}
@@ -41,29 +57,177 @@ class RiotAPIUnavailable(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class RiotAPIMetricsSnapshot:
+    responses_429: int
+    responses_401: int
+    responses_403: int
+    responses_5xx: int
+    last_success_at: datetime | None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class RiotAPIMonitor:
+    """Process-local counters for raw Riot HTTP responses."""
+
+    def __init__(self, *, clock: Callable[[], datetime] = _utc_now) -> None:
+        self._clock = clock
+        self._responses_429 = 0
+        self._responses_401 = 0
+        self._responses_403 = 0
+        self._responses_5xx = 0
+        self._last_success_at: datetime | None = None
+
+    def record_status(self, status: int) -> None:
+        if 200 <= status < 300:
+            self._last_success_at = self._clock()
+        elif status == 429:
+            self._responses_429 += 1
+        elif status == 401:
+            self._responses_401 += 1
+        elif status == 403:
+            self._responses_403 += 1
+        elif 500 <= status < 600:
+            self._responses_5xx += 1
+
+    def snapshot(self) -> RiotAPIMetricsSnapshot:
+        return RiotAPIMetricsSnapshot(
+            responses_429=self._responses_429,
+            responses_401=self._responses_401,
+            responses_403=self._responses_403,
+            responses_5xx=self._responses_5xx,
+            last_success_at=self._last_success_at,
+        )
+
+
+class RiotCircuitBreaker:
+    """Pause every Riot request sharing a routing region after HTTP 429."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._blocked_until: dict[str, float] = {}
+
+    @staticmethod
+    def _key(region: str) -> str:
+        return region.strip().lower() or "unknown"
+
+    def block(self, region: str, retry_after: float) -> None:
+        key = self._key(region)
+        deadline = self._clock() + max(0.0, retry_after)
+        previous_deadline = self._blocked_until.get(key, 0.0)
+        if deadline <= previous_deadline:
+            return
+        self._blocked_until[key] = deadline
+        logger.warning(
+            "Riot API circuit breaker opened for region %s for %.1f seconds",
+            key,
+            retry_after,
+        )
+
+    def retry_after(self, region: str) -> float:
+        key = self._key(region)
+        deadline = self._blocked_until.get(key, 0.0)
+        remaining = deadline - self._clock()
+        if remaining > 0:
+            return remaining
+        self._blocked_until.pop(key, None)
+        return 0.0
+
+    async def wait(self, region: str) -> None:
+        while (delay := self.retry_after(region)) > 0:
+            await self._sleep(delay)
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float:
+    raw_value = headers.get("Retry-After")
+    try:
+        retry_after = float(raw_value) if raw_value is not None else math.nan
+    except ValueError:
+        retry_after = math.nan
+    if not math.isfinite(retry_after) or retry_after < 0:
+        logger.warning(
+            "Riot API returned HTTP 429 without a valid Retry-After header; using %.1f seconds",
+            DEFAULT_RETRY_AFTER_SECONDS,
+        )
+        return DEFAULT_RETRY_AFTER_SECONDS
+    return retry_after
+
+
+def riot_circuit_breaker_middleware(circuit_breaker: RiotCircuitBreaker) -> Middleware:
+    def constructor(next_call: MiddlewareCallable) -> MiddlewareCallable:
+        async def middleware(invocation: Invocation) -> Any:
+            region = str(invocation.params.get("region", "unknown"))
+            await circuit_breaker.wait(region)
+            response = await next_call(invocation)
+            if getattr(response, "status", None) == 429:
+                headers: Mapping[str, str] = getattr(response, "headers", {})
+                circuit_breaker.block(region, _retry_after_seconds(headers))
+            return response
+
+        return middleware
+
+    return constructor
+
+
+def riot_api_monitoring_middleware(monitor: RiotAPIMonitor) -> Middleware:
+    def constructor(next_call: MiddlewareCallable) -> MiddlewareCallable:
+        async def middleware(invocation: Invocation) -> Any:
+            response = await next_call(invocation)
+            status = getattr(response, "status", None)
+            if isinstance(status, int):
+                monitor.record_status(status)
+            return response
+
+        return middleware
+
+    return constructor
+
+
+def create_riot_api_client(
+    api_token: str,
+    *,
+    circuit_breaker: RiotCircuitBreaker | None = None,
+    monitor: RiotAPIMonitor | None = None,
+) -> RiotAPIClient:
+    shared_breaker = circuit_breaker or RiotCircuitBreaker()
+    shared_monitor = monitor or RiotAPIMonitor()
+    return RiotAPIClient(
+        default_headers={"X-Riot-Token": api_token},
+        middlewares=[
+            json_response_middleware(),
+            http_error_middleware(),
+            rate_limiter_middleware(RiotAPIRateLimiter()),
+            # Keep the shared gate closest to the transport so a request delayed by
+            # Pulsefire's adaptive limiter checks the breaker immediately before I/O.
+            riot_circuit_breaker_middleware(shared_breaker),
+            riot_api_monitoring_middleware(shared_monitor),
+        ],
+    )
+
+
 async def riot_api_call[T](
     operation: Callable[[], Awaitable[T]],
     *,
     not_found: T | None = None,
-    attempts: int = 3,
 ) -> T | None:
-    for attempt in range(attempts):
-        try:
-            return await operation()
-        except Exception as error:
-            status = getattr(error, "status", None)
-            if status == 404:
-                return not_found
-            retryable = status == 429 or (isinstance(status, int) and status >= 500)
-            if retryable and attempt + 1 < attempts:
-                retry_after = getattr(error, "retry_after", None)
-                delay = float(retry_after) if retry_after else 2**attempt
-                logger.warning("Riot API status %s; retrying in %.1fs", status, delay)
-                await asyncio.sleep(min(delay, 10.0))
-                continue
-            logger.exception("Riot API request failed with status %s", status)
-            raise RiotAPIUnavailable from error
-    raise RiotAPIUnavailable
+    """Run one Pulsefire operation; its middleware owns the retry policy."""
+    try:
+        return await operation()
+    except Exception as error:
+        status = getattr(error, "status", None)
+        if status == 404:
+            return not_found
+        logger.exception("Riot API request failed with status %s", status)
+        raise RiotAPIUnavailable from error
 
 
 def get_rank_from_leagues(leagues: list[dict[str, Any]]) -> str:
