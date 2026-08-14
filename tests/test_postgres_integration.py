@@ -197,6 +197,8 @@ async def test_migrations_and_repositories_against_postgres(
         current, previous = reverted
         assert current.id == second.id
         assert previous is not None and previous.id == first.id
+        assert not current.audit_sync_pending
+        assert previous.audit_sync_pending
 
         stats = await ModerationStatsRepository(connection.session_factory).list_for_guild(guild_id)
         assert {(row.moderator_id, row.warnings_count) for row in stats} == {(501, 1), (502, 1)}
@@ -268,7 +270,7 @@ async def test_expired_warning_is_atomic_and_does_not_escalate_the_next_warning(
         assert active is not None and active.id == fresh.id
 
         await warnings.acknowledge_role_sync(guild_id, 201)
-        await warnings.acknowledge_audit_sync(guild_id, 402)
+        await warnings.acknowledge_audit_sync(guild_id, 402, fresh.id)
         candidates = await warnings.list_for_reconciliation(guild_id)
         assert [item.id for item in candidates] == [elapsed.id, fresh.id]
         async with connection.session_factory() as session:
@@ -302,6 +304,34 @@ async def test_expired_warning_is_atomic_and_does_not_escalate_the_next_warning(
         assert sorted(item.level for item in concurrent) == [1, 2]
         concurrent_active = await warnings.get_active(guild_id, 203)
         assert concurrent_active is not None and concurrent_active.level == 2
+
+        audit_snapshot = await warnings.issue(
+            guild_id=guild_id,
+            user_id=204,
+            requested_level=1,
+            reasons="5",
+            description=None,
+            moderator_id=505,
+            message_id=405,
+            duration_by_level=durations,
+        )
+        newer_audit = await warnings.issue(
+            guild_id=guild_id,
+            user_id=204,
+            requested_level=1,
+            reasons="6",
+            description=None,
+            moderator_id=506,
+            message_id=405,
+            duration_by_level=durations,
+        )
+        await warnings.acknowledge_audit_sync(guild_id, 405, audit_snapshot.id)
+        async with connection.session_factory() as session:
+            stored_snapshot = await session.get(Warning, audit_snapshot.id)
+            stored_newer = await session.get(Warning, newer_audit.id)
+            assert stored_snapshot is not None and stored_newer is not None
+            assert not stored_snapshot.audit_sync_pending
+            assert stored_newer.audit_sync_pending
     finally:
         await connection.close()
 

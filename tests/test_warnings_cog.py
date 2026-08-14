@@ -253,6 +253,35 @@ async def test_reconciliation_retries_failed_audit_without_blocking_role_sync(
     cog.bot.warnings.acknowledge_audit_sync.assert_not_awaited()
 
 
+async def test_reconciliation_prefers_restored_active_warning_over_newer_revoked_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMessageable:
+        pass
+
+    monkeypatch.setattr(warnings.discord.abc, "Messageable", FakeMessageable)
+    cog = make_cog()
+    previous = make_warning(warning_id=41, status=WarningStatus.ACTIVE.value)
+    current = make_warning(warning_id=42, status=WarningStatus.REVOKED.value)
+    previous.audit_sync_pending = True
+    current.audit_sync_pending = False
+    member = SimpleNamespace(id=101)
+    channel = FakeMessageable()
+    guild = SimpleNamespace(
+        id=123,
+        get_member=Mock(return_value=member),
+        get_channel=Mock(return_value=channel),
+    )
+    cog.bot.get_guild.return_value = guild
+    cog.bot.warnings.list_for_reconciliation.return_value = [previous, current]
+    cog._sync_member_warning_role = AsyncMock()
+    cog._sync_audit_message = AsyncMock()
+
+    await WarningsCog.reconcile_warnings.coro(cog)
+
+    cog._sync_audit_message.assert_awaited_once_with(channel, previous)
+
+
 async def test_cw_edits_audit_to_revoked_instead_of_deleting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,6 +309,35 @@ async def test_cw_edits_audit_to_revoked_instead_of_deleting(
     cog._sync_audit_message.assert_awaited_once_with(channel, current)
     cog._sync_member_warning_role.assert_awaited_once_with(member)
     assert "Cofnięto aktywną karę" in interaction.followup.send.await_args.args[0]
+
+
+async def test_cw_with_previous_displays_restored_active_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMessageable:
+        pass
+
+    monkeypatch.setattr(warnings.discord.abc, "Messageable", FakeMessageable)
+    cog = make_cog()
+    current = make_warning(warning_id=42, status=WarningStatus.REVOKED.value)
+    previous = make_warning(warning_id=41, status=WarningStatus.ACTIVE.value)
+    previous.level = 1
+    cog.bot.warnings.revert.return_value = (current, previous)
+    cog._sync_audit_message = AsyncMock()
+    cog._sync_member_warning_role = AsyncMock()
+    channel = FakeMessageable()
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=123, get_channel=Mock(return_value=channel)),
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    member = SimpleNamespace(id=101)
+
+    await WarningsCog.revert_warning.callback(cog, interaction, member)
+
+    cog._sync_audit_message.assert_awaited_once_with(channel, previous)
+    assert "Warn" in interaction.followup.send.await_args.args[0]
 
 
 async def test_cw_role_sync_survives_audit_edit_failure(

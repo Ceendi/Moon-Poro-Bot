@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from moon_poro.models import (
     GuildFeature,
@@ -430,6 +430,11 @@ class WarningRepository:
             return list(result)
 
     async def list_for_reconciliation(self, guild_id: int) -> list[Warning]:
+        pending_audit = aliased(Warning)
+        pending_message_ids = select(pending_audit.message_id).where(
+            pending_audit.guild_id == guild_id,
+            pending_audit.audit_sync_pending.is_(True),
+        )
         async with self._sessions() as session:
             result = await session.scalars(
                 select(Warning)
@@ -440,6 +445,7 @@ class WarningRepository:
                         Warning.status == WarningStatus.ACTIVE.value,
                         Warning.role_sync_pending.is_(True),
                         Warning.audit_sync_pending.is_(True),
+                        Warning.message_id.in_(pending_message_ids),
                     ),
                 )
                 .order_by(Warning.id)
@@ -458,13 +464,21 @@ class WarningRepository:
                 .values(role_sync_pending=False)
             )
 
-    async def acknowledge_audit_sync(self, guild_id: int, message_id: int) -> None:
+    async def acknowledge_audit_sync(
+        self,
+        guild_id: int,
+        message_id: int,
+        through_warning_id: int,
+    ) -> None:
+        """Acknowledge only revisions covered by the rendered audit snapshot."""
+
         async with self._sessions.begin() as session:
             await session.execute(
                 update(Warning)
                 .where(
                     Warning.guild_id == guild_id,
                     Warning.message_id == message_id,
+                    Warning.id <= through_warning_id,
                     Warning.audit_sync_pending.is_(True),
                 )
                 .values(audit_sync_pending=False)
@@ -504,6 +518,8 @@ class WarningRepository:
             if previous is not None:
                 if previous.expires_at > now:
                     previous.status = WarningStatus.ACTIVE.value
+                    previous.audit_sync_pending = True
+                    current.audit_sync_pending = False
                 else:
                     previous.status = WarningStatus.EXPIRED.value
                     previous = None

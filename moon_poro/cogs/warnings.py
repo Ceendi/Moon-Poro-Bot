@@ -112,7 +112,11 @@ class WarningsCog(commands.Cog):
             embed=warning_embed(warning, role_name),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        await self.bot.warnings.acknowledge_audit_sync(warning.guild_id, warning.message_id)
+        await self.bot.warnings.acknowledge_audit_sync(
+            warning.guild_id,
+            warning.message_id,
+            warning.id,
+        )
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
@@ -186,12 +190,15 @@ class WarningsCog(commands.Cog):
         except Exception:
             logger.exception("Could not reload pending warning audits; next run will retry")
             return
-        pending_by_message: dict[int, list[Warning]] = defaultdict(list)
-        for warning in warnings:
-            if warning.audit_sync_pending:
-                pending_by_message[warning.message_id].append(warning)
-        if not pending_by_message:
+        pending_message_ids = {
+            warning.message_id for warning in warnings if warning.audit_sync_pending
+        }
+        if not pending_message_ids:
             return
+        warnings_by_message: dict[int, list[Warning]] = defaultdict(list)
+        for warning in warnings:
+            if warning.message_id in pending_message_ids:
+                warnings_by_message[warning.message_id].append(warning)
 
         channel_id = self.bot.settings.warn_channel_id
         channel = guild.get_channel(channel_id) if channel_id else None
@@ -199,12 +206,15 @@ class WarningsCog(commands.Cog):
             logger.warning(
                 "Warning audit channel %s is unavailable; %s update(s) remain pending",
                 channel_id,
-                len(pending_by_message),
+                len(pending_message_ids),
             )
             return
 
-        for candidates in pending_by_message.values():
-            warning = max(candidates, key=lambda item: item.id)
+        for candidates in warnings_by_message.values():
+            active = [
+                warning for warning in candidates if warning.status == WarningStatus.ACTIVE.value
+            ]
+            warning = max(active or candidates, key=lambda item: item.id)
             try:
                 await self._sync_audit_message(channel, warning)
             except discord.HTTPException:
@@ -311,7 +321,11 @@ class WarningsCog(commands.Cog):
                     embed=warning_embed(warning, role_name),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                await self.bot.warnings.acknowledge_audit_sync(warning.guild_id, warning.message_id)
+                await self.bot.warnings.acknowledge_audit_sync(
+                    warning.guild_id,
+                    warning.message_id,
+                    warning.id,
+                )
             except discord.HTTPException:
                 sync_failed = True
                 logger.exception(
@@ -366,7 +380,7 @@ class WarningsCog(commands.Cog):
             sync_failed = False
             if isinstance(channel, discord.abc.Messageable):
                 try:
-                    await self._sync_audit_message(channel, current)
+                    await self._sync_audit_message(channel, previous or current)
                 except discord.HTTPException:
                     sync_failed = True
                     logger.exception(
