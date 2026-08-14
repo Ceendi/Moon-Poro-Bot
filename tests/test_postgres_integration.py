@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import inspect
 
 from moon_poro.database import Database, upgrade_database
-from moon_poro.models import Base
+from moon_poro.models import Base, Warning, WarningStatus
 from moon_poro.repositories import (
     GuildFeatureRepository,
     ModerationStatsRepository,
@@ -49,7 +51,19 @@ async def test_migrations_and_repositories_against_postgres(
             table_names = await database_connection.run_sync(
                 lambda sync_connection: set(inspect(sync_connection).get_table_names())
             )
+            warning_columns = await database_connection.run_sync(
+                lambda sync_connection: {
+                    column["name"] for column in inspect(sync_connection).get_columns("warnings")
+                }
+            )
+            warning_indexes = await database_connection.run_sync(
+                lambda sync_connection: {
+                    index["name"] for index in inspect(sync_connection).get_indexes("warnings")
+                }
+            )
         assert set(Base.metadata.tables) <= table_names
+        assert {"role_sync_pending", "audit_sync_pending"} <= warning_columns
+        assert "ix_warnings_pending_sync" in warning_indexes
 
         verifications = VerificationRepository(connection.session_factory)
         created = await verifications.create(
@@ -191,5 +205,171 @@ async def test_migrations_and_repositories_against_postgres(
         assert removed is not None and removed.puuid == "integration-puuid"
         assert await verifications.get_by_user(guild_id, 101) is None
         await verifications.delete_by_user(guild_id, 102)
+    finally:
+        await connection.close()
+
+
+async def test_expired_warning_is_atomic_and_does_not_escalate_the_next_warning(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+
+    await upgrade_database(settings)
+    connection = Database(settings)
+    warnings = WarningRepository(connection.session_factory)
+    durations = {1: 7, 2: 14, 3: 3}
+    try:
+        elapsed = await warnings.issue(
+            guild_id=guild_id,
+            user_id=201,
+            requested_level=1,
+            reasons="1",
+            description=None,
+            moderator_id=501,
+            message_id=401,
+            duration_by_level=durations,
+        )
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(Warning, elapsed.id, with_for_update=True)
+            assert stored is not None
+            stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+        fresh = await warnings.issue(
+            guild_id=guild_id,
+            user_id=201,
+            requested_level=1,
+            reasons="2",
+            description="fresh",
+            moderator_id=502,
+            message_id=402,
+            duration_by_level=durations,
+        )
+
+        assert fresh.level == 1
+        assert fresh.parent_id is None
+        assert fresh.reasons == "2"
+        async with connection.session_factory() as session:
+            old = await session.get(Warning, elapsed.id)
+            assert old is not None
+            assert old.status == WarningStatus.EXPIRED.value
+            assert old.role_sync_pending
+            assert old.audit_sync_pending
+        active = await warnings.get_active(guild_id, 201)
+        assert active is not None and active.id == fresh.id
+
+        await warnings.acknowledge_role_sync(guild_id, 201)
+        await warnings.acknowledge_audit_sync(guild_id, 402)
+        candidates = await warnings.list_for_reconciliation(guild_id)
+        assert [item.id for item in candidates] == [elapsed.id, fresh.id]
+        async with connection.session_factory() as session:
+            stored_fresh = await session.get(Warning, fresh.id)
+            assert stored_fresh is not None
+            assert not stored_fresh.role_sync_pending
+            assert not stored_fresh.audit_sync_pending
+
+        concurrent = await asyncio.gather(
+            warnings.issue(
+                guild_id=guild_id,
+                user_id=203,
+                requested_level=1,
+                reasons="3",
+                description=None,
+                moderator_id=503,
+                message_id=404,
+                duration_by_level=durations,
+            ),
+            warnings.issue(
+                guild_id=guild_id,
+                user_id=203,
+                requested_level=1,
+                reasons="4",
+                description=None,
+                moderator_id=504,
+                message_id=404,
+                duration_by_level=durations,
+            ),
+        )
+        assert sorted(item.level for item in concurrent) == [1, 2]
+        concurrent_active = await warnings.get_active(guild_id, 203)
+        assert concurrent_active is not None and concurrent_active.level == 2
+    finally:
+        await connection.close()
+
+
+async def test_expired_timeout_never_reactivates_its_parent(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+
+    await upgrade_database(settings)
+    connection = Database(settings)
+    warnings = WarningRepository(connection.session_factory)
+    durations = {1: 7, 2: 14, 3: 3}
+    try:
+        first = await warnings.issue(
+            guild_id=guild_id,
+            user_id=202,
+            requested_level=1,
+            reasons="1",
+            description=None,
+            moderator_id=501,
+            message_id=403,
+            duration_by_level=durations,
+        )
+        second = await warnings.issue(
+            guild_id=guild_id,
+            user_id=202,
+            requested_level=1,
+            reasons="2",
+            description=None,
+            moderator_id=502,
+            message_id=403,
+            duration_by_level=durations,
+        )
+        timeout = await warnings.issue(
+            guild_id=guild_id,
+            user_id=202,
+            requested_level=1,
+            reasons="3",
+            description=None,
+            moderator_id=503,
+            message_id=403,
+            duration_by_level=durations,
+        )
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(Warning, timeout.id, with_for_update=True)
+            assert stored is not None
+            stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+        assert await warnings.get_active(guild_id, 202) is None
+        async with connection.session_factory() as session:
+            stored_first = await session.get(Warning, first.id)
+            stored_second = await session.get(Warning, second.id)
+            stored_timeout = await session.get(Warning, timeout.id)
+            assert stored_first is not None and stored_second is not None
+            assert stored_timeout is not None
+            assert stored_first.status == WarningStatus.SUPERSEDED.value
+            assert stored_second.status == WarningStatus.SUPERSEDED.value
+            assert stored_timeout.status == WarningStatus.EXPIRED.value
     finally:
         await connection.close()

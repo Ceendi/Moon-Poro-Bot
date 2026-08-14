@@ -108,6 +108,17 @@ def test_rank_refresh_is_staggered_with_durable_retry_defaults() -> None:
     assert settings.riot_monitoring_interval_seconds == 300
 
 
+def test_warning_reconciliation_runs_every_five_minutes_by_default() -> None:
+    settings = make_settings()
+
+    assert settings.warning_reconcile_interval_seconds == 300
+
+
+def test_warning_reconciliation_interval_is_validated() -> None:
+    with pytest.raises(ValidationError):
+        make_settings(warning_reconcile_interval_seconds=30)
+
+
 def test_public_rso_url_requires_https() -> None:
     with pytest.raises(ValidationError, match="must use HTTPS"):
         make_settings(rso_public_base_url="http://bot.example.com")

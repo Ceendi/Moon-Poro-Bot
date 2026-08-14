@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -281,9 +282,29 @@ class WarningRepository:
     def _with_moderators() -> Any:
         return selectinload(Warning.moderators)
 
+    @staticmethod
+    def _member_lock_key(guild_id: int, user_id: int) -> int:
+        value = f"moon-poro-warning:{guild_id}:{user_id}".encode()
+        return int.from_bytes(hashlib.blake2b(value, digest_size=8).digest(), signed=True)
+
+    async def _lock_member(self, session: AsyncSession, guild_id: int, user_id: int) -> None:
+        """Serialize warning state changes, including creation when no row exists."""
+
+        await session.execute(
+            select(func.pg_advisory_xact_lock(self._member_lock_key(guild_id, user_id)))
+        )
+
+    @staticmethod
+    def _expire(warning: Warning) -> None:
+        warning.status = WarningStatus.EXPIRED.value
+        warning.role_sync_pending = True
+        warning.audit_sync_pending = True
+
     async def get_active(self, guild_id: int, user_id: int) -> Warning | None:
-        async with self._sessions() as session:
-            return cast(
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            await self._lock_member(session, guild_id, user_id)
+            active = cast(
                 Warning | None,
                 await session.scalar(
                     select(Warning)
@@ -293,8 +314,13 @@ class WarningRepository:
                         Warning.discord_user_id == user_id,
                         Warning.status == WarningStatus.ACTIVE.value,
                     )
+                    .with_for_update()
                 ),
             )
+            if active is not None and active.expires_at <= now:
+                self._expire(active)
+                return None
+            return active
 
     async def issue(
         self,
@@ -310,6 +336,7 @@ class WarningRepository:
     ) -> Warning:
         now = datetime.now(UTC).replace(microsecond=0)
         async with self._sessions.begin() as session:
+            await self._lock_member(session, guild_id, user_id)
             active = await session.scalar(
                 select(Warning)
                 .options(self._with_moderators())
@@ -320,6 +347,11 @@ class WarningRepository:
                 )
                 .with_for_update()
             )
+
+            if active is not None and active.expires_at <= now:
+                self._expire(active)
+                await session.flush()
+                active = None
 
             if active is None:
                 level = requested_level
@@ -337,6 +369,8 @@ class WarningRepository:
                 moderator_ids = {item.moderator_id for item in active.moderators} | {moderator_id}
                 parent_id = active.id
                 active.status = WarningStatus.SUPERSEDED.value
+                active.role_sync_pending = False
+                active.audit_sync_pending = False
                 await session.flush()
 
             warning = Warning(
@@ -349,6 +383,8 @@ class WarningRepository:
                 expires_at=now + timedelta(days=duration_by_level[level]),
                 message_id=message_id,
                 status=WarningStatus.ACTIVE.value,
+                role_sync_pending=True,
+                audit_sync_pending=True,
                 parent_id=parent_id,
                 moderators=[
                     WarningModerator(moderator_id=value) for value in sorted(moderator_ids)
@@ -359,20 +395,28 @@ class WarningRepository:
 
         return warning
 
-    async def list_expired(self, guild_id: int) -> list[Warning]:
-        async with self._sessions() as session:
+    async def expire_due(self, guild_id: int) -> list[Warning]:
+        """Atomically make every elapsed warning logically inactive."""
+
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
             result = await session.scalars(
                 select(Warning)
                 .options(self._with_moderators())
                 .where(
                     Warning.guild_id == guild_id,
                     Warning.status == WarningStatus.ACTIVE.value,
-                    Warning.expires_at < datetime.now(UTC),
+                    Warning.expires_at <= now,
                 )
+                .with_for_update(skip_locked=True)
             )
-            return list(result)
+            warnings = list(result)
+            for warning in warnings:
+                self._expire(warning)
+            return warnings
 
     async def list_active(self, guild_id: int) -> list[Warning]:
+        now = datetime.now(UTC)
         async with self._sessions() as session:
             result = await session.scalars(
                 select(Warning)
@@ -380,18 +424,55 @@ class WarningRepository:
                 .where(
                     Warning.guild_id == guild_id,
                     Warning.status == WarningStatus.ACTIVE.value,
+                    Warning.expires_at > now,
                 )
             )
             return list(result)
 
-    async def mark_expired(self, warning_id: int) -> None:
+    async def list_for_reconciliation(self, guild_id: int) -> list[Warning]:
+        async with self._sessions() as session:
+            result = await session.scalars(
+                select(Warning)
+                .options(self._with_moderators())
+                .where(
+                    Warning.guild_id == guild_id,
+                    or_(
+                        Warning.status == WarningStatus.ACTIVE.value,
+                        Warning.role_sync_pending.is_(True),
+                        Warning.audit_sync_pending.is_(True),
+                    ),
+                )
+                .order_by(Warning.id)
+            )
+            return list(result)
+
+    async def acknowledge_role_sync(self, guild_id: int, user_id: int) -> None:
         async with self._sessions.begin() as session:
-            warning = await session.get(Warning, warning_id)
-            if warning is not None and warning.status == WarningStatus.ACTIVE.value:
-                warning.status = WarningStatus.EXPIRED.value
+            await session.execute(
+                update(Warning)
+                .where(
+                    Warning.guild_id == guild_id,
+                    Warning.discord_user_id == user_id,
+                    Warning.role_sync_pending.is_(True),
+                )
+                .values(role_sync_pending=False)
+            )
+
+    async def acknowledge_audit_sync(self, guild_id: int, message_id: int) -> None:
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(Warning)
+                .where(
+                    Warning.guild_id == guild_id,
+                    Warning.message_id == message_id,
+                    Warning.audit_sync_pending.is_(True),
+                )
+                .values(audit_sync_pending=False)
+            )
 
     async def revert(self, guild_id: int, user_id: int) -> tuple[Warning, Warning | None] | None:
         async with self._sessions.begin() as session:
+            await self._lock_member(session, guild_id, user_id)
             current = await session.scalar(
                 select(Warning)
                 .options(self._with_moderators())
@@ -404,6 +485,10 @@ class WarningRepository:
             )
             if current is None:
                 return None
+            now = datetime.now(UTC)
+            if current.expires_at <= now:
+                self._expire(current)
+                return None
 
             previous = None
             if current.parent_id is not None:
@@ -413,9 +498,11 @@ class WarningRepository:
                     .where(Warning.id == current.parent_id)
                 )
             current.status = WarningStatus.REVOKED.value
+            current.role_sync_pending = True
+            current.audit_sync_pending = True
             await session.flush()
             if previous is not None:
-                if previous.expires_at > datetime.now(UTC):
+                if previous.expires_at > now:
                     previous.status = WarningStatus.ACTIVE.value
                 else:
                     previous.status = WarningStatus.EXPIRED.value
