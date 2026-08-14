@@ -136,6 +136,11 @@ class Warning(Base):
             postgresql_where=text("status = 'ACTIVE'"),
         ),
         Index("ix_warnings_expiration", "status", "expires_at"),
+        Index(
+            "ix_warnings_pending_sync",
+            "guild_id",
+            postgresql_where=text("role_sync_pending OR audit_sync_pending"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -149,6 +154,12 @@ class Warning(Base):
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default=WarningStatus.ACTIVE.value
+    )
+    role_sync_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    audit_sync_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
     )
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("warnings.id", ondelete="SET NULL"))
 
