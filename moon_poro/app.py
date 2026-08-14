@@ -5,10 +5,9 @@ import logging
 import logging.handlers
 import os
 
-from pulsefire.clients import RiotAPIClient
-
 from moon_poro.bot import MoonPoroBot, create_intents
 from moon_poro.database import Database, upgrade_database
+from moon_poro.riot import create_riot_api_client
 from moon_poro.settings import Settings
 
 
@@ -39,8 +38,8 @@ async def main() -> None:
     database = Database(settings)
 
     try:
-        async with RiotAPIClient(
-            default_headers={"X-Riot-Token": settings.riot_api_token.get_secret_value()}
+        async with create_riot_api_client(
+            settings.riot_api_token.get_secret_value()
         ) as riot_client:
             bot = MoonPoroBot(
                 settings=settings,
