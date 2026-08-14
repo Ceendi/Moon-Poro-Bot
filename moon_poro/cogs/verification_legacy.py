@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import secrets
+import time
+from collections import deque
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
@@ -39,6 +43,55 @@ RIOT_GAME_NAME_MIN_LENGTH = 3
 RIOT_GAME_NAME_MAX_LENGTH = 16
 RIOT_TAG_LINE_MIN_LENGTH = 3
 RIOT_TAG_LINE_MAX_LENGTH = 5
+
+
+class LegacyVerificationRateLimiter:
+    def __init__(
+        self,
+        *,
+        global_rate: int,
+        global_period_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.global_rate = global_rate
+        self.global_period_seconds = global_period_seconds
+        self._clock = clock
+        self._user_limits: dict[tuple[str, int], float] = {}
+        self._global_requests: deque[float] = deque()
+
+    def update_rate_limit(
+        self,
+        scope: str,
+        user_id: int,
+        *,
+        user_cooldown_seconds: float,
+    ) -> float | None:
+        now = self._clock()
+        self._user_limits = {
+            key: expires_at for key, expires_at in self._user_limits.items() if expires_at > now
+        }
+        global_cutoff = now - self.global_period_seconds
+        while self._global_requests and self._global_requests[0] <= global_cutoff:
+            self._global_requests.popleft()
+
+        user_retry_after = max(0.0, self._user_limits.get((scope, user_id), now) - now)
+        global_retry_after = 0.0
+        if len(self._global_requests) >= self.global_rate:
+            global_retry_after = max(
+                0.0,
+                self._global_requests[0] + self.global_period_seconds - now,
+            )
+        retry_after = max(user_retry_after, global_retry_after)
+        if retry_after > 0:
+            return retry_after
+
+        self._user_limits[(scope, user_id)] = now + user_cooldown_seconds
+        self._global_requests.append(now)
+        return None
+
+
+def _rate_limit_message(retry_after: float) -> str:
+    return f"Zbyt wiele prób. Spróbuj ponownie za {math.ceil(retry_after)} s."
 
 
 def _normalize_riot_id_parts(game_name: str, tag_line: str) -> tuple[str, str]:
@@ -86,9 +139,10 @@ async def _remove_verified_marker(bot: MoonPoroBot, member: discord.Member, *, r
 
 
 class LegacyVerificationStartView(discord.ui.View):
-    def __init__(self, bot: MoonPoroBot) -> None:
+    def __init__(self, bot: MoonPoroBot, rate_limiter: LegacyVerificationRateLimiter) -> None:
         super().__init__(timeout=None)
         self.bot = bot
+        self.rate_limiter = rate_limiter
         self.cooldowns: commands.CooldownMapping[discord.Interaction] = (
             commands.CooldownMapping.from_cooldown(
                 1.0,
@@ -135,13 +189,14 @@ class LegacyVerificationStartView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(LegacyVerificationModal(self.bot))
+        await interaction.response.send_modal(LegacyVerificationModal(self.bot, self.rate_limiter))
 
 
 class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
     def __init__(
         self,
         bot: MoonPoroBot,
+        rate_limiter: LegacyVerificationRateLimiter,
         *,
         game_name: str = "",
         tag_line: str = "",
@@ -152,6 +207,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             custom_id="verification:legacy-account:v2",
         )
         self.bot = bot
+        self.rate_limiter = rate_limiter
         self.game_name: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
             custom_id="verification:riot-game-name:v2",
             placeholder="np. Moon Poro",
@@ -220,6 +276,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
     ) -> LegacyVerificationRetryView:
         return LegacyVerificationRetryView(
             self.bot,
+            self.rate_limiter,
             owner_id=interaction.user.id,
             game_name=game_name,
             tag_line=tag_line,
@@ -248,6 +305,19 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         if validation_error is not None:
             await interaction.response.send_message(
                 f"❌ {validation_error}",
+                view=self._retry_view(interaction, game_name, tag_line, platform),
+                ephemeral=True,
+            )
+            return
+
+        retry_after = self.rate_limiter.update_rate_limit(
+            "account",
+            interaction.user.id,
+            user_cooldown_seconds=self.bot.settings.verification_cooldown,
+        )
+        if retry_after is not None:
+            await interaction.response.send_message(
+                _rate_limit_message(retry_after),
                 view=self._retry_view(interaction, game_name, tag_line, platform),
                 ephemeral=True,
             )
@@ -311,6 +381,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         embed.set_thumbnail(url=profile_icon_url(icon_id))
         view = LegacyIconConfirmationView(
             self.bot,
+            self.rate_limiter,
             owner_id=interaction.user.id,
             platform=platform,
             puuid=puuid,
@@ -325,6 +396,7 @@ class LegacyVerificationRetryView(discord.ui.View):
     def __init__(
         self,
         bot: MoonPoroBot,
+        rate_limiter: LegacyVerificationRateLimiter,
         *,
         owner_id: int,
         game_name: str,
@@ -333,6 +405,7 @@ class LegacyVerificationRetryView(discord.ui.View):
     ) -> None:
         super().__init__(timeout=bot.settings.view_timeout)
         self.bot = bot
+        self.rate_limiter = rate_limiter
         self.owner_id = owner_id
         self.game_name = game_name
         self.tag_line = tag_line
@@ -355,6 +428,7 @@ class LegacyVerificationRetryView(discord.ui.View):
         await interaction.response.send_modal(
             LegacyVerificationModal(
                 self.bot,
+                self.rate_limiter,
                 game_name=self.game_name,
                 tag_line=self.tag_line,
                 platform=self.platform,
@@ -366,6 +440,7 @@ class LegacyIconConfirmationView(discord.ui.View):
     def __init__(
         self,
         bot: MoonPoroBot,
+        rate_limiter: LegacyVerificationRateLimiter,
         *,
         owner_id: int,
         platform: str,
@@ -376,6 +451,7 @@ class LegacyIconConfirmationView(discord.ui.View):
     ) -> None:
         super().__init__(timeout=bot.settings.verification_timeout)
         self.bot = bot
+        self.rate_limiter = rate_limiter
         self.owner_id = owner_id
         self.platform = platform
         self.puuid = puuid
@@ -404,6 +480,16 @@ class LegacyIconConfirmationView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "Weryfikację dokończ na skonfigurowanym serwerze.", ephemeral=True
+            )
+            return
+        retry_after = self.rate_limiter.update_rate_limit(
+            "icon",
+            interaction.user.id,
+            user_cooldown_seconds=self.bot.settings.verification_icon_check_cooldown,
+        )
+        if retry_after is not None:
+            await interaction.response.send_message(
+                _rate_limit_message(retry_after), ephemeral=True
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -503,7 +589,11 @@ class LegacyVerificationCog(VerificationCog):
     def __init__(self, bot: MoonPoroBot) -> None:
         self.bot = bot
         self._managed_role_updates: set[int] = set()
-        bot.add_view(LegacyVerificationStartView(bot))
+        self.rate_limiter = LegacyVerificationRateLimiter(
+            global_rate=bot.settings.verification_global_rate_limit,
+            global_period_seconds=bot.settings.verification_global_rate_period_seconds,
+        )
+        bot.add_view(LegacyVerificationStartView(bot, self.rate_limiter))
         self.refresh_verified.change_interval(hours=bot.settings.rank_refresh_interval_hours)
         self.refresh_verified.start()
 
@@ -608,7 +698,10 @@ class LegacyVerificationCog(VerificationCog):
             "profilu w kliencie League of Legends. Bot zapisze powiązanie z Discordem "
             "i będzie synchronizował region oraz rangę Solo/Duo."
         )
-        await interaction.response.send_message(content, view=LegacyVerificationStartView(self.bot))
+        await interaction.response.send_message(
+            content,
+            view=LegacyVerificationStartView(self.bot, self.rate_limiter),
+        )
 
     @app_commands.command(
         name="usun_weryfikacje", description="Usuwa Twoje powiązanie z kontem Riot"

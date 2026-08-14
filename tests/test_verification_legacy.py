@@ -9,6 +9,7 @@ from moon_poro.cogs import verification_legacy
 from moon_poro.cogs.verification_legacy import (
     LegacyVerificationCog,
     LegacyVerificationModal,
+    LegacyVerificationRateLimiter,
     LegacyVerificationRetryView,
     _normalize_riot_id_parts,
     _remove_verified_marker,
@@ -27,8 +28,28 @@ def _modal_bot() -> SimpleNamespace:
         settings=SimpleNamespace(
             guild_id=123,
             verification_timeout=120,
+            verification_cooldown=30,
+            verification_icon_check_cooldown=5,
             view_timeout=180,
         )
+    )
+
+
+def _rate_limiter(
+    *,
+    global_rate: int = 4,
+    global_period_seconds: float = 10,
+    clock: Callable[[], float] | None = None,
+) -> LegacyVerificationRateLimiter:
+    if clock is None:
+        return LegacyVerificationRateLimiter(
+            global_rate=global_rate,
+            global_period_seconds=global_period_seconds,
+        )
+    return LegacyVerificationRateLimiter(
+        global_rate=global_rate,
+        global_period_seconds=global_period_seconds,
+        clock=clock,
     )
 
 
@@ -57,7 +78,7 @@ def test_riot_id_input_accepts_documented_lengths_and_unicode() -> None:
 
 
 def test_legacy_modal_uses_constrained_inputs_and_region_select() -> None:
-    modal = LegacyVerificationModal(_modal_bot())
+    modal = LegacyVerificationModal(_modal_bot(), _rate_limiter())
 
     assert modal.game_name.min_length == 3
     assert modal.game_name.max_length == 16
@@ -78,7 +99,7 @@ async def test_legacy_modal_passes_normalized_values_and_offers_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bot = _modal_bot()
-    modal = LegacyVerificationModal(bot)
+    modal = LegacyVerificationModal(bot, _rate_limiter())
     modal.game_name._value = " Moon Poro "
     modal.tag_line._value = " #EUNE "
     modal.platform._values = ["EUN1"]
@@ -104,6 +125,7 @@ async def test_legacy_modal_passes_normalized_values_and_offers_retry(
 async def test_retry_view_reopens_prefilled_modal() -> None:
     view = LegacyVerificationRetryView(
         _modal_bot(),
+        _rate_limiter(),
         owner_id=101,
         game_name="Moon Poro",
         tag_line="EUNE",
@@ -121,6 +143,58 @@ async def test_retry_view_reopens_prefilled_modal() -> None:
     assert modal.game_name.default == "Moon Poro"
     assert modal.tag_line.default == "EUNE"
     assert [option.value for option in modal.platform.options if option.default] == ["EUN1"]
+
+
+def test_legacy_rate_limiter_applies_per_user_and_scope() -> None:
+    now = [100.0]
+    limiter = _rate_limiter(clock=lambda: now[0])
+
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) == 30
+    assert limiter.update_rate_limit("icon", 101, user_cooldown_seconds=5) is None
+
+    now[0] += 30
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+
+
+def test_legacy_rate_limiter_applies_global_window_without_consuming_denied_attempt() -> None:
+    now = [100.0]
+    limiter = _rate_limiter(global_rate=2, clock=lambda: now[0])
+
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 102, user_cooldown_seconds=30) is None
+    assert limiter.update_rate_limit("account", 103, user_cooldown_seconds=30) == 10
+
+    now[0] += 10
+    assert limiter.update_rate_limit("account", 103, user_cooldown_seconds=30) is None
+
+
+async def test_legacy_modal_rate_limit_blocks_riot_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    limiter = _rate_limiter()
+    assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+    modal = LegacyVerificationModal(bot, limiter)
+    modal.game_name._value = "Moon Poro"
+    modal.tag_line._value = "EUNE"
+    modal.platform._values = ["EUN1"]
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=response,
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    account_lookup = AsyncMock()
+    monkeypatch.setattr(verification_legacy, "_get_account", account_lookup)
+
+    await modal.on_submit(interaction)
+
+    account_lookup.assert_not_awaited()
+    response.defer.assert_not_awaited()
+    assert "Zbyt wiele prób" in response.send_message.await_args.args[0]
+    assert isinstance(response.send_message.await_args.kwargs["view"], LegacyVerificationRetryView)
 
 
 async def test_remove_own_verification_marker_keeps_rank_and_region(
