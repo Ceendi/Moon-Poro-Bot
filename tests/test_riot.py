@@ -11,9 +11,8 @@ from moon_poro.riot import (
 
 
 class RiotResponseError(Exception):
-    def __init__(self, status: int, retry_after: str | None = None) -> None:
+    def __init__(self, status: int) -> None:
         self.status = status
-        self.retry_after = retry_after
 
 
 def test_solo_rank_is_selected() -> None:
@@ -48,49 +47,27 @@ async def test_riot_api_call_returns_successful_response() -> None:
 async def test_riot_api_call_maps_not_found_to_fallback() -> None:
     operation = AsyncMock(side_effect=RiotResponseError(404))
 
-    result = await riot_api_call(operation, not_found=[])
+    result: list[object] | None = await riot_api_call(operation, not_found=[])
 
     assert result == []
+    operation.assert_awaited_once_with()
 
 
-async def test_riot_api_call_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    operation = AsyncMock(
-        side_effect=[RiotResponseError(429, retry_after="0.25"), {"puuid": "value"}]
-    )
-    sleep = AsyncMock()
-    monkeypatch.setattr("moon_poro.riot.asyncio.sleep", sleep)
-
-    result = await riot_api_call(operation)
-
-    assert result == {"puuid": "value"}
-    assert operation.await_count == 2
-    sleep.assert_awaited_once_with(0.25)
-
-
-async def test_riot_api_call_retries_server_error_until_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    operation = AsyncMock(side_effect=RiotResponseError(503))
-    sleep = AsyncMock()
-    monkeypatch.setattr("moon_poro.riot.asyncio.sleep", sleep)
+@pytest.mark.parametrize("status", [429, 503])
+async def test_riot_api_call_does_not_repeat_client_retries(status: int) -> None:
+    operation = AsyncMock(side_effect=RiotResponseError(status))
 
     with pytest.raises(RiotAPIUnavailable) as raised:
-        await riot_api_call(operation, attempts=2)
+        await riot_api_call(operation)
 
     assert isinstance(raised.value.__cause__, RiotResponseError)
-    assert operation.await_count == 2
-    sleep.assert_awaited_once_with(1)
+    operation.assert_awaited_once_with()
 
 
-async def test_riot_api_call_does_not_retry_client_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_riot_api_call_does_not_retry_client_error() -> None:
     operation = AsyncMock(side_effect=RiotResponseError(401))
-    sleep = AsyncMock()
-    monkeypatch.setattr("moon_poro.riot.asyncio.sleep", sleep)
 
     with pytest.raises(RiotAPIUnavailable):
         await riot_api_call(operation)
 
     operation.assert_awaited_once_with()
-    sleep.assert_not_awaited()

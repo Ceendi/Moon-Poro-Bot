@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -45,25 +44,16 @@ async def riot_api_call[T](
     operation: Callable[[], Awaitable[T]],
     *,
     not_found: T | None = None,
-    attempts: int = 3,
 ) -> T | None:
-    for attempt in range(attempts):
-        try:
-            return await operation()
-        except Exception as error:
-            status = getattr(error, "status", None)
-            if status == 404:
-                return not_found
-            retryable = status == 429 or (isinstance(status, int) and status >= 500)
-            if retryable and attempt + 1 < attempts:
-                retry_after = getattr(error, "retry_after", None)
-                delay = float(retry_after) if retry_after else 2**attempt
-                logger.warning("Riot API status %s; retrying in %.1fs", status, delay)
-                await asyncio.sleep(min(delay, 10.0))
-                continue
-            logger.exception("Riot API request failed with status %s", status)
-            raise RiotAPIUnavailable from error
-    raise RiotAPIUnavailable
+    """Run one Pulsefire operation; its middleware owns the retry policy."""
+    try:
+        return await operation()
+    except Exception as error:
+        status = getattr(error, "status", None)
+        if status == 404:
+            return not_found
+        logger.exception("Riot API request failed with status %s", status)
+        raise RiotAPIUnavailable from error
 
 
 def get_rank_from_leagues(leagues: list[dict[str, Any]]) -> str:
