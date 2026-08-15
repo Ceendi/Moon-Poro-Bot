@@ -7,7 +7,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast, overload
 
 import discord
 from pulsefire.clients import RiotAPIClient
@@ -54,6 +54,17 @@ RANK_TO_ROLE = {
 
 
 class RiotAPIUnavailable(RuntimeError):
+    def __init__(self, *, status: int | None = None, retry_after: float | None = None) -> None:
+        super().__init__(f"Riot API request failed with status {status}")
+        self.status = status
+        self.retry_after = retry_after
+
+
+class RiotAPINotFound(RiotAPIUnavailable):
+    pass
+
+
+class RiotAuthCircuitOpen(RiotAPIUnavailable):
     pass
 
 
@@ -64,6 +75,14 @@ class RiotAPIMetricsSnapshot:
     responses_403: int
     responses_5xx: int
     last_success_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class RiotAuthBreakerSnapshot:
+    blocked: bool
+    last_status: int | None
+    retry_after_seconds: float
+    probe_in_flight: bool
 
 
 def _utc_now() -> datetime:
@@ -147,6 +166,78 @@ class RiotCircuitBreaker:
             await self._sleep(delay)
 
 
+class RiotAuthBreaker:
+    """Stop a bad API credential from consuming the whole refresh queue."""
+
+    def __init__(
+        self,
+        *,
+        probe_interval_seconds: float = 900,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._probe_interval_seconds = probe_interval_seconds
+        self._clock = clock
+        self._blocked = False
+        self._last_status: int | None = None
+        self._next_probe_at = 0.0
+        self._probe_in_flight = False
+
+    def can_attempt(self) -> bool:
+        return not self._blocked or (
+            not self._probe_in_flight and self._clock() >= self._next_probe_at
+        )
+
+    def acquire(self) -> bool:
+        """Return whether this request is the single auth recovery probe."""
+
+        if not self._blocked:
+            return False
+        retry_after = self._next_probe_at - self._clock()
+        if self._probe_in_flight or retry_after > 0:
+            raise RiotAuthCircuitOpen(
+                status=self._last_status,
+                retry_after=max(0.0, retry_after),
+            )
+        self._probe_in_flight = True
+        return True
+
+    def record_status(self, status: int, *, was_probe: bool) -> None:
+        if status in {401, 403}:
+            self._blocked = True
+            self._last_status = status
+            self._next_probe_at = self._clock() + self._probe_interval_seconds
+            self._probe_in_flight = False
+            logger.error(
+                "Riot auth circuit breaker opened after HTTP %s; next probe in %.0f seconds",
+                status,
+                self._probe_interval_seconds,
+            )
+        elif was_probe:
+            if self._blocked:
+                logger.info(
+                    "Riot auth circuit breaker closed after probe received HTTP %s",
+                    status,
+                )
+            self._blocked = False
+            self._last_status = None
+            self._next_probe_at = 0.0
+            self._probe_in_flight = False
+
+    def record_probe_exception(self, *, was_probe: bool) -> None:
+        if was_probe:
+            self._next_probe_at = self._clock() + self._probe_interval_seconds
+            self._probe_in_flight = False
+
+    def snapshot(self) -> RiotAuthBreakerSnapshot:
+        retry_after = max(0.0, self._next_probe_at - self._clock()) if self._blocked else 0.0
+        return RiotAuthBreakerSnapshot(
+            blocked=self._blocked,
+            last_status=self._last_status,
+            retry_after_seconds=retry_after,
+            probe_in_flight=self._probe_in_flight,
+        )
+
+
 def _retry_after_seconds(headers: Mapping[str, str]) -> float:
     raw_value = headers.get("Retry-After")
     try:
@@ -192,13 +283,34 @@ def riot_api_monitoring_middleware(monitor: RiotAPIMonitor) -> Middleware:
     return constructor
 
 
+def riot_auth_breaker_middleware(auth_breaker: RiotAuthBreaker) -> Middleware:
+    def constructor(next_call: MiddlewareCallable) -> MiddlewareCallable:
+        async def middleware(invocation: Invocation) -> Any:
+            was_probe = auth_breaker.acquire()
+            try:
+                response = await next_call(invocation)
+            except Exception:
+                auth_breaker.record_probe_exception(was_probe=was_probe)
+                raise
+            status = getattr(response, "status", None)
+            if isinstance(status, int):
+                auth_breaker.record_status(status, was_probe=was_probe)
+            return response
+
+        return middleware
+
+    return constructor
+
+
 def create_riot_api_client(
     api_token: str,
     *,
     circuit_breaker: RiotCircuitBreaker | None = None,
+    auth_breaker: RiotAuthBreaker | None = None,
     monitor: RiotAPIMonitor | None = None,
 ) -> RiotAPIClient:
     shared_breaker = circuit_breaker or RiotCircuitBreaker()
+    shared_auth_breaker = auth_breaker or RiotAuthBreaker()
     shared_monitor = monitor or RiotAPIMonitor()
     return RiotAPIClient(
         default_headers={"X-Riot-Token": api_token},
@@ -209,15 +321,31 @@ def create_riot_api_client(
             # Keep the shared gate closest to the transport so a request delayed by
             # Pulsefire's adaptive limiter checks the breaker immediately before I/O.
             riot_circuit_breaker_middleware(shared_breaker),
+            riot_auth_breaker_middleware(shared_auth_breaker),
             riot_api_monitoring_middleware(shared_monitor),
         ],
     )
 
 
+_NOT_FOUND_UNSET = object()
+
+
+@overload
 async def riot_api_call[T](
     operation: Callable[[], Awaitable[T]],
     *,
-    not_found: T | None = None,
+    not_found: T | None,
+) -> T | None: ...
+
+
+@overload
+async def riot_api_call[T](operation: Callable[[], Awaitable[T]]) -> T: ...
+
+
+async def riot_api_call[T](
+    operation: Callable[[], Awaitable[T]],
+    *,
+    not_found: T | object | None = _NOT_FOUND_UNSET,
 ) -> T | None:
     """Run one Pulsefire operation; its middleware owns the retry policy."""
     try:
@@ -225,9 +353,15 @@ async def riot_api_call[T](
     except Exception as error:
         status = getattr(error, "status", None)
         if status == 404:
-            return not_found
+            if not_found is _NOT_FOUND_UNSET:
+                raise RiotAPINotFound(status=404) from error
+            return cast(T | None, not_found)
+        if isinstance(error, RiotAPIUnavailable):
+            raise
+        headers: Mapping[str, str] = getattr(error, "headers", {})
+        retry_after = _retry_after_seconds(headers) if status == 429 else None
         logger.exception("Riot API request failed with status %s", status)
-        raise RiotAPIUnavailable from error
+        raise RiotAPIUnavailable(status=status, retry_after=retry_after) from error
 
 
 def get_rank_from_leagues(leagues: list[dict[str, Any]]) -> str:

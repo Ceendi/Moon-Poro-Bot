@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -59,7 +60,11 @@ async def test_complete_rso_lifecycle(
         tag_line="EUNE",
     )
     pending = await session_repository.claim_pending()
-    completed = await session_repository.complete_discord(pending[0].id, message_id=987)
+    completed = await session_repository.complete_discord(
+        pending[0].id,
+        message_id=987,
+        channel_id=654,
+    )
     stored = await session_repository.get_by_start_token(created.token)
 
     assert result == LinkReservationResult.RESERVED
@@ -194,9 +199,66 @@ async def test_cancellation_wins_race_with_discord_completion(
     pending = await session_repository.claim_pending()
 
     await session_repository.cancel_for_user(123, 456)
-    completed = await session_repository.complete_discord(pending[0].id, message_id=987)
+    completed = await session_repository.complete_discord(
+        pending[0].id,
+        message_id=987,
+        channel_id=654,
+    )
 
     assert completed is False
+    cleanups = await session_repository.claim_audit_cleanups(
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    assert [(item.channel_id, item.message_id) for item in cleanups] == [(654, 987)]
+
+
+async def test_orphan_audit_cleanup_survives_retry_and_repository_restart(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    _, callback = await authorize_session(
+        session_repository,
+        guild_id=123,
+        user_id=456,
+        state="orphan-audit-state",
+    )
+    await session_repository.reserve_link(
+        session_id=callback.id,
+        platform="EUN1",
+        puuid="orphan-puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+    )
+    pending = await session_repository.claim_pending()
+    await session_repository.cancel_for_user(123, 456)
+    assert not await session_repository.complete_discord(
+        pending[0].id,
+        message_id=999,
+        channel_id=654,
+    )
+    claimed = await session_repository.claim_audit_cleanups(
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    assert len(claimed) == 1
+    cleanup = claimed[0]
+    assert (
+        await session_repository.retry_audit_cleanup(
+            cleanup.id,
+            message_id=cleanup.message_id,
+            base_delay_seconds=0,
+        )
+        == 0
+    )
+
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    reclaimed = await restarted.claim_audit_cleanups(limit=1, claim_timeout_seconds=300)
+    assert [item.id for item in reclaimed] == [cleanup.id]
+    assert await restarted.acknowledge_audit_cleanup(
+        cleanup.id,
+        message_id=cleanup.message_id,
+    )
+    assert await restarted.claim_audit_cleanups(limit=1, claim_timeout_seconds=300) == []
 
 
 async def test_retry_returns_claim_to_pending_queue(
@@ -253,3 +315,32 @@ async def test_fail_discord_removes_unfinished_reserved_link(
     assert stored is not None
     assert stored.status == VerificationSessionStatus.FAILED.value
     assert stored.error_code == "MEMBER_LEFT_GUILD"
+
+
+async def test_fail_discord_preserves_link_with_pending_delete_tombstone(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    _, callback = await authorize_session(
+        session_repository,
+        guild_id=123,
+        user_id=456,
+        state="delete-race-state",
+    )
+    await session_repository.reserve_link(
+        session_id=callback.id,
+        platform="EUN1",
+        puuid="delete-race-puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+    )
+    async with session_repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (123, 456), with_for_update=True)
+        assert link is not None
+        link.deletion_requested_at = datetime.now(UTC)
+
+    await session_repository.fail_discord(callback.id, "VERIFICATION_LINK_CHANGED")
+
+    async with session_repository._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None
+        assert link.deletion_requested_at is not None

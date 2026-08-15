@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 from moon_poro.cogs.verification import _report_riot_monitoring
 from moon_poro.repositories import RankRefreshQueueStats
-from moon_poro.riot import RiotAPIMonitor
+from moon_poro.riot import RiotAPIMonitor, RiotAuthBreaker
 
 
 async def test_riot_monitoring_logs_api_and_rank_queue_metrics(caplog) -> None:
@@ -22,6 +22,7 @@ async def test_riot_monitoring_logs_api_and_rank_queue_metrics(caplog) -> None:
     )
     bot = SimpleNamespace(
         riot_monitor=monitor,
+        riot_auth_breaker=RiotAuthBreaker(),
         verifications=SimpleNamespace(rank_refresh_queue_stats=rank_refresh_queue_stats),
         settings=SimpleNamespace(guild_id=123),
     )
@@ -46,6 +47,7 @@ async def test_riot_monitoring_keeps_api_metrics_when_queue_query_fails(caplog) 
     monitor.record_status(503)
     bot = SimpleNamespace(
         riot_monitor=monitor,
+        riot_auth_breaker=RiotAuthBreaker(),
         verifications=SimpleNamespace(
             rank_refresh_queue_stats=AsyncMock(side_effect=RuntimeError("database unavailable"))
         ),

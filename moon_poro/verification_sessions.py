@@ -13,10 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moon_poro.models import (
+    VerificationAuditCleanup,
     VerificationLink,
     VerificationSession,
     VerificationSessionStatus,
 )
+from moon_poro.outbox import mark_outbox_claimed, reschedule_outbox_record
 
 ACTIVE_SESSION_STATUSES = (
     VerificationSessionStatus.CREATED.value,
@@ -222,12 +224,14 @@ class VerificationSessionRepository:
                         puuid=puuid,
                         verification_method="RSO",
                         rank_next_refresh_at=now + timedelta(hours=24),
+                        created_at=now,
                     )
                 )
                 record.platform = platform
                 record.puuid = puuid
                 record.riot_game_name = game_name[:100]
                 record.riot_tag_line = tag_line[:20]
+                record.verification_link_created_at = now
                 record.status = VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value
                 record.error_code = None
                 record.next_attempt_at = now
@@ -307,25 +311,138 @@ class VerificationSessionRepository:
             record.next_attempt_at = now + timedelta(seconds=delay_seconds)
             record.updated_at = now
 
-    async def complete_discord(self, session_id: int, *, message_id: int | None) -> bool:
+    async def complete_discord(
+        self,
+        session_id: int,
+        *,
+        message_id: int | None,
+        channel_id: int | None,
+    ) -> bool:
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
             record = await session.get(VerificationSession, session_id, with_for_update=True)
-            if record is None or record.status != VerificationSessionStatus.APPLYING_DISCORD.value:
+            if record is None:
                 return False
-            if message_id is not None and record.puuid is not None:
-                link = await session.get(
-                    VerificationLink,
-                    (record.guild_id, record.discord_user_id),
-                    with_for_update=True,
-                )
-                if link is not None and link.puuid == record.puuid:
-                    link.message_id = message_id
+            link = await session.get(
+                VerificationLink,
+                (record.guild_id, record.discord_user_id),
+                with_for_update=True,
+            )
+            link_matches = (
+                record.status == VerificationSessionStatus.APPLYING_DISCORD.value
+                and link is not None
+                and link.deletion_requested_at is None
+                and record.puuid is not None
+                and link.puuid == record.puuid
+                and link.platform == record.platform
+                and record.verification_link_created_at is not None
+                and link.created_at == record.verification_link_created_at
+            )
+            if not link_matches:
+                if message_id is not None and channel_id is not None:
+                    await self._enqueue_audit_cleanup(
+                        session,
+                        record=record,
+                        channel_id=channel_id,
+                        message_id=message_id,
+                        now=now,
+                    )
+                return False
+            link = cast(VerificationLink, link)
+            if message_id is not None:
+                link.message_id = message_id
             record.status = VerificationSessionStatus.COMPLETED.value
             record.error_code = None
             record.updated_at = now
             record.completed_at = now
             return True
+
+    @staticmethod
+    async def _enqueue_audit_cleanup(
+        session: AsyncSession,
+        *,
+        record: VerificationSession,
+        channel_id: int,
+        message_id: int,
+        now: datetime,
+    ) -> None:
+        existing = await session.scalar(
+            select(VerificationAuditCleanup).where(
+                VerificationAuditCleanup.channel_id == channel_id,
+                VerificationAuditCleanup.message_id == message_id,
+            )
+        )
+        if existing is None:
+            session.add(
+                VerificationAuditCleanup(
+                    verification_session_id=record.id,
+                    guild_id=record.guild_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    next_attempt_at=now,
+                    created_at=now,
+                )
+            )
+
+    async def claim_audit_cleanups(
+        self,
+        *,
+        limit: int,
+        claim_timeout_seconds: int,
+    ) -> list[VerificationAuditCleanup]:
+        now = datetime.now(UTC)
+        stale_claim = now - timedelta(seconds=claim_timeout_seconds)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(VerificationAuditCleanup)
+                .where(
+                    VerificationAuditCleanup.next_attempt_at <= now,
+                    (
+                        VerificationAuditCleanup.claimed_at.is_(None)
+                        | (VerificationAuditCleanup.claimed_at <= stale_claim)
+                    ),
+                )
+                .order_by(VerificationAuditCleanup.next_attempt_at, VerificationAuditCleanup.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            return mark_outbox_claimed(result, now)
+
+    async def acknowledge_audit_cleanup(self, cleanup_id: int, *, message_id: int) -> bool:
+        async with self._sessions.begin() as session:
+            record = await session.get(VerificationAuditCleanup, cleanup_id, with_for_update=True)
+            if record is None:
+                return True
+            if record.message_id != message_id:
+                return False
+            await session.delete(record)
+            return True
+
+    async def retry_audit_cleanup(
+        self,
+        cleanup_id: int,
+        *,
+        message_id: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int = 21_600,
+    ) -> int | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            record = await session.get(VerificationAuditCleanup, cleanup_id, with_for_update=True)
+            if record is None or record.message_id != message_id:
+                return None
+            failures = min(int(record.failures) + 1, 16)
+            delay: int = min(
+                base_delay_seconds * (2 ** (failures - 1)),
+                max_delay_seconds,
+            )
+            reschedule_outbox_record(
+                record,
+                now=now,
+                failures=failures,
+                delay_seconds=delay,
+            )
+            return delay
 
     async def fail_discord(self, session_id: int, error_code: str) -> None:
         now = datetime.now(UTC)
@@ -338,7 +455,15 @@ class VerificationSessionRepository:
                 (record.guild_id, record.discord_user_id),
                 with_for_update=True,
             )
-            if link is not None and link.puuid == record.puuid and link.message_id is None:
+            if (
+                link is not None
+                and link.deletion_requested_at is None
+                and link.puuid == record.puuid
+                and link.platform == record.platform
+                and record.verification_link_created_at is not None
+                and link.created_at == record.verification_link_created_at
+                and link.message_id is None
+            ):
                 await session.delete(link)
             record.status = VerificationSessionStatus.FAILED.value
             record.error_code = error_code[:64]

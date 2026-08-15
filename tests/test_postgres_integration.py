@@ -5,15 +5,26 @@ import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
-from sqlalchemy import inspect
+from alembic.config import Config
+from sqlalchemy import inspect, text
 
-from moon_poro.database import Database, upgrade_database
-from moon_poro.models import Base, Warning, WarningStatus
+from alembic import command
+from moon_poro.database import Database, make_database_url, upgrade_database
+from moon_poro.models import (
+    Base,
+    VerificationLink,
+    VerificationMarkerCleanup,
+    Warning,
+    WarningStatus,
+)
+from moon_poro.rank_refresh import RankRefreshDecision, RankSnapshot
 from moon_poro.repositories import (
     GuildFeatureRepository,
     ModerationStatsRepository,
+    RankRefreshRequestStatus,
     VerificationRepository,
     WarningRepository,
 )
@@ -22,6 +33,8 @@ from moon_poro.verification_sessions import (
     LinkReservationResult,
     VerificationSessionRepository,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
 
 pytestmark = pytest.mark.skipif(
     "TEST_POSTGRES_PORT" not in os.environ,
@@ -61,9 +74,45 @@ async def test_migrations_and_repositories_against_postgres(
                     index["name"] for index in inspect(sync_connection).get_indexes("warnings")
                 }
             )
+            verification_columns = await database_connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]
+                    for column in inspect(sync_connection).get_columns("verification_links")
+                }
+            )
+            verification_indexes = await database_connection.run_sync(
+                lambda sync_connection: {
+                    index["name"]
+                    for index in inspect(sync_connection).get_indexes("verification_links")
+                }
+            )
+            verification_session_columns = await database_connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]
+                    for column in inspect(sync_connection).get_columns("verification_sessions")
+                }
+            )
         assert set(Base.metadata.tables) <= table_names
         assert {"role_sync_pending", "audit_sync_pending"} <= warning_columns
         assert "ix_warnings_pending_sync" in warning_indexes
+        assert {
+            "last_known_division",
+            "last_known_league_points",
+            "last_known_wins",
+            "last_known_losses",
+            "last_known_inactive",
+            "rank_schedule_class",
+            "rank_schedule_reason",
+            "rank_role_sync_pending",
+            "rank_user_refresh_requested_at",
+            "deletion_requested_at",
+            "deletion_next_attempt_at",
+        } <= verification_columns
+        assert "ix_verification_links_rank_role_sync_due" in verification_indexes
+        assert "ix_verification_links_deletion_due" in verification_indexes
+        assert "verification_link_created_at" in verification_session_columns
+        assert "verification_audit_cleanups" in table_names
+        assert "verification_marker_cleanups" in table_names
 
         verifications = VerificationRepository(connection.session_factory)
         created = await verifications.create(
@@ -87,16 +136,49 @@ async def test_migrations_and_repositories_against_postgres(
             claim_timeout_seconds=300,
         )
         assert [link.discord_user_id for link in due_refreshes] == [101]
-        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         assert (
-            await verifications.retry_rank_refresh(
+            await verifications.claim_due_rank_refreshes(
                 guild_id,
-                101,
-                base_delay_seconds=300,
+                limit=1,
+                claim_timeout_seconds=300,
             )
-            == 300
+            == []
         )
+        async with connection.session_factory.begin() as session:
+            claimed = await session.get(VerificationLink, (guild_id, 101), with_for_update=True)
+            assert claimed is not None
+            claimed.rank_refresh_claimed_at = datetime.now(UTC) - timedelta(seconds=301)
+        reclaimed = await verifications.claim_due_rank_refreshes(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in reclaimed] == [101]
+        assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
+        retry_delay = await verifications.retry_rank_refresh(
+            guild_id,
+            101,
+            base_delay_seconds=300,
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+        )
+        assert retry_delay is not None and 240 <= retry_delay <= 360
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 0
+        protected = await verifications.request_rank_refresh(
+            guild_id,
+            101,
+            cooldown_seconds=3600,
+            source="role_tamper",
+        )
+        assert protected.status == RankRefreshRequestStatus.BACKOFF_ACTIVE
+        protected_again = await verifications.request_rank_refresh(
+            guild_id,
+            101,
+            cooldown_seconds=3600,
+            source="role_tamper",
+        )
+        assert protected_again.status == RankRefreshRequestStatus.COOLDOWN
         assert (
             await verifications.claim_due_rank_refreshes(
                 guild_id,
@@ -106,6 +188,22 @@ async def test_migrations_and_repositories_against_postgres(
             == []
         )
         assert await verifications.schedule_rank_refresh_now(guild_id, 101)
+        assert (
+            await verifications.claim_due_rank_refreshes(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            )
+            == []
+        )
+        assert await verifications.defer_rank_refresh(
+            guild_id,
+            101,
+            delay_seconds=0,
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+        )
         assert [
             link.discord_user_id
             for link in await verifications.claim_due_rank_refreshes(
@@ -128,6 +226,88 @@ async def test_migrations_and_repositories_against_postgres(
         assert refreshed.rank_refresh_failures == 0
         assert refreshed.rank_last_checked_at is not None
         assert refreshed.rank_refresh_claimed_at is None
+        request = await verifications.request_rank_refresh(
+            guild_id,
+            101,
+            cooldown_seconds=1800,
+            source="user",
+        )
+        assert request.status == RankRefreshRequestStatus.ENQUEUED
+        duplicate = await verifications.request_rank_refresh(
+            guild_id,
+            101,
+            cooldown_seconds=1800,
+            source="user",
+        )
+        assert duplicate.status == RankRefreshRequestStatus.COOLDOWN
+
+        stored = await verifications.record_rank_snapshot(
+            guild_id,
+            101,
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+            decision=RankRefreshDecision(
+                snapshot=RankSnapshot("DIAMOND", "IV", 20, 120, 100, False),
+                interval_seconds=21_600,
+                schedule_class="6h",
+                reason="tier_changed",
+                activity_observed=True,
+                tier_changed=True,
+                counter_reset=False,
+                unranked_confirmations=0,
+            ),
+            next_interval_seconds=20_000,
+        )
+        assert stored
+        role_syncs = await verifications.claim_due_rank_role_syncs(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in role_syncs] == [101]
+        original_role_snapshot_at = role_syncs[0].rank_last_checked_at
+        newer_snapshot_at = await verifications.record_rank_snapshot(
+            guild_id,
+            101,
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+            decision=RankRefreshDecision(
+                snapshot=RankSnapshot("DIAMOND", "III", 40, 121, 100, False),
+                interval_seconds=43_200,
+                schedule_class="12h",
+                reason="activity_observed",
+                activity_observed=True,
+                tier_changed=False,
+                counter_reset=False,
+                unranked_confirmations=0,
+            ),
+            next_interval_seconds=40_000,
+        )
+        assert newer_snapshot_at is not None
+        assert not await verifications.acknowledge_rank_role_sync(
+            guild_id,
+            101,
+            expected_rank_last_checked_at=original_role_snapshot_at,
+        )
+        newer_role_syncs = await verifications.claim_due_rank_role_syncs(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in newer_role_syncs] == [101]
+        assert await verifications.acknowledge_rank_role_sync(
+            guild_id,
+            101,
+            expected_rank_last_checked_at=newer_snapshot_at,
+        )
+        refreshed = await verifications.get_by_user(guild_id, 101)
+        assert refreshed is not None
+        assert refreshed.last_known_division == "III"
+        assert refreshed.last_known_league_points == 40
+        assert refreshed.rank_tier_change_count == 1
+        assert not refreshed.rank_role_sync_pending
         await verifications.log_access(
             guild_id=guild_id,
             actor_id=501,
@@ -154,7 +334,11 @@ async def test_migrations_and_repositories_against_postgres(
         )
         pending = await rso_sessions.claim_pending()
         assert [item.discord_user_id for item in pending] == [102]
-        await rso_sessions.complete_discord(pending[0].id, message_id=202)
+        await rso_sessions.complete_discord(
+            pending[0].id,
+            message_id=202,
+            channel_id=303,
+        )
         completed = await rso_sessions.get_by_start_token(rso.token)
         assert completed is not None and completed.status == "COMPLETED"
         assert (await verifications.get_by_user(guild_id, 102)).message_id == 202
@@ -208,6 +392,304 @@ async def test_migrations_and_repositories_against_postgres(
         assert await verifications.get_by_user(guild_id, 101) is None
         await verifications.delete_by_user(guild_id, 102)
     finally:
+        await connection.close()
+
+
+async def test_stale_riot_response_cannot_overwrite_reverified_link(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    try:
+        old = await repository.create(
+            guild_id=guild_id,
+            user_id=701,
+            message_id=801,
+            platform="EUN1",
+            puuid="same-puuid",
+            rank_snapshot=RankSnapshot("GOLD", "I", 90, 10, 5, False),
+        )
+        await repository.delete_by_user(guild_id, 701)
+        await asyncio.sleep(0.002)
+        new = await repository.create(
+            guild_id=guild_id,
+            user_id=701,
+            message_id=802,
+            platform="EUN1",
+            puuid="same-puuid",
+            rank_snapshot=RankSnapshot("SILVER", "IV", 10, 2, 3, False),
+        )
+
+        recorded = await repository.record_rank_snapshot(
+            guild_id,
+            701,
+            expected_puuid=old.puuid or "",
+            expected_platform=old.platform,
+            expected_created_at=old.created_at,
+            decision=RankRefreshDecision(
+                snapshot=RankSnapshot("DIAMOND", "IV", 20, 100, 90, False),
+                interval_seconds=21_600,
+                schedule_class="6h",
+                reason="tier_changed",
+                activity_observed=True,
+                tier_changed=True,
+                counter_reset=False,
+                unranked_confirmations=0,
+            ),
+            next_interval_seconds=21_600,
+        )
+
+        assert recorded is None
+        current = await repository.get_by_user(guild_id, 701)
+        assert current is not None
+        assert current.created_at == new.created_at
+        assert current.last_known_rank == "SILVER"
+    finally:
+        await repository.delete_by_user(guild_id, 701)
+        await connection.close()
+
+
+async def test_stale_claim_mutations_cannot_change_reverified_link(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    try:
+        old = await repository.create(
+            guild_id=guild_id,
+            user_id=703,
+            message_id=801,
+            platform="EUN1",
+            puuid="same-claim-puuid",
+            rank_snapshot=RankSnapshot("GOLD", "I", 90, 10, 5, False),
+        )
+        await repository.delete_by_user(guild_id, 703)
+        await asyncio.sleep(0.002)
+        new = await repository.create(
+            guild_id=guild_id,
+            user_id=703,
+            message_id=802,
+            platform="EUN1",
+            puuid="same-claim-puuid",
+            rank_snapshot=RankSnapshot("SILVER", "IV", 10, 2, 3, False),
+        )
+        claim_marker = datetime.now(UTC)
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(VerificationLink, (guild_id, 703), with_for_update=True)
+            assert stored is not None
+            stored.rank_refresh_claimed_at = claim_marker
+            stored.rank_role_sync_pending = True
+            stored.rank_role_sync_claimed_at = claim_marker
+            stored.rank_role_sync_next_attempt_at = claim_marker
+            next_refresh = stored.rank_next_refresh_at
+
+        identity = {
+            "expected_puuid": old.puuid or "",
+            "expected_platform": old.platform,
+            "expected_created_at": old.created_at,
+        }
+        assert (
+            await repository.retry_rank_refresh(
+                guild_id,
+                703,
+                base_delay_seconds=300,
+                **identity,
+            )
+            is None
+        )
+        assert not await repository.release_rank_refresh_claim(guild_id, 703, **identity)
+        assert not await repository.defer_rank_refresh(
+            guild_id,
+            703,
+            delay_seconds=7 * 86_400,
+            **identity,
+        )
+        assert not await repository.defer_rank_role_sync(
+            guild_id,
+            703,
+            delay_seconds=7 * 86_400,
+            expected_rank_last_checked_at=old.rank_last_checked_at,
+            **identity,
+        )
+
+        current = await repository.get_by_user(guild_id, 703)
+        assert current is not None
+        assert current.created_at == new.created_at
+        assert current.rank_refresh_failures == 0
+        assert current.rank_refresh_claimed_at == claim_marker
+        assert current.rank_next_refresh_at == next_refresh
+        assert current.rank_role_sync_claimed_at == claim_marker
+        assert current.rank_role_sync_next_attempt_at == claim_marker
+    finally:
+        await repository.delete_by_user(guild_id, 703)
+        await connection.close()
+
+
+async def test_delete_tombstone_blocks_workers_and_survives_claim_restart(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=702,
+            message_id=803,
+            platform="EUN1",
+            puuid="delete-puuid",
+            rank_snapshot=RankSnapshot("EMERALD", "II", 50, 20, 10, False),
+        )
+        requested = await repository.request_verification_deletion(guild_id, 702)
+        assert requested is not None and requested.deletion_requested_at is not None
+        assert (
+            await repository.claim_due_rank_refreshes(guild_id, limit=1, claim_timeout_seconds=300)
+            == []
+        )
+        assert (
+            await repository.claim_due_rank_role_syncs(guild_id, limit=1, claim_timeout_seconds=300)
+            == []
+        )
+        assert (
+            await repository.claim_due_verification_deletions(
+                guild_id, limit=1, claim_timeout_seconds=300
+            )
+            == []
+        )
+
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(VerificationLink, (guild_id, 702), with_for_update=True)
+            assert stored is not None
+            stored.deletion_claimed_at = datetime.now(UTC) - timedelta(seconds=301)
+        claimed = await repository.claim_due_verification_deletions(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [item.discord_user_id for item in claimed] == [702]
+        delay = await repository.retry_verification_deletion(
+            guild_id,
+            702,
+            expected_created_at=link.created_at,
+            base_delay_seconds=60,
+        )
+        assert delay is not None
+        assert (
+            await repository.claim_due_verification_deletions(
+                guild_id, limit=1, claim_timeout_seconds=300
+            )
+            == []
+        )
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(VerificationLink, (guild_id, 702), with_for_update=True)
+            assert stored is not None
+            stored.deletion_next_attempt_at = datetime.now(UTC)
+        claimed = await repository.claim_due_verification_deletions(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [item.discord_user_id for item in claimed] == [702]
+        assert await repository.finalize_verification_deletion(
+            guild_id,
+            702,
+            expected_puuid=link.puuid or "",
+            expected_platform=link.platform,
+            expected_created_at=link.created_at,
+        )
+        assert await repository.get_by_user(guild_id, 702) is None
+
+        cleanup_generation = await repository.enqueue_verified_marker_cleanup(guild_id, 702)
+        marker_cleanup = await repository.claim_due_verified_marker_cleanups(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [item.discord_user_id for item in marker_cleanup] == [702]
+        newer_generation = await repository.enqueue_verified_marker_cleanup(guild_id, 702)
+        assert newer_generation == cleanup_generation + 1
+        assert await repository.retry_verified_marker_cleanup(
+            guild_id,
+            702,
+            expected_generation=newer_generation,
+            base_delay_seconds=1,
+        )
+        assert not await repository.acknowledge_verified_marker_cleanup(
+            guild_id,
+            702,
+            expected_generation=cleanup_generation,
+        )
+        assert (
+            await repository.retry_verified_marker_cleanup(
+                guild_id,
+                702,
+                expected_generation=cleanup_generation,
+                base_delay_seconds=1,
+            )
+            is None
+        )
+        async with connection.session_factory.begin() as session:
+            stored_cleanup = await session.get(
+                VerificationMarkerCleanup,
+                (guild_id, 702),
+                with_for_update=True,
+            )
+            assert stored_cleanup is not None
+            stored_cleanup.next_attempt_at = datetime.now(UTC)
+        restarted_repository = VerificationRepository(connection.session_factory)
+        marker_cleanup = await restarted_repository.claim_due_verified_marker_cleanups(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [item.discord_user_id for item in marker_cleanup] == [702]
+        assert marker_cleanup[0].generation == newer_generation
+        assert await restarted_repository.acknowledge_verified_marker_cleanup(
+            guild_id,
+            702,
+            expected_generation=newer_generation,
+        )
+        assert (
+            await restarted_repository.claim_due_verified_marker_cleanups(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            )
+            == []
+        )
+    finally:
+        await repository.delete_by_user(guild_id, 702)
         await connection.close()
 
 
@@ -403,3 +885,106 @@ async def test_expired_timeout_never_reactivates_its_parent(
             assert stored_timeout.status == WarningStatus.EXPIRED.value
     finally:
         await connection.close()
+
+
+async def test_adaptive_rank_migration_downgrade_preserves_existing_link_data(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    url = make_database_url(settings).render_as_string(hide_password=False).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", url)
+    config.attributes["guild_id"] = guild_id
+    try:
+        await upgrade_database(settings)
+        await asyncio.to_thread(command.downgrade, config, "20260815_0004")
+        old_database = Database(settings)
+        try:
+            async with old_database.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO verification_links (
+                            guild_id, discord_user_id, message_id, platform, puuid,
+                            verification_method, last_known_rank, rank_next_refresh_at,
+                            rank_refresh_failures, created_at
+                        ) VALUES (
+                            :guild_id, 909, 808, 'EUN1', :puuid,
+                            'PROFILE_ICON', 'EMERALD', NOW(), 0, NOW()
+                        )
+                        """
+                    ),
+                    {"guild_id": guild_id, "puuid": f"migration-{guild_id}"},
+                )
+        finally:
+            await old_database.close()
+
+        await asyncio.to_thread(command.upgrade, config, "20260815_0005")
+        upgraded = Database(settings)
+        try:
+            async with upgraded.engine.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT message_id, platform, puuid, last_known_rank,
+                                   rank_role_sync_pending, deletion_failures
+                            FROM verification_links
+                            WHERE guild_id = :guild_id AND discord_user_id = 909
+                            """
+                        ),
+                        {"guild_id": guild_id},
+                    )
+                ).one()
+            assert tuple(row) == (
+                808,
+                "EUN1",
+                f"migration-{guild_id}",
+                "EMERALD",
+                False,
+                0,
+            )
+        finally:
+            await upgraded.close()
+
+        await asyncio.to_thread(command.downgrade, config, "20260815_0004")
+        downgraded = Database(settings)
+        try:
+            async with downgraded.engine.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT message_id, platform, puuid, last_known_rank
+                            FROM verification_links
+                            WHERE guild_id = :guild_id AND discord_user_id = 909
+                            """
+                        ),
+                        {"guild_id": guild_id},
+                    )
+                ).one()
+            assert tuple(row) == (808, "EUN1", f"migration-{guild_id}", "EMERALD")
+        finally:
+            await downgraded.close()
+    finally:
+        await upgrade_database(settings)
+        cleanup = Database(settings)
+        try:
+            async with cleanup.engine.begin() as connection:
+                await connection.execute(
+                    text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                    {"guild_id": guild_id},
+                )
+        finally:
+            await cleanup.close()

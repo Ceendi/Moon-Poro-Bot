@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     rank_refresh_worker_interval_seconds: int = Field(default=10, ge=5, le=300)
     rank_refresh_retry_base_seconds: int = Field(default=300, ge=30, le=3600)
     rank_refresh_claim_timeout_seconds: int = Field(default=300, ge=60, le=3600)
+    rank_refresh_policy: Literal["fixed", "shadow", "adaptive"] = "fixed"
+    rank_refresh_rollout_percent: int = Field(default=100, ge=0, le=100)
+    rank_refresh_button_cooldown_seconds: int = Field(default=1800, ge=60, le=86_400)
+    rank_refresh_manual_priority_cooldown_seconds: int = Field(default=3600, ge=60, le=86_400)
+    rank_refresh_auth_probe_interval_seconds: int = Field(default=900, ge=60, le=3600)
     riot_monitoring_interval_seconds: int = Field(default=300, ge=60, le=3600)
     warning_reconcile_interval_seconds: int = Field(default=300, ge=60, le=3600)
     verification_access_log_retention_days: int = Field(default=90, ge=30, le=3650)

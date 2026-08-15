@@ -105,7 +105,19 @@ def test_rank_refresh_is_staggered_with_durable_retry_defaults() -> None:
     assert settings.rank_refresh_worker_interval_seconds == 10
     assert settings.rank_refresh_retry_base_seconds == 300
     assert settings.rank_refresh_claim_timeout_seconds == 300
+    assert settings.rank_refresh_policy == "fixed"
+    assert settings.rank_refresh_rollout_percent == 100
+    assert settings.rank_refresh_button_cooldown_seconds == 1800
+    assert settings.rank_refresh_manual_priority_cooldown_seconds == 3600
+    assert settings.rank_refresh_auth_probe_interval_seconds == 900
     assert settings.riot_monitoring_interval_seconds == 300
+
+
+def test_rank_refresh_policy_and_rollout_are_validated() -> None:
+    with pytest.raises(ValidationError):
+        make_settings(rank_refresh_policy="random")
+    with pytest.raises(ValidationError):
+        make_settings(rank_refresh_rollout_percent=101)
 
 
 def test_warning_reconciliation_runs_every_five_minutes_by_default() -> None:
