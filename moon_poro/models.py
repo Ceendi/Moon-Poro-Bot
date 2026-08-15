@@ -53,6 +53,18 @@ class VerificationLink(Base):
             "rank_next_refresh_at",
             postgresql_where=text("puuid IS NOT NULL"),
         ),
+        Index(
+            "ix_verification_links_rank_role_sync_due",
+            "guild_id",
+            "rank_role_sync_next_attempt_at",
+            postgresql_where=text("rank_role_sync_pending"),
+        ),
+        Index(
+            "ix_verification_links_deletion_due",
+            "guild_id",
+            "deletion_next_attempt_at",
+            postgresql_where=text("deletion_requested_at IS NOT NULL"),
+        ),
     )
 
     guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -62,12 +74,48 @@ class VerificationLink(Base):
     puuid: Mapped[str | None] = mapped_column(String(255))
     verification_method: Mapped[str] = mapped_column(String(32), default="PROFILE_ICON")
     last_known_rank: Mapped[str | None] = mapped_column(String(32))
+    last_known_division: Mapped[str | None] = mapped_column(String(4))
+    last_known_league_points: Mapped[int | None] = mapped_column(Integer)
+    last_known_wins: Mapped[int | None] = mapped_column(Integer)
+    last_known_losses: Mapped[int | None] = mapped_column(Integer)
+    last_known_inactive: Mapped[bool | None] = mapped_column(Boolean)
     rank_last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_last_activity_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_schedule_class: Mapped[str | None] = mapped_column(String(16))
+    rank_schedule_reason: Mapped[str | None] = mapped_column(String(64))
+    rank_proposed_interval_seconds: Mapped[int | None] = mapped_column(Integer)
+    rank_unranked_confirmations: Mapped[int] = mapped_column(
+        SmallInteger, default=0, server_default=text("0"), nullable=False
+    )
+    rank_tier_change_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    rank_counter_reset_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     rank_refresh_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rank_next_refresh_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     rank_refresh_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    rank_role_sync_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    rank_role_sync_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_role_sync_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rank_role_sync_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    rank_manual_refresh_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    rank_user_refresh_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_failures: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -103,11 +151,59 @@ class VerificationSession(Base):
     riot_tag_line: Mapped[str | None] = mapped_column(String(20))
     error_code: Mapped[str | None] = mapped_column(String(64))
     completion_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    verification_link_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VerificationAuditCleanup(Base):
+    """Durable outbox for RSO audit messages orphaned by a concurrent cancellation."""
+
+    __tablename__ = "verification_audit_cleanups"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "message_id", name="uq_verification_audit_cleanup_message"),
+        Index("ix_verification_audit_cleanup_due", "next_attempt_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    verification_session_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class VerificationMarkerCleanup(Base):
+    """Durable request to remove an obsolete Discord Verified marker."""
+
+    __tablename__ = "verification_marker_cleanups"
+    __table_args__ = (Index("ix_verification_marker_cleanup_due", "next_attempt_at"),)
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False
+    )
+    failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class VerificationAccessLog(Base):

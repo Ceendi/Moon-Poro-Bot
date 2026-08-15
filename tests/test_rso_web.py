@@ -250,7 +250,11 @@ async def test_complete_browser_flow_from_landing_to_result(
     assert "Riot potwierdził konto" in await pending_page.text()
 
     pending = await repository.claim_pending()
-    assert await repository.complete_discord(pending[0].id, message_id=987)
+    assert await repository.complete_discord(
+        pending[0].id,
+        message_id=987,
+        channel_id=654,
+    )
     completed_page = await rso_test_client.get(
         "/verify/result",
         headers={**headers, "Cookie": f"moon_poro_rso={created.token}"},

@@ -7,7 +7,7 @@ import os
 
 from moon_poro.bot import MoonPoroBot, create_intents
 from moon_poro.database import Database, upgrade_database
-from moon_poro.riot import RiotAPIMonitor, create_riot_api_client
+from moon_poro.riot import RiotAPIMonitor, RiotAuthBreaker, create_riot_api_client
 from moon_poro.settings import Settings
 
 
@@ -37,16 +37,22 @@ async def main() -> None:
     configure_logging()
     database = Database(settings)
     riot_monitor = RiotAPIMonitor()
+    riot_auth_breaker = RiotAuthBreaker(
+        probe_interval_seconds=settings.rank_refresh_auth_probe_interval_seconds
+    )
 
     try:
         async with create_riot_api_client(
-            settings.riot_api_token.get_secret_value(), monitor=riot_monitor
+            settings.riot_api_token.get_secret_value(),
+            auth_breaker=riot_auth_breaker,
+            monitor=riot_monitor,
         ) as riot_client:
             bot = MoonPoroBot(
                 settings=settings,
                 database=database,
                 riot_client=riot_client,
                 riot_monitor=riot_monitor,
+                riot_auth_breaker=riot_auth_breaker,
                 intents=create_intents(settings),
             )
             try:

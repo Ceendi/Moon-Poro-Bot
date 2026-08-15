@@ -7,12 +7,16 @@ from pulsefire.invocation import Invocation
 from moon_poro import riot
 from moon_poro.riot import (
     RiotAPIMonitor,
+    RiotAPINotFound,
     RiotAPIUnavailable,
+    RiotAuthBreaker,
+    RiotAuthCircuitOpen,
     RiotCircuitBreaker,
     get_rank_from_leagues,
     profile_icon_url,
     riot_api_call,
     riot_api_monitoring_middleware,
+    riot_auth_breaker_middleware,
     riot_circuit_breaker_middleware,
 )
 
@@ -172,31 +176,42 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
     json_middleware = object()
     http_error = object()
     breaker_middleware = object()
+    auth_middleware = object()
     monitoring_middleware = object()
     rate_limiter = object()
     client = object()
     client_class = Mock(return_value=client)
     breaker_factory = Mock(return_value=breaker_middleware)
+    auth_factory = Mock(return_value=auth_middleware)
     monitoring_factory = Mock(return_value=monitoring_middleware)
     breaker = RiotCircuitBreaker()
+    auth_breaker = RiotAuthBreaker()
     monitor = RiotAPIMonitor()
     monkeypatch.setattr(riot, "RiotAPIClient", client_class)
     monkeypatch.setattr(riot, "json_response_middleware", Mock(return_value=json_middleware))
     monkeypatch.setattr(riot, "http_error_middleware", Mock(return_value=http_error))
     monkeypatch.setattr(riot, "riot_circuit_breaker_middleware", breaker_factory)
+    monkeypatch.setattr(riot, "riot_auth_breaker_middleware", auth_factory)
     monkeypatch.setattr(riot, "riot_api_monitoring_middleware", monitoring_factory)
     monkeypatch.setattr(riot, "rate_limiter_middleware", Mock(return_value=rate_limiter))
 
-    result = riot.create_riot_api_client("test-token", circuit_breaker=breaker, monitor=monitor)
+    result = riot.create_riot_api_client(
+        "test-token",
+        circuit_breaker=breaker,
+        auth_breaker=auth_breaker,
+        monitor=monitor,
+    )
 
     assert result is client
     breaker_factory.assert_called_once_with(breaker)
+    auth_factory.assert_called_once_with(auth_breaker)
     monitoring_factory.assert_called_once_with(monitor)
     assert client_class.call_args.kwargs["middlewares"] == [
         json_middleware,
         http_error,
         rate_limiter,
         breaker_middleware,
+        auth_middleware,
         monitoring_middleware,
     ]
 
@@ -217,6 +232,48 @@ async def test_riot_api_call_maps_not_found_to_fallback() -> None:
 
     assert result == []
     operation.assert_awaited_once_with()
+
+
+async def test_riot_api_call_keeps_unhandled_not_found_distinct_from_empty_200() -> None:
+    operation = AsyncMock(side_effect=RiotResponseError(404))
+
+    with pytest.raises(RiotAPINotFound):
+        await riot_api_call(operation)
+
+
+async def test_auth_breaker_allows_only_one_probe_and_recovers() -> None:
+    now = [100.0]
+    breaker = RiotAuthBreaker(probe_interval_seconds=900, clock=lambda: now[0])
+    first = AsyncMock(return_value=RiotResponse(401))
+    middleware = riot_auth_breaker_middleware(breaker)(first)
+    invocation = Invocation("GET", "https://{region}.api.riotgames.com", {"region": "EUN1"})
+
+    await middleware(invocation)
+    assert breaker.snapshot().blocked
+    with pytest.raises(RiotAuthCircuitOpen):
+        await middleware(invocation)
+
+    now[0] += 900
+    probe_started = breaker.acquire()
+    assert probe_started
+    with pytest.raises(RiotAuthCircuitOpen):
+        breaker.acquire()
+    breaker.record_status(200, was_probe=probe_started)
+    assert not breaker.snapshot().blocked
+
+
+def test_auth_breaker_ignores_late_success_but_closes_on_non_auth_probe_response() -> None:
+    now = [100.0]
+    breaker = RiotAuthBreaker(probe_interval_seconds=900, clock=lambda: now[0])
+    breaker.record_status(401, was_probe=False)
+
+    breaker.record_status(200, was_probe=False)
+    assert breaker.snapshot().blocked
+
+    now[0] += 900
+    probe = breaker.acquire()
+    breaker.record_status(404, was_probe=probe)
+    assert not breaker.snapshot().blocked
 
 
 @pytest.mark.parametrize("status", [429, 503])

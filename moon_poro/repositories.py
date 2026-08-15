@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, cast
 
 from sqlalchemy import delete, func, or_, select, update
@@ -16,16 +17,45 @@ from moon_poro.models import (
     ModerationStat,
     VerificationAccessLog,
     VerificationLink,
+    VerificationMarkerCleanup,
     Warning,
     WarningModerator,
     WarningStatus,
 )
+from moon_poro.outbox import mark_outbox_claimed
+from moon_poro.rank_refresh import RankRefreshDecision, RankSnapshot, retry_delay_with_jitter
+
+
+class RankRefreshRequestStatus(StrEnum):
+    ENQUEUED = "ENQUEUED"
+    ALREADY_DUE = "ALREADY_DUE"
+    ALREADY_CLAIMED = "ALREADY_CLAIMED"
+    BACKOFF_ACTIVE = "BACKOFF_ACTIVE"
+    COOLDOWN = "COOLDOWN"
+    NOT_LINKED = "NOT_LINKED"
+
+
+@dataclass(frozen=True, slots=True)
+class RankRefreshRequestResult:
+    status: RankRefreshRequestStatus
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RankRefreshQueueStats:
     due_count: int
     oldest_due_at: datetime | None
+    schedule_6h_count: int = 0
+    schedule_12h_count: int = 0
+    schedule_24h_count: int = 0
+    predicted_requests_per_day: float = 0.0
+    snapshot_p50_at: datetime | None = None
+    snapshot_p95_at: datetime | None = None
+    oldest_snapshot_at: datetime | None = None
+    tier_changes: int = 0
+    counter_resets: int = 0
+    unranked_confirmations: int = 0
+    pending_role_sync_count: int = 0
 
 
 class VerificationRepository:
@@ -68,9 +98,13 @@ class VerificationRepository:
         puuid: str,
         method: str = "PROFILE_ICON",
         rank_tier: str | None = None,
+        rank_snapshot: RankSnapshot | None = None,
         refresh_interval_hours: int = 24,
     ) -> VerificationLink:
         now = datetime.now(UTC)
+        snapshot = rank_snapshot or (
+            RankSnapshot(tier=rank_tier) if rank_tier is not None else None
+        )
         link = VerificationLink(
             guild_id=guild_id,
             discord_user_id=user_id,
@@ -78,11 +112,23 @@ class VerificationRepository:
             platform=platform,
             puuid=puuid,
             verification_method=method,
-            last_known_rank=rank_tier,
-            rank_last_checked_at=now if rank_tier is not None else None,
-            rank_next_refresh_at=(
-                now + timedelta(hours=refresh_interval_hours) if rank_tier is not None else now
+            last_known_rank=snapshot.tier if snapshot is not None else None,
+            last_known_division=snapshot.division if snapshot is not None else None,
+            last_known_league_points=(snapshot.league_points if snapshot is not None else None),
+            last_known_wins=snapshot.wins if snapshot is not None else None,
+            last_known_losses=snapshot.losses if snapshot is not None else None,
+            last_known_inactive=snapshot.inactive if snapshot is not None else None,
+            rank_last_checked_at=now if snapshot is not None else None,
+            rank_schedule_class="24h" if snapshot is not None else None,
+            rank_schedule_reason="first_snapshot" if snapshot is not None else None,
+            rank_proposed_interval_seconds=(
+                refresh_interval_hours * 3600 if snapshot is not None else None
             ),
+            rank_next_refresh_at=(
+                now + timedelta(hours=refresh_interval_hours) if snapshot is not None else now
+            ),
+            rank_role_sync_pending=snapshot is not None,
+            rank_role_sync_next_attempt_at=now if snapshot is not None else None,
         )
         async with self._sessions.begin() as session:
             session.add(link)
@@ -103,6 +149,7 @@ class VerificationRepository:
                 .where(
                     VerificationLink.guild_id == guild_id,
                     VerificationLink.puuid.is_not(None),
+                    VerificationLink.deletion_requested_at.is_(None),
                     VerificationLink.rank_next_refresh_at <= now,
                     (
                         VerificationLink.rank_refresh_claimed_at.is_(None)
@@ -121,7 +168,7 @@ class VerificationRepository:
     async def rank_refresh_queue_stats(self, guild_id: int) -> RankRefreshQueueStats:
         now = datetime.now(UTC)
         async with self._sessions() as session:
-            row = (
+            due_row = (
                 await session.execute(
                     select(
                         func.count(VerificationLink.discord_user_id),
@@ -129,14 +176,116 @@ class VerificationRepository:
                     ).where(
                         VerificationLink.guild_id == guild_id,
                         VerificationLink.puuid.is_not(None),
+                        VerificationLink.deletion_requested_at.is_(None),
                         VerificationLink.rank_next_refresh_at <= now,
                     )
                 )
             ).one()
+            rows = list(
+                await session.execute(
+                    select(
+                        VerificationLink.rank_schedule_class,
+                        VerificationLink.rank_proposed_interval_seconds,
+                        VerificationLink.rank_last_checked_at,
+                        VerificationLink.rank_tier_change_count,
+                        VerificationLink.rank_counter_reset_count,
+                        VerificationLink.rank_unranked_confirmations,
+                        VerificationLink.rank_role_sync_pending,
+                    ).where(
+                        VerificationLink.guild_id == guild_id,
+                        VerificationLink.puuid.is_not(None),
+                        VerificationLink.deletion_requested_at.is_(None),
+                    )
+                )
+            )
+        class_counts = {"6h": 0, "12h": 0, "24h": 0}
+        checked_at: list[datetime] = []
+        predicted_requests = 0.0
+        tier_changes = 0
+        counter_resets = 0
+        confirmations = 0
+        pending_role_sync = 0
+        for row in rows:
+            schedule_class = cast(str | None, row[0])
+            if schedule_class in class_counts:
+                class_counts[schedule_class] += 1
+            interval = cast(int | None, row[1]) or 86_400
+            predicted_requests += 86_400 / interval
+            if row[2] is not None:
+                checked_at.append(cast(datetime, row[2]))
+            tier_changes += int(row[3])
+            counter_resets += int(row[4])
+            confirmations += int(int(row[5]) == 1)
+            pending_role_sync += int(bool(row[6]))
+        checked_at.sort()
         return RankRefreshQueueStats(
-            due_count=int(row[0]),
-            oldest_due_at=cast(datetime | None, row[1]),
+            due_count=int(due_row[0]),
+            oldest_due_at=cast(datetime | None, due_row[1]),
+            schedule_6h_count=class_counts["6h"],
+            schedule_12h_count=class_counts["12h"],
+            schedule_24h_count=class_counts["24h"],
+            predicted_requests_per_day=predicted_requests,
+            snapshot_p50_at=_percentile_timestamp(checked_at, 0.50),
+            snapshot_p95_at=_percentile_timestamp(checked_at, 0.05),
+            oldest_snapshot_at=checked_at[0] if checked_at else None,
+            tier_changes=tier_changes,
+            counter_resets=counter_resets,
+            unranked_confirmations=confirmations,
+            pending_role_sync_count=pending_role_sync,
         )
+
+    async def record_rank_snapshot(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+        decision: RankRefreshDecision,
+        next_interval_seconds: int,
+    ) -> datetime | None:
+        now = datetime.now(UTC)
+        snapshot = decision.snapshot
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if (
+                link is None
+                or link.deletion_requested_at is not None
+                or link.puuid != expected_puuid
+                or link.platform != expected_platform
+                or link.created_at != expected_created_at
+            ):
+                return None
+            link.last_known_rank = snapshot.tier
+            link.last_known_division = snapshot.division
+            link.last_known_league_points = snapshot.league_points
+            link.last_known_wins = snapshot.wins
+            link.last_known_losses = snapshot.losses
+            link.last_known_inactive = snapshot.inactive
+            link.rank_last_checked_at = now
+            if decision.activity_observed:
+                link.rank_last_activity_observed_at = now
+            link.rank_schedule_class = decision.schedule_class
+            link.rank_schedule_reason = decision.reason
+            link.rank_proposed_interval_seconds = decision.interval_seconds
+            link.rank_unranked_confirmations = decision.unranked_confirmations
+            if decision.tier_changed:
+                link.rank_tier_change_count += 1
+            if decision.counter_reset:
+                link.rank_counter_reset_count += 1
+            link.rank_next_refresh_at = now + timedelta(seconds=next_interval_seconds)
+            link.rank_refresh_claimed_at = None
+            link.rank_refresh_failures = 0
+            link.rank_role_sync_pending = True
+            link.rank_role_sync_claimed_at = None
+            link.rank_role_sync_next_attempt_at = now
+            link.rank_role_sync_failures = 0
+            return now
 
     async def complete_rank_refresh(
         self,
@@ -153,7 +302,7 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None:
+            if link is None or link.deletion_requested_at is not None:
                 return False
             link.last_known_rank = rank_tier
             link.rank_last_checked_at = now
@@ -168,6 +317,9 @@ class VerificationRepository:
         user_id: int,
         *,
         base_delay_seconds: int,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
         max_delay_seconds: int = 21_600,
     ) -> int | None:
         now = datetime.now(UTC)
@@ -177,17 +329,50 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None:
+            if link is None or not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
                 return None
             failures = min(int(link.rank_refresh_failures) + 1, 16)
             link.rank_refresh_failures = failures
-            delay: int = min(
-                base_delay_seconds * (2 ** (failures - 1)),
-                max_delay_seconds,
+            delay = retry_delay_with_jitter(
+                base_delay_seconds,
+                failures,
+                guild_id=guild_id,
+                user_id=user_id,
+                max_delay_seconds=max_delay_seconds,
             )
             link.rank_next_refresh_at = now + timedelta(seconds=delay)
             link.rank_refresh_claimed_at = None
             return delay
+
+    async def release_rank_refresh_claim(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None or not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
+                return False
+            link.rank_refresh_claimed_at = None
+            return True
 
     async def defer_rank_refresh(
         self,
@@ -195,6 +380,9 @@ class VerificationRepository:
         user_id: int,
         *,
         delay_seconds: int,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
     ) -> bool:
         next_refresh = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         async with self._sessions.begin() as session:
@@ -203,7 +391,12 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None:
+            if link is None or not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
                 return False
             link.rank_next_refresh_at = next_refresh
             link.rank_refresh_claimed_at = None
@@ -217,10 +410,448 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None:
+            if link is None or link.deletion_requested_at is not None:
                 return False
+            if link.rank_refresh_claimed_at is not None or link.rank_refresh_failures > 0:
+                return True
             if link.rank_next_refresh_at > now:
                 link.rank_next_refresh_at = now
+            return True
+
+    async def request_rank_refresh(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        cooldown_seconds: int,
+        source: str,
+    ) -> RankRefreshRequestResult:
+        if source not in {"user", "role_tamper"}:
+            raise ValueError("source must be user or role_tamper")
+        now = datetime.now(UTC)
+        timestamp_name = (
+            "rank_user_refresh_requested_at"
+            if source == "user"
+            else "rank_manual_refresh_requested_at"
+        )
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None or link.puuid is None or link.deletion_requested_at is not None:
+                return RankRefreshRequestResult(RankRefreshRequestStatus.NOT_LINKED)
+            requested_at = cast(datetime | None, getattr(link, timestamp_name))
+            if requested_at is not None:
+                retry_after = cooldown_seconds - int((now - requested_at).total_seconds())
+                if retry_after > 0:
+                    return RankRefreshRequestResult(
+                        RankRefreshRequestStatus.COOLDOWN,
+                        retry_after_seconds=retry_after,
+                    )
+            setattr(link, timestamp_name, now)
+            if link.rank_refresh_claimed_at is not None:
+                return RankRefreshRequestResult(RankRefreshRequestStatus.ALREADY_CLAIMED)
+            if link.rank_next_refresh_at <= now:
+                return RankRefreshRequestResult(RankRefreshRequestStatus.ALREADY_DUE)
+            if link.rank_refresh_failures > 0:
+                return RankRefreshRequestResult(RankRefreshRequestStatus.BACKOFF_ACTIVE)
+            link.rank_next_refresh_at = now
+            return RankRefreshRequestResult(RankRefreshRequestStatus.ENQUEUED)
+
+    async def claim_due_rank_role_syncs(
+        self,
+        guild_id: int,
+        *,
+        limit: int,
+        claim_timeout_seconds: int,
+    ) -> list[VerificationLink]:
+        now = datetime.now(UTC)
+        stale_claim = now - timedelta(seconds=claim_timeout_seconds)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(VerificationLink)
+                .where(
+                    VerificationLink.guild_id == guild_id,
+                    VerificationLink.puuid.is_not(None),
+                    VerificationLink.deletion_requested_at.is_(None),
+                    VerificationLink.rank_role_sync_pending.is_(True),
+                    VerificationLink.rank_role_sync_next_attempt_at <= now,
+                    (
+                        VerificationLink.rank_role_sync_claimed_at.is_(None)
+                        | (VerificationLink.rank_role_sync_claimed_at <= stale_claim)
+                    ),
+                )
+                .order_by(VerificationLink.rank_role_sync_next_attempt_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            links = list(result)
+            for link in links:
+                link.rank_role_sync_claimed_at = now
+            return links
+
+    async def acknowledge_rank_role_sync(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_rank_last_checked_at: datetime | None = None,
+        expected_puuid: str | None = None,
+        expected_platform: str | None = None,
+        expected_created_at: datetime | None = None,
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return False
+            if not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
+                return False
+            if (
+                expected_rank_last_checked_at is not None
+                and link.rank_last_checked_at != expected_rank_last_checked_at
+            ):
+                return False
+            link.rank_role_sync_pending = False
+            link.rank_role_sync_claimed_at = None
+            link.rank_role_sync_next_attempt_at = None
+            link.rank_role_sync_failures = 0
+            return True
+
+    async def retry_rank_role_sync(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        base_delay_seconds: int,
+        max_delay_seconds: int = 21_600,
+        expected_rank_last_checked_at: datetime | None = None,
+        expected_puuid: str | None = None,
+        expected_platform: str | None = None,
+        expected_created_at: datetime | None = None,
+    ) -> int | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return None
+            if not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
+                return None
+            if (
+                expected_rank_last_checked_at is not None
+                and link.rank_last_checked_at != expected_rank_last_checked_at
+            ):
+                return None
+            failures = min(link.rank_role_sync_failures + 1, 16)
+            delay = retry_delay_with_jitter(
+                base_delay_seconds,
+                failures,
+                guild_id=guild_id,
+                user_id=user_id,
+                max_delay_seconds=max_delay_seconds,
+            )
+            link.rank_role_sync_pending = True
+            link.rank_role_sync_claimed_at = None
+            link.rank_role_sync_failures = failures
+            link.rank_role_sync_next_attempt_at = now + timedelta(seconds=delay)
+            return delay
+
+    async def defer_rank_role_sync(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        delay_seconds: int,
+        expected_rank_last_checked_at: datetime | None,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None or not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
+                return False
+            if link.rank_last_checked_at != expected_rank_last_checked_at:
+                return False
+            link.rank_role_sync_pending = True
+            link.rank_role_sync_claimed_at = None
+            link.rank_role_sync_next_attempt_at = datetime.now(UTC) + timedelta(
+                seconds=delay_seconds
+            )
+            return True
+
+    async def is_current_verification(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+    ) -> bool:
+        async with self._sessions() as session:
+            link = await session.get(VerificationLink, (guild_id, user_id))
+            return link is not None and _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            )
+
+    async def request_verification_deletion(
+        self,
+        guild_id: int,
+        user_id: int,
+    ) -> VerificationLink | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return None
+            link.deletion_requested_at = link.deletion_requested_at or now
+            link.deletion_claimed_at = now
+            link.deletion_next_attempt_at = now
+            link.rank_refresh_claimed_at = None
+            link.rank_role_sync_pending = False
+            link.rank_role_sync_claimed_at = None
+            link.rank_role_sync_next_attempt_at = None
+            return link
+
+    async def enqueue_verified_marker_cleanup(self, guild_id: int, user_id: int) -> int:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            record = await session.get(
+                VerificationMarkerCleanup,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if record is None:
+                session.add(
+                    VerificationMarkerCleanup(
+                        guild_id=guild_id,
+                        discord_user_id=user_id,
+                        next_attempt_at=now,
+                        generation=1,
+                        created_at=now,
+                    )
+                )
+                return 1
+            record.generation += 1
+            record.failures = 0
+            record.claimed_at = None
+            record.next_attempt_at = now
+            return record.generation
+
+    async def claim_due_verified_marker_cleanups(
+        self,
+        guild_id: int,
+        *,
+        limit: int,
+        claim_timeout_seconds: int,
+    ) -> list[VerificationMarkerCleanup]:
+        now = datetime.now(UTC)
+        stale_claim = now - timedelta(seconds=claim_timeout_seconds)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(VerificationMarkerCleanup)
+                .where(
+                    VerificationMarkerCleanup.guild_id == guild_id,
+                    VerificationMarkerCleanup.next_attempt_at <= now,
+                    (
+                        VerificationMarkerCleanup.claimed_at.is_(None)
+                        | (VerificationMarkerCleanup.claimed_at <= stale_claim)
+                    ),
+                )
+                .order_by(VerificationMarkerCleanup.next_attempt_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            return mark_outbox_claimed(result, now)
+
+    async def acknowledge_verified_marker_cleanup(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_generation: int,
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            current_generation = await session.scalar(
+                select(VerificationMarkerCleanup.generation)
+                .where(
+                    VerificationMarkerCleanup.guild_id == guild_id,
+                    VerificationMarkerCleanup.discord_user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if current_generation is None:
+                return True
+            if current_generation != expected_generation:
+                return False
+            removed = await session.execute(
+                delete(VerificationMarkerCleanup).where(
+                    VerificationMarkerCleanup.guild_id == guild_id,
+                    VerificationMarkerCleanup.discord_user_id == user_id,
+                )
+            )
+            return (cast(CursorResult[Any], removed).rowcount or 0) == 1
+
+    async def retry_verified_marker_cleanup(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_generation: int,
+        base_delay_seconds: int,
+        max_delay_seconds: int = 21_600,
+    ) -> int | None:
+        now = datetime.now(UTC)
+        retry_delay: int | None = None
+        async with self._sessions.begin() as session:
+            record = await session.get(
+                VerificationMarkerCleanup,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if record is None or record.generation != expected_generation:
+                return None
+            failures = min(record.failures + 1, 16)
+            delay = retry_delay_with_jitter(
+                base_delay_seconds,
+                failures,
+                guild_id=guild_id,
+                user_id=user_id,
+                max_delay_seconds=max_delay_seconds,
+            )
+            record.next_attempt_at = now + timedelta(seconds=delay)
+            record.claimed_at = None
+            record.failures = failures
+            retry_delay = delay
+        return retry_delay
+
+    async def claim_due_verification_deletions(
+        self,
+        guild_id: int,
+        *,
+        limit: int,
+        claim_timeout_seconds: int,
+    ) -> list[VerificationLink]:
+        now = datetime.now(UTC)
+        stale_claim = now - timedelta(seconds=claim_timeout_seconds)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(VerificationLink)
+                .where(
+                    VerificationLink.guild_id == guild_id,
+                    VerificationLink.deletion_requested_at.is_not(None),
+                    VerificationLink.deletion_next_attempt_at <= now,
+                    (
+                        VerificationLink.deletion_claimed_at.is_(None)
+                        | (VerificationLink.deletion_claimed_at <= stale_claim)
+                    ),
+                )
+                .order_by(VerificationLink.deletion_next_attempt_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            links = list(result)
+            for link in links:
+                link.deletion_claimed_at = now
+            return links
+
+    async def retry_verification_deletion(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_created_at: datetime,
+        base_delay_seconds: int,
+    ) -> int | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if (
+                link is None
+                or link.created_at != expected_created_at
+                or link.deletion_requested_at is None
+            ):
+                return None
+            failures = min(link.deletion_failures + 1, 16)
+            delay = retry_delay_with_jitter(
+                base_delay_seconds,
+                failures,
+                guild_id=guild_id,
+                user_id=user_id,
+            )
+            link.deletion_failures = failures
+            link.deletion_claimed_at = None
+            link.deletion_next_attempt_at = now + timedelta(seconds=delay)
+            return delay
+
+    async def finalize_verification_deletion(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return True
+            if not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+                allow_deleting=True,
+            ):
+                return False
+            if link.deletion_requested_at is None:
+                return False
+            await session.delete(link)
             return True
 
     async def delete_by_user(self, guild_id: int, user_id: int) -> VerificationLink | None:
@@ -272,6 +903,30 @@ class VerificationRepository:
                 )
             )
             return cast(CursorResult[Any], result).rowcount or 0
+
+
+def _percentile_timestamp(values: list[datetime], percentile: float) -> datetime | None:
+    if not values:
+        return None
+    index = round((len(values) - 1) * percentile)
+    return values[index]
+
+
+def _link_identity_matches(
+    link: VerificationLink,
+    *,
+    expected_puuid: str | None,
+    expected_platform: str | None,
+    expected_created_at: datetime | None,
+    allow_deleting: bool = False,
+) -> bool:
+    if link.deletion_requested_at is not None and not allow_deleting:
+        return False
+    return (
+        (expected_puuid is None or link.puuid == expected_puuid)
+        and (expected_platform is None or link.platform == expected_platform)
+        and (expected_created_at is None or link.created_at == expected_created_at)
+    )
 
 
 class WarningRepository:

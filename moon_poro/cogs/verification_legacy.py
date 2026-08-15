@@ -22,10 +22,16 @@ from moon_poro.cogs.verification import (
     VerificationCog,
     _apply_verified_roles,
     _get_leagues,
+    _reconcile_applied_roles,
     _reconcile_cached_role_change,
+    _remove_user_verification,
+    _remove_verified_marker,
+    _request_rank_refresh_from_panel,
     _restore_cached_roles_on_join,
+    _show_delete_confirmation,
 )
 from moon_poro.permissions import administrator_only
+from moon_poro.rank_refresh import solo_rank_snapshot
 from moon_poro.riot import (
     API_SERVERS,
     SERVER_TRANSLATION,
@@ -34,7 +40,7 @@ from moon_poro.riot import (
     profile_icon_url,
     riot_api_call,
 )
-from moon_poro.roles import find_role, member_has_role
+from moon_poro.roles import member_has_role
 
 logger = logging.getLogger("moon_poro.verification_legacy")
 
@@ -133,12 +139,6 @@ async def _get_summoner(bot: MoonPoroBot, platform: str, puuid: str) -> RiotPayl
     )
 
 
-async def _remove_verified_marker(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
-    verified_role = find_role(member.guild, bot.settings.verified_role_name, bot.settings)
-    if verified_role is not None and verified_role in member.roles:
-        await member.remove_roles(verified_role, reason=reason)
-
-
 class LegacyVerificationStartView(discord.ui.View):
     def __init__(self, bot: MoonPoroBot, rate_limiter: LegacyVerificationRateLimiter) -> None:
         super().__init__(timeout=None)
@@ -153,7 +153,7 @@ class LegacyVerificationStartView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Zweryfikuj konto Riot",
+        label="Zweryfikuj konto",
         emoji="✅",
         style=discord.ButtonStyle.green,
         custom_id="verification:start:profile-icon:v1",
@@ -191,6 +191,32 @@ class LegacyVerificationStartView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(LegacyVerificationModal(self.bot, self.rate_limiter))
+
+    @discord.ui.button(
+        label="Odśwież rangę",
+        emoji="🔄",
+        style=discord.ButtonStyle.blurple,
+        custom_id="verification:rank-refresh:v1",
+    )
+    async def refresh_rank(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[LegacyVerificationStartView],
+    ) -> None:
+        await _request_rank_refresh_from_panel(self.bot, interaction)
+
+    @discord.ui.button(
+        label="Usuń weryfikację",
+        emoji="🗑️",
+        style=discord.ButtonStyle.red,
+        custom_id="verification:delete:v1",
+    )
+    async def remove_verification(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[LegacyVerificationStartView],
+    ) -> None:
+        await _show_delete_confirmation(self.bot, interaction)
 
 
 class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
@@ -556,7 +582,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             return
 
         try:
-            await self.bot.verifications.create(
+            link = await self.bot.verifications.create(
                 guild_id=interaction.guild_id,
                 user_id=self.owner_id,
                 message_id=audit_message.id,
@@ -564,23 +590,89 @@ class LegacyIconConfirmationView(discord.ui.View):
                 puuid=self.puuid,
                 method="PROFILE_ICON",
                 rank_tier=get_rank_from_leagues(leagues).upper(),
+                rank_snapshot=solo_rank_snapshot(leagues),
                 refresh_interval_hours=self.bot.settings.rank_refresh_interval_hours,
             )
-            cog = self.bot.get_cog("LegacyVerificationCog")
+        except IntegrityError:
+            logger.exception("Could not store profile-icon verification for %s", self.owner_id)
+            with suppress(discord.NotFound, discord.HTTPException):
+                await audit_message.delete()
+            await interaction.followup.send(
+                "Nie udało się zapisać weryfikacji. Konto mogło zostać już powiązane.",
+                ephemeral=True,
+            )
+            return
+
+        cog = self.bot.get_cog("LegacyVerificationCog")
+        try:
             if isinstance(cog, LegacyVerificationCog):
                 await cog.apply_verified_roles(interaction.user, self.platform, leagues)
             else:
                 await _apply_verified_roles(self.bot, interaction.user, self.platform, leagues)
-        except (IntegrityError, discord.HTTPException):
-            logger.exception("Could not finish profile-icon verification for %s", self.owner_id)
-            await self.bot.verifications.delete_by_user(interaction.guild_id, self.owner_id)
-            with suppress(discord.NotFound, discord.HTTPException):
-                await audit_message.delete()
+        except discord.HTTPException:
+            await self.bot.verifications.retry_rank_role_sync(
+                interaction.guild_id,
+                self.owner_id,
+                base_delay_seconds=self.bot.settings.rank_refresh_retry_base_seconds,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
+                expected_puuid=link.puuid,
+                expected_platform=link.platform,
+                expected_created_at=link.created_at,
+            )
+            logger.exception(
+                "Stored profile-icon verification for %s but Discord role sync failed",
+                self.owner_id,
+            )
+            button.disabled = True
+            with suppress(discord.HTTPException):
+                await interaction.edit_original_response(view=self)
             await interaction.followup.send(
-                "Nie udało się bezpiecznie zakończyć weryfikacji. Spróbuj ponownie.",
+                "✅ Konto zostało zweryfikowane. Bot ponowi nadanie ról automatycznie.",
                 ephemeral=True,
             )
             return
+
+        if isinstance(cog, LegacyVerificationCog):
+            current = await _reconcile_applied_roles(cog, interaction.user, link)
+        else:
+            current = await self.bot.verifications.is_current_verification(
+                interaction.guild_id,
+                self.owner_id,
+                expected_puuid=link.puuid or "",
+                expected_platform=link.platform,
+                expected_created_at=link.created_at,
+            )
+            if not current:
+                cleanup_generation = await self.bot.verifications.enqueue_verified_marker_cleanup(
+                    interaction.guild_id,
+                    self.owner_id,
+                )
+                try:
+                    await _remove_verified_marker(
+                        self.bot,
+                        interaction.user,
+                        reason="Anulowanie nieaktualnej weryfikacji Riot",
+                    )
+                except discord.HTTPException:
+                    await self.bot.verifications.retry_verified_marker_cleanup(
+                        interaction.guild_id,
+                        self.owner_id,
+                        expected_generation=cleanup_generation,
+                        base_delay_seconds=self.bot.settings.rank_refresh_retry_base_seconds,
+                    )
+        if not current:
+            await interaction.followup.send(
+                "Stan powiązania zmienił się podczas weryfikacji.", ephemeral=True
+            )
+            return
+        await self.bot.verifications.acknowledge_rank_role_sync(
+            interaction.guild_id,
+            self.owner_id,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
+            expected_puuid=link.puuid,
+            expected_platform=link.platform,
+            expected_created_at=link.created_at,
+        )
 
         button.disabled = True
         with suppress(discord.HTTPException):
@@ -638,14 +730,22 @@ class LegacyVerificationCog(VerificationCog):
     async def publish_verification(  # type: ignore[override]
         self, interaction: discord.Interaction
     ) -> None:
-        content = (
-            "**Weryfikacja konta League of Legends**\n"
-            "Kliknij przycisk, podaj Riot ID i region, a następnie ustaw wskazaną ikonę "
-            "profilu w kliencie League of Legends. Bot zapisze powiązanie z Discordem "
-            "i będzie synchronizował region oraz rangę Solo/Duo."
+        embed = discord.Embed(
+            title="Weryfikacja konta League of Legends",
+            description=(
+                "Podaj Riot ID i region. Następnie potwierdź konto wskazaną ikoną "
+                "profilu w kliencie League of Legends."
+            ),
+            colour=discord.Colour.from_rgb(116, 211, 224),
         )
+        embed.add_field(
+            name="Role",
+            value="Bot zapisze powiązanie i będzie aktualizował region oraz tier Solo/Duo.",
+            inline=False,
+        )
+        embed.set_footer(text="Kliknij Zweryfikuj konto, aby rozpocząć.")
         await interaction.response.send_message(
-            content,
+            embed=embed,
             view=LegacyVerificationStartView(self.bot, self.rate_limiter),
         )
 
@@ -655,24 +755,8 @@ class LegacyVerificationCog(VerificationCog):
     async def remove_own_verification(  # type: ignore[override]
         self, interaction: discord.Interaction
     ) -> None:
-        guild_id = interaction.guild_id or 0
-        link = await self.bot.verifications.delete_by_user(guild_id, interaction.user.id)
-        await self.bot.verification_sessions.cancel_for_user(guild_id, interaction.user.id)
-        if interaction.guild is not None and isinstance(interaction.user, discord.Member):
-            await _remove_verified_marker(
-                self.bot,
-                interaction.user,
-                reason="Usunięcie weryfikacji przez użytkownika",
-            )
-            channel_id = self.bot.settings.zweryfikowani_channel_id
-            channel = interaction.guild.get_channel(channel_id) if channel_id else None
-            if link and link.message_id and isinstance(channel, discord.abc.Messageable):
-                with suppress(discord.NotFound, discord.HTTPException):
-                    await channel.get_partial_message(link.message_id).delete()
-        await interaction.response.send_message(
-            "Usunięto powiązanie konta Riot. Role regionu, rangi i użytkownika pozostają bez zmian.",
-            ephemeral=True,
-        )
+        message = await _remove_user_verification(self.bot, interaction)
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 async def setup(bot: MoonPoroBot) -> None:
