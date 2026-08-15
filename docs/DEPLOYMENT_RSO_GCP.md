@@ -145,14 +145,41 @@ nie ładuje fontów, bibliotek JS, analityki ani zasobów zewnętrznych.
 
 ## 9. Odświeżanie rang
 
-Migracja `20260814_0003` rozkłada istniejące powiązania równomiernie na pierwsze 24 godziny. Bot
-przechowuje termin następnego sprawdzenia i ostatnią znaną rangę w `verification_links`. Worker
-domyślnie pobiera najwyżej jeden należny rekord co 10 sekund. Po błędzie stosuje rosnące opóźnienie,
-a niedokończone zadanie może zostać bezpiecznie przejęte po wygaśnięciu czasu claimu.
+Migracja `20260814_0003` rozkłada istniejące powiązania równomiernie na pierwsze 24 godziny, a
+`20260815_0005` addytywnie zapisuje pełny snapshot Solo/Duo potrzebny schedulerowi. Worker pobiera
+najwyżej jeden najstarszy należny rekord co 10 sekund. Claimy są trwałe i po pięciu minutach mogą
+zostać bezpiecznie przejęte przez proces uruchomiony ponownie.
 
-Zmiana chronionej roli oraz ponowne wejście użytkownika korzystają z ostatniej rangi zapisanej w
-bazie i nie wykonują dodatkowego zapytania do Riot API. Okres odświeżania pojedynczego użytkownika
-kontroluje `RANK_REFRESH_INTERVAL_HOURS`.
+`RANK_REFRESH_POLICY` ma trzy tryby:
+
+- `fixed`, bezpieczna wartość domyślna, zachowuje `RANK_REFRESH_INTERVAL_HOURS`;
+- `shadow`, zachowuje rzeczywisty interwał stały, ale zapisuje proponowaną klasę i powód;
+- `adaptive`, stosuje 6, 12 albo 24 godziny wyłącznie na podstawie już pobranej odpowiedzi
+  League-v4. Nie wykonuje Match-v5 ani dodatkowych zapytań.
+
+W trybie adaptacyjnym 6 godzin otrzymują aktywni gracze Master i wyżej, świeża zmiana tieru oraz
+aktywni gracze blisko granicy tieru. Wykryta aktywność, zmiana dywizji lub LP i stabilny Master lub
+wyżej otrzymują 12 godzin. Stabilne i nieaktywne konta otrzymują 24 godziny. Deterministyczny jitter
+do 10% tylko przyspiesza termin. `RANK_REFRESH_ROLLOUT_PERCENT` pozwala wdrażać politykę stopniowo.
+
+Pierwsza poprawna odpowiedź `200` bez Solo/Duo nie usuwa zapisanej rangi. Bot potwierdza stan po
+około godzinie i dopiero drugie zgodne `200` ustawia Unranked. Odpowiedź `404` pozostaje błędem.
+
+Zmiana chronionej roli i ponowne wejście korzystają z cache bez dodatkowego zapytania do Riot.
+Snapshot starszy niż godzinę po zmianie roli dostaje trwały priorytet najwyżej raz na godzinę.
+Powrót użytkownika ze snapshotem starszym niż 24 godziny dodaje odświeżenie do kolejki. Brak
+użytkownika na serwerze odkłada sprawdzenie o siedem dni. Przycisk odświeżania ma trwały cooldown
+30 minut i tylko dodaje istniejące powiązanie do tej samej kolejki.
+
+Sukces Riot i synchronizacja Discord są zapisywane osobno. Błąd nadawania roli korzysta z trwałego
+retry na podstawie cache i nie ponawia zapytania Riot. Błędy sieciowe i 5xx mają wykładniczy backoff
+z jitterem 20%. Regionalny breaker nadal respektuje `Retry-After` po 429. Po 401 lub 403 globalny
+breaker zatrzymuje masową kolejkę i dopuszcza pojedynczą próbę kontrolną co 15 minut.
+
+Usuwanie powiązania najpierw zapisuje trwały stan oczekującego usunięcia. Ten stan blokuje nowe
+odświeżenia i synchronizacje ról dla rekordu. Bot usuwa rolę Zweryfikowany, sprząta wiadomość
+audytową i dopiero wtedy usuwa rekord. Błąd Discord jest ponawiany z bazy po restarcie, więc nie
+pozostawia aktywnego linku bez możliwości dokończenia operacji.
 
 ## 10. Monitoring Riot API i kolejki rang
 
@@ -162,13 +189,15 @@ Bot zapisuje co 5 minut pojedynczy raport ze statusem odpowiedzi Riot i kolejki 
 journalctl -u moon-poro-bot.service --since today --grep='Riot monitoring:'
 ```
 
-Liczniki odpowiedzi 429, 401, 403 i 5xx obejmują okres od ostatniego uruchomienia procesu. Długość
-kolejki, termin najstarszego zaległego sprawdzenia i jego opóźnienie są odczytywane na żywo z
-PostgreSQL. `last_successful_riot_response_utc` pokazuje czas ostatniej odpowiedzi 2xx. Częstotliwość
-raportu kontroluje `RIOT_MONITORING_INTERVAL_SECONDS`, domyślnie 300 sekund.
+Liczniki odpowiedzi 429, 401, 403 i 5xx obejmują okres od ostatniego uruchomienia procesu. Raport
+pokazuje także długość i wiek kolejki, klasy 6, 12 i 24 godziny, przewidywaną liczbę zapytań na dobę,
+p50, p95 i maksymalny wiek snapshotu, zmiany tieru, resety liczników, oczekujące potwierdzenia
+Unranked, retry ról Discord oraz stan breakera 401 i 403. `last_successful_riot_response_utc` pokazuje
+czas ostatniej odpowiedzi 2xx. Częstotliwość raportu kontroluje
+`RIOT_MONITORING_INTERVAL_SECONDS`, domyślnie 300 sekund.
 
 ## 11. Rollback
 
 Po problemie z RSO ustaw `VERIFICATION_MODE=legacy_icon`, zatrzymaj `moon-poro-rso` i opublikuj panel
-weryfikacji ikoną. Nie cofaj migracji `20260810_0002` ani `20260814_0003`, jeżeli istnieją już
-rekordy produkcyjne. Problem analizuj na kopii bazy.
+weryfikacji ikoną. Nie cofaj migracji `20260810_0002`, `20260814_0003` ani `20260815_0005`, jeżeli
+istnieją już rekordy produkcyjne. Problem analizuj na kopii bazy.
