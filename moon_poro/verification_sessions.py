@@ -222,6 +222,8 @@ class VerificationSessionRepository:
                         message_id=None,
                         platform=platform,
                         puuid=puuid,
+                        riot_game_name=game_name[:100],
+                        riot_tag_line=tag_line[:20],
                         verification_method="RSO",
                         rank_next_refresh_at=now + timedelta(hours=24),
                         created_at=now,

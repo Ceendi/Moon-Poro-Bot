@@ -72,6 +72,8 @@ class VerificationLink(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     platform: Mapped[str] = mapped_column(String(10), nullable=False)
     puuid: Mapped[str | None] = mapped_column(String(255))
+    riot_game_name: Mapped[str | None] = mapped_column(String(100))
+    riot_tag_line: Mapped[str | None] = mapped_column(String(20))
     verification_method: Mapped[str] = mapped_column(String(32), default="PROFILE_ICON")
     last_known_rank: Mapped[str | None] = mapped_column(String(32))
     last_known_division: Mapped[str | None] = mapped_column(String(4))

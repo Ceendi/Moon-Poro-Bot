@@ -96,6 +96,8 @@ async def test_migrations_and_repositories_against_postgres(
         assert {"role_sync_pending", "audit_sync_pending"} <= warning_columns
         assert "ix_warnings_pending_sync" in warning_indexes
         assert {
+            "riot_game_name",
+            "riot_tag_line",
             "last_known_division",
             "last_known_league_points",
             "last_known_wins",
@@ -121,9 +123,12 @@ async def test_migrations_and_repositories_against_postgres(
             message_id=201,
             platform="EUN1",
             puuid="integration-puuid",
+            riot_game_name="Moon Poro",
+            riot_tag_line="EUNE",
         )
         assert await verifications.get_by_user(guild_id, 101) is not None
         assert (await verifications.get_by_puuid(guild_id, "integration-puuid")).message_id == 201
+        assert (created.riot_game_name, created.riot_tag_line) == ("Moon Poro", "EUNE")
         assert [link.discord_user_id for link in await verifications.list_for_guild(guild_id)] == [
             101
         ]
@@ -512,6 +517,26 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
             "expected_platform": old.platform,
             "expected_created_at": old.created_at,
         }
+        stale_refresh = await repository.request_rank_refresh(
+            guild_id,
+            703,
+            cooldown_seconds=1800,
+            source="user",
+            expected_puuid=old.puuid or "",
+            expected_platform=old.platform,
+            expected_created_at=old.created_at,
+        )
+        assert stale_refresh.status == RankRefreshRequestStatus.LINK_CHANGED
+        assert (
+            await repository.request_verification_deletion(
+                guild_id,
+                703,
+                expected_puuid=old.puuid or "",
+                expected_platform=old.platform,
+                expected_created_at=old.created_at,
+            )
+            is None
+        )
         assert (
             await repository.retry_rank_refresh(
                 guild_id,
@@ -539,6 +564,8 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
         current = await repository.get_by_user(guild_id, 703)
         assert current is not None
         assert current.created_at == new.created_at
+        assert current.rank_user_refresh_requested_at is None
+        assert current.deletion_requested_at is None
         assert current.rank_refresh_failures == 0
         assert current.rank_refresh_claimed_at == claim_marker
         assert current.rank_next_refresh_at == next_refresh
