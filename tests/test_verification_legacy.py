@@ -462,16 +462,13 @@ async def test_remove_own_verification_deletes_link_and_audit_only(
     )
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = bot
-    remove = AsyncMock(return_value="Usunięto powiązanie konta Riot.")
-    monkeypatch.setattr(verification_legacy, "_remove_user_verification", remove)
+    show_confirmation = AsyncMock()
+    monkeypatch.setattr(verification_legacy, "_show_delete_confirmation", show_confirmation)
 
     await LegacyVerificationCog.remove_own_verification.callback(cog, interaction)
 
-    remove.assert_awaited_once_with(bot, interaction)
-    response.send_message.assert_awaited_once_with(
-        "Usunięto powiązanie konta Riot.",
-        ephemeral=True,
-    )
+    show_confirmation.assert_awaited_once_with(bot, interaction)
+    response.send_message.assert_not_awaited()
 
 
 async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
@@ -556,6 +553,8 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
 
     verifications.create.assert_awaited_once()
     assert verifications.create.await_args.kwargs["rank_snapshot"] == RankSnapshot("EMERALD")
+    assert verifications.create.await_args.kwargs["riot_game_name"] == "Moon"
+    assert verifications.create.await_args.kwargs["riot_tag_line"] == "EUNE"
     verifications.retry_rank_role_sync.assert_awaited_once_with(
         123,
         101,

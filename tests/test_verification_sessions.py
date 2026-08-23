@@ -66,6 +66,8 @@ async def test_complete_rso_lifecycle(
         channel_id=654,
     )
     stored = await session_repository.get_by_start_token(created.token)
+    async with session_repository._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
 
     assert result == LinkReservationResult.RESERVED
     assert completed is True
@@ -73,6 +75,9 @@ async def test_complete_rso_lifecycle(
     assert stored.status == VerificationSessionStatus.COMPLETED.value
     assert stored.riot_game_name == "Moon"
     assert stored.error_code is None
+    assert link is not None
+    assert link.riot_game_name == "Moon"
+    assert link.riot_tag_line == "EUNE"
 
 
 async def test_new_session_supersedes_previous_link(

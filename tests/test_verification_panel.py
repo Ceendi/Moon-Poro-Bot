@@ -1,16 +1,19 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from moon_poro.cogs import verification
+from moon_poro.account_profile import build_account_profile
+from moon_poro.cogs import verification, verification_legacy
 from moon_poro.cogs.verification import (
+    AccountProfileView,
     DeleteVerificationConfirmationView,
     VerificationCog,
     VerificationStartView,
     _remove_user_verification,
     _request_rank_refresh_from_panel,
+    _show_account_profile,
     _show_delete_confirmation,
 )
 from moon_poro.cogs.verification_legacy import (
@@ -37,8 +40,36 @@ def _panel_bot() -> SimpleNamespace:
             verification_global_rate_limit=4,
             verification_global_rate_period_seconds=10,
             rank_refresh_button_cooldown_seconds=1800,
-        )
+            rank_refresh_claim_timeout_seconds=300,
+        ),
+        riot_auth_breaker=SimpleNamespace(
+            snapshot=Mock(return_value=SimpleNamespace(blocked=False))
+        ),
     )
+
+
+def _profile_link(**overrides: object) -> SimpleNamespace:
+    now = datetime.now(UTC)
+    values: dict[str, object] = {
+        "platform": "EUN1",
+        "puuid": "puuid-101",
+        "created_at": now - timedelta(days=30),
+        "riot_game_name": "Moon Poro",
+        "riot_tag_line": "EUNE",
+        "last_known_rank": "EMERALD",
+        "last_known_division": "II",
+        "last_known_league_points": 42,
+        "last_known_wins": 20,
+        "last_known_losses": 10,
+        "rank_last_checked_at": now - timedelta(hours=1),
+        "rank_refresh_claimed_at": None,
+        "rank_next_refresh_at": now + timedelta(hours=6),
+        "rank_refresh_failures": 0,
+        "rank_user_refresh_requested_at": None,
+        "deletion_requested_at": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
@@ -51,19 +82,72 @@ def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
     assert legacy_view.timeout is None
     assert {item.custom_id for item in rso_view.children} == {
         "verification:start:rso:v1",
+        "verification:account-profile:v1",
         "verification:rank-refresh:v1",
         "verification:delete:v1",
     }
     assert {item.custom_id for item in legacy_view.children} == {
         "verification:start:profile-icon:v1",
+        "verification:account-profile:v1",
         "verification:rank-refresh:v1",
         "verification:delete:v1",
     }
     assert [item.label for item in rso_view.children] == [
         "Zweryfikuj konto",
+        "Moje konto",
         "Odśwież rangę",
         "Usuń weryfikację",
     ]
+
+
+def test_profile_commands_are_guild_only() -> None:
+    assert VerificationCog.profile.guild_only is True
+    assert LegacyVerificationCog.profile.guild_only is True
+
+
+async def test_both_panels_open_profile_through_the_shared_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    limiter = LegacyVerificationRateLimiter(global_rate=4, global_period_seconds=10)
+    rso_view = VerificationStartView(bot)
+    legacy_view = LegacyVerificationStartView(bot, limiter)
+    rso_handler = AsyncMock()
+    legacy_handler = AsyncMock()
+    monkeypatch.setattr(verification, "_show_account_profile", rso_handler)
+    monkeypatch.setattr(verification_legacy, "_show_account_profile", legacy_handler)
+    interaction = SimpleNamespace()
+
+    rso_button = next(
+        item for item in rso_view.children if item.custom_id == "verification:account-profile:v1"
+    )
+    legacy_button = next(
+        item for item in legacy_view.children if item.custom_id == "verification:account-profile:v1"
+    )
+    await rso_button.callback(interaction)
+    await legacy_button.callback(interaction)
+
+    assert rso_handler.await_args.args == (bot, interaction)
+    assert rso_handler.await_args.kwargs["start_verification"].__self__ is rso_view
+    assert legacy_handler.await_args.args == (bot, interaction)
+    assert legacy_handler.await_args.kwargs["start_verification"].__self__ is legacy_view
+
+
+async def test_profile_command_uses_the_same_handler_as_the_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    cog = object.__new__(VerificationCog)
+    cog.bot = bot
+    cog.rso_start_view = VerificationStartView(bot)
+    handler = AsyncMock()
+    monkeypatch.setattr(verification, "_show_account_profile", handler)
+    interaction = SimpleNamespace()
+
+    await VerificationCog.profile.callback(cog, interaction)
+
+    assert handler.await_args.args == (bot, interaction)
+    assert handler.await_args.kwargs["start_verification"].__self__ is cog.rso_start_view
 
 
 async def test_rso_persistent_start_rejects_another_guild() -> None:
@@ -111,6 +195,7 @@ async def test_rso_publishes_short_factual_embed() -> None:
     bot.settings.rso_base_url = "https://moonporo.pl"
     cog = object.__new__(VerificationCog)
     cog.bot = bot
+    cog.rso_start_view = VerificationStartView(bot)
     interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock()))
 
     await VerificationCog.publish_verification.callback(cog, interaction)
@@ -127,6 +212,7 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = bot
     cog.rate_limiter = LegacyVerificationRateLimiter(global_rate=4, global_period_seconds=10)
+    cog.legacy_start_view = LegacyVerificationStartView(bot, cog.rate_limiter)
     interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock()))
 
     await LegacyVerificationCog.publish_verification.callback(cog, interaction)
@@ -138,6 +224,183 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
     assert isinstance(kwargs["view"], LegacyVerificationStartView)
 
 
+async def test_profile_is_ephemeral_and_owner_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    link = _profile_link()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=link))
+    starter = AsyncMock()
+    member = FakeMember(101)
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=member,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    await _show_account_profile(
+        bot,
+        interaction,
+        start_verification=starter,
+    )
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
+    kwargs = interaction.edit_original_response.await_args.kwargs
+    assert kwargs["embed"].title == "Moje konto"
+    assert kwargs["embed"].fields[0].value == "Moon Poro#EUNE"
+    view = kwargs["view"]
+    assert isinstance(view, AccountProfileView)
+    assert view.owner_id == 101
+    assert view.timeout == 300
+    assert [item.label for item in view.children] == [
+        "Odśwież rangę",
+        "Usuń powiązanie",
+    ]
+
+    foreign_interaction = SimpleNamespace(
+        user=SimpleNamespace(id=202),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+    assert await view.interaction_check(foreign_interaction) is False
+    foreign_interaction.response.send_message.assert_awaited_once_with(
+        "Ten profil należy do innego użytkownika.", ephemeral=True
+    )
+
+
+async def test_unverified_profile_only_reuses_active_verification_provider() -> None:
+    bot = _panel_bot()
+    starter = AsyncMock()
+    presentation = build_account_profile(None)
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=presentation,
+        link=None,
+        start_verification=starter,
+    )
+
+    assert [item.label for item in view.children] == ["Zweryfikuj konto"]
+    interaction = SimpleNamespace()
+    await view.children[0].callback(interaction)
+
+    starter.assert_awaited_once_with(interaction)
+
+
+async def test_profile_refresh_reuses_queue_identity_and_rerenders_same_message() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(RankRefreshRequestStatus.ENQUEUED)
+        ),
+        get_by_user=AsyncMock(return_value=queued),
+    )
+    starter = AsyncMock()
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=starter,
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    interaction.response.defer.assert_awaited_once_with()
+    bot.verifications.request_rank_refresh.assert_awaited_once_with(
+        123,
+        101,
+        cooldown_seconds=1800,
+        source="user",
+        expected_puuid=original.puuid,
+        expected_platform=original.platform,
+        expected_created_at=original.created_at,
+    )
+    bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
+    kwargs = interaction.edit_original_response.await_args.kwargs
+    assert kwargs["embed"].description == "Odświeżenie czeka w kolejce."
+    assert isinstance(kwargs["view"], AccountProfileView)
+    assert kwargs["view"].children[0].disabled is False
+
+
+async def test_stale_profile_refresh_does_not_render_the_new_link() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(RankRefreshRequestStatus.LINK_CHANGED)
+        ),
+        get_by_user=AsyncMock(),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    bot.verifications.get_by_user.assert_not_awaited()
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        embed=None,
+        view=None,
+    )
+
+
+async def test_profile_delete_passes_captured_identity_to_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    link = _profile_link()
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, link),
+        link=link,
+        start_verification=AsyncMock(),
+    )
+    show_confirmation = AsyncMock()
+    monkeypatch.setattr(verification, "_show_delete_confirmation", show_confirmation)
+    interaction = SimpleNamespace()
+
+    delete = next(item for item in view.children if item.custom_id == "account-profile:delete:v1")
+    await delete.callback(interaction)
+
+    show_confirmation.assert_awaited_once_with(
+        bot,
+        interaction,
+        expected_puuid=link.puuid,
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "fragment"),
     [
@@ -145,6 +408,7 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
         (RankRefreshRequestStatus.ALREADY_DUE, "już w kolejce"),
         (RankRefreshRequestStatus.ALREADY_CLAIMED, "już trwa"),
         (RankRefreshRequestStatus.BACKOFF_ACTIVE, "automatycznie"),
+        (RankRefreshRequestStatus.LINK_CHANGED, "zmieniło się"),
         (RankRefreshRequestStatus.NOT_LINKED, "Najpierw zweryfikuj"),
     ],
 )
@@ -205,7 +469,8 @@ async def test_delete_button_requires_ephemeral_confirmation(
 ) -> None:
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     bot = _panel_bot()
-    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=object()))
+    link = _profile_link()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=link))
     interaction = SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
@@ -216,9 +481,58 @@ async def test_delete_button_requires_ephemeral_confirmation(
 
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["ephemeral"] is True
+    assert (
+        "Role regionu, rangi i użytkownika pozostaną bez zmian."
+        in (interaction.response.send_message.await_args.args[0])
+    )
     view = kwargs["view"]
     assert isinstance(view, DeleteVerificationConfirmationView)
+    assert view.expected_puuid == link.puuid
+    assert view.expected_platform == link.platform
+    assert view.expected_created_at == link.created_at
     assert {item.label for item in view.children} == {"Tak, usuń powiązanie", "Anuluj"}
+
+
+async def test_delete_rejects_a_profile_for_an_old_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    current = _profile_link(puuid="new-puuid")
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=current))
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await _show_delete_confirmation(
+        bot,
+        interaction,
+        expected_puuid="old-puuid",
+        expected_platform="EUN1",
+        expected_created_at=current.created_at,
+    )
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        ephemeral=True,
+    )
+
+
+async def test_remove_command_uses_the_same_confirmation_as_the_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    cog = object.__new__(VerificationCog)
+    cog.bot = bot
+    show_confirmation = AsyncMock()
+    monkeypatch.setattr(verification, "_show_delete_confirmation", show_confirmation)
+    interaction = SimpleNamespace()
+
+    await VerificationCog.remove_own_verification.callback(cog, interaction)
+
+    show_confirmation.assert_awaited_once_with(bot, interaction)
 
 
 async def test_delete_confirmation_calls_the_shared_removal_once(
@@ -227,17 +541,68 @@ async def test_delete_confirmation_calls_the_shared_removal_once(
     bot = _panel_bot()
     remove = AsyncMock(return_value="Usunięto.")
     monkeypatch.setattr(verification, "_remove_user_verification", remove)
-    view = DeleteVerificationConfirmationView(bot, owner_id=101)
+    created_at = datetime.now(UTC)
+    view = DeleteVerificationConfirmationView(
+        bot,
+        owner_id=101,
+        expected_puuid="puuid-101",
+        expected_platform="EUN1",
+        expected_created_at=created_at,
+    )
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=101),
         response=SimpleNamespace(edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
     )
     confirm = next(item for item in view.children if item.custom_id.endswith(":confirm:v1"))
 
     await confirm.callback(interaction)
 
-    remove.assert_awaited_once_with(bot, interaction)
-    interaction.response.edit_message.assert_awaited_once_with(content="Usunięto.", view=None)
+    interaction.response.edit_message.assert_awaited_once_with(
+        content="Usuwam powiązanie…", view=None
+    )
+    remove.assert_awaited_once_with(
+        bot,
+        interaction,
+        expected_puuid="puuid-101",
+        expected_platform="EUN1",
+        expected_created_at=created_at,
+    )
+    interaction.edit_original_response.assert_awaited_once_with(content="Usunięto.", view=None)
+
+
+async def test_delete_confirmation_hides_unexpected_internal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    monkeypatch.setattr(
+        verification,
+        "_remove_user_verification",
+        AsyncMock(side_effect=RuntimeError("database details")),
+    )
+    view = DeleteVerificationConfirmationView(
+        bot,
+        owner_id=101,
+        expected_puuid="puuid-101",
+        expected_platform="EUN1",
+        expected_created_at=datetime.now(UTC),
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=101),
+        response=SimpleNamespace(edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    confirm = next(item for item in view.children if item.custom_id.endswith(":confirm:v1"))
+
+    await confirm.callback(interaction)
+
+    interaction.response.edit_message.assert_awaited_once_with(
+        content="Usuwam powiązanie…", view=None
+    )
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Nie udało się zakończyć usuwania. Spróbuj ponownie.",
+        view=None,
+    )
 
 
 async def test_shared_delete_keeps_region_rank_and_member_roles(

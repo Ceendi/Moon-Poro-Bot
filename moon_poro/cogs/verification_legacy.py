@@ -24,10 +24,10 @@ from moon_poro.cogs.verification import (
     _get_leagues,
     _reconcile_applied_roles,
     _reconcile_cached_role_change,
-    _remove_user_verification,
     _remove_verified_marker,
     _request_rank_refresh_from_panel,
     _restore_cached_roles_on_join,
+    _show_account_profile,
     _show_delete_confirmation,
 )
 from moon_poro.permissions import administrator_only
@@ -163,6 +163,9 @@ class LegacyVerificationStartView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[LegacyVerificationStartView],
     ) -> None:
+        await self.begin_verification(interaction)
+
+    async def begin_verification(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
                 "Ten panel nie należy do skonfigurowanego serwera.", ephemeral=True
@@ -191,6 +194,23 @@ class LegacyVerificationStartView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(LegacyVerificationModal(self.bot, self.rate_limiter))
+
+    @discord.ui.button(
+        label="Moje konto",
+        emoji="👤",
+        style=discord.ButtonStyle.secondary,
+        custom_id="verification:account-profile:v1",
+    )
+    async def account_profile(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[LegacyVerificationStartView],
+    ) -> None:
+        await _show_account_profile(
+            self.bot,
+            interaction,
+            start_verification=self.begin_verification,
+        )
 
     @discord.ui.button(
         label="Odśwież rangę",
@@ -589,6 +609,8 @@ class LegacyIconConfirmationView(discord.ui.View):
                 platform=self.platform,
                 puuid=self.puuid,
                 method="PROFILE_ICON",
+                riot_game_name=self.game_name,
+                riot_tag_line=self.tag_line,
                 rank_tier=get_rank_from_leagues(leagues).upper(),
                 rank_snapshot=solo_rank_snapshot(leagues),
                 refresh_interval_hours=self.bot.settings.rank_refresh_interval_hours,
@@ -688,7 +710,8 @@ class LegacyVerificationCog(VerificationCog):
             global_rate=bot.settings.verification_global_rate_limit,
             global_period_seconds=bot.settings.verification_global_rate_period_seconds,
         )
-        bot.add_view(LegacyVerificationStartView(bot, self.rate_limiter))
+        self.legacy_start_view = LegacyVerificationStartView(bot, self.rate_limiter)
+        bot.add_view(self.legacy_start_view)
         self.refresh_verified.change_interval(
             seconds=bot.settings.rank_refresh_worker_interval_seconds
         )
@@ -746,7 +769,7 @@ class LegacyVerificationCog(VerificationCog):
         embed.set_footer(text="Kliknij Zweryfikuj konto, aby rozpocząć.")
         await interaction.response.send_message(
             embed=embed,
-            view=LegacyVerificationStartView(self.bot, self.rate_limiter),
+            view=self.legacy_start_view,
         )
 
     @app_commands.command(
@@ -755,8 +778,18 @@ class LegacyVerificationCog(VerificationCog):
     async def remove_own_verification(  # type: ignore[override]
         self, interaction: discord.Interaction
     ) -> None:
-        message = await _remove_user_verification(self.bot, interaction)
-        await interaction.response.send_message(message, ephemeral=True)
+        await _show_delete_confirmation(self.bot, interaction)
+
+    @app_commands.command(name="profil", description="Pokazuje Twoje konto Riot")
+    @app_commands.guild_only()
+    async def profile(  # type: ignore[override]
+        self, interaction: discord.Interaction
+    ) -> None:
+        await _show_account_profile(
+            self.bot,
+            interaction,
+            start_verification=self.legacy_start_view.begin_verification,
+        )
 
 
 async def setup(bot: MoonPoroBot) -> None:

@@ -32,6 +32,7 @@ class RankRefreshRequestStatus(StrEnum):
     ALREADY_CLAIMED = "ALREADY_CLAIMED"
     BACKOFF_ACTIVE = "BACKOFF_ACTIVE"
     COOLDOWN = "COOLDOWN"
+    LINK_CHANGED = "LINK_CHANGED"
     NOT_LINKED = "NOT_LINKED"
 
 
@@ -96,6 +97,8 @@ class VerificationRepository:
         message_id: int,
         platform: str,
         puuid: str,
+        riot_game_name: str | None = None,
+        riot_tag_line: str | None = None,
         method: str = "PROFILE_ICON",
         rank_tier: str | None = None,
         rank_snapshot: RankSnapshot | None = None,
@@ -111,6 +114,8 @@ class VerificationRepository:
             message_id=message_id,
             platform=platform,
             puuid=puuid,
+            riot_game_name=riot_game_name,
+            riot_tag_line=riot_tag_line,
             verification_method=method,
             last_known_rank=snapshot.tier if snapshot is not None else None,
             last_known_division=snapshot.division if snapshot is not None else None,
@@ -425,6 +430,9 @@ class VerificationRepository:
         *,
         cooldown_seconds: int,
         source: str,
+        expected_puuid: str | None = None,
+        expected_platform: str | None = None,
+        expected_created_at: datetime | None = None,
     ) -> RankRefreshRequestResult:
         if source not in {"user", "role_tamper"}:
             raise ValueError("source must be user or role_tamper")
@@ -442,6 +450,13 @@ class VerificationRepository:
             )
             if link is None or link.puuid is None or link.deletion_requested_at is not None:
                 return RankRefreshRequestResult(RankRefreshRequestStatus.NOT_LINKED)
+            if not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+            ):
+                return RankRefreshRequestResult(RankRefreshRequestStatus.LINK_CHANGED)
             requested_at = cast(datetime | None, getattr(link, timestamp_name))
             if requested_at is not None:
                 retry_after = cooldown_seconds - int((now - requested_at).total_seconds())
@@ -630,6 +645,10 @@ class VerificationRepository:
         self,
         guild_id: int,
         user_id: int,
+        *,
+        expected_puuid: str | None = None,
+        expected_platform: str | None = None,
+        expected_created_at: datetime | None = None,
     ) -> VerificationLink | None:
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
@@ -639,6 +658,14 @@ class VerificationRepository:
                 with_for_update=True,
             )
             if link is None:
+                return None
+            if not _link_identity_matches(
+                link,
+                expected_puuid=expected_puuid,
+                expected_platform=expected_platform,
+                expected_created_at=expected_created_at,
+                allow_deleting=True,
+            ):
                 return None
             link.deletion_requested_at = link.deletion_requested_at or now
             link.deletion_claimed_at = now

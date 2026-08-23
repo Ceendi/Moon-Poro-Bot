@@ -45,6 +45,7 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
             "nr",
             "pbr",
             "pr",
+            "profil",
             "przyznawanie_roli",
             "show_wer_discord",
             "show_wer_user",
@@ -106,6 +107,7 @@ async def test_legacy_verification_reuses_current_management_commands() -> None:
         await bot.load_extension("moon_poro.cogs.verification_legacy")
         commands = {command.name for command in bot.tree.get_commands()}
         assert commands == {
+            "profil",
             "show_wer_discord",
             "show_wer_user",
             "usun_wer_nick",

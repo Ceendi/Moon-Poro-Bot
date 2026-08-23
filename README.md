@@ -10,6 +10,7 @@ moderator statistics.
 ## Features
 
 - Riot Sign On verification and automatic Solo/Duo rank synchronization;
+- a private self-service Riot account profile through `/profil` and the verification panel;
 - persistent role selection panels;
 - versioned moderation warnings with escalation, rollback, and automatic expiration;
 - monthly moderation statistics;
