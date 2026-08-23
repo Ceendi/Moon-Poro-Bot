@@ -145,3 +145,34 @@ async def test_matching_identity_and_omitted_identity_preserve_existing_semantic
     assert deletion is not None
     assert deletion.deletion_requested_at is not None
     assert blocked_refresh.status == RankRefreshRequestStatus.NOT_LINKED
+
+
+async def test_rank_refresh_request_returns_snapshot_baseline_from_locked_link(
+    verification_repository: VerificationRepository,
+) -> None:
+    link = await verification_repository.create(
+        guild_id=123,
+        user_id=101,
+        message_id=201,
+        platform="EUN1",
+        puuid="current-puuid",
+        rank_snapshot=RankSnapshot("EMERALD"),
+    )
+    async with verification_repository._sessions.begin() as session:
+        stored = await session.get(VerificationLink, (123, 101), with_for_update=True)
+        assert stored is not None
+        stored.rank_refresh_claimed_at = datetime.now(UTC)
+
+    result = await verification_repository.request_rank_refresh(
+        123,
+        101,
+        cooldown_seconds=1800,
+        source="user",
+        expected_puuid=link.puuid,
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+    )
+
+    assert result.status is RankRefreshRequestStatus.ALREADY_CLAIMED
+    assert result.baseline_rank_last_checked_at is not None
+    assert result.baseline_rank_last_checked_at.replace(tzinfo=UTC) == link.rank_last_checked_at
