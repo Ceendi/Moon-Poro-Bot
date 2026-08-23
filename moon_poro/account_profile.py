@@ -10,26 +10,14 @@ from typing import Final, Protocol
 
 import discord
 
+from moon_poro.riot import RANK_TO_ROLE
+
 REFRESH_BUTTON_LABEL: Final = "Odśwież rangę"
 
 _REGION_LABELS: Final = {
     "EUN1": "EUNE",
     "EUW1": "EUW",
     "NA1": "NA",
-}
-
-_RANK_LABELS: Final = {
-    "IRON": "Iron",
-    "BRONZE": "Bronze",
-    "SILVER": "Silver",
-    "GOLD": "Gold",
-    "PLATINUM": "Platinum",
-    "EMERALD": "Emerald",
-    "DIAMOND": "Diamond",
-    "MASTER": "Master",
-    "GRANDMASTER": "Grandmaster",
-    "CHALLENGER": "Challenger",
-    "UNRANKED": "Brak rangi",
 }
 
 
@@ -254,9 +242,11 @@ def _rank_label(link: VerificationLinkLike) -> str:
     if link.last_known_rank is None or not link.last_known_rank.strip():
         return "Brak danych"
     tier = link.last_known_rank.strip().upper()
-    label = _RANK_LABELS.get(tier, tier.replace("_", " ").title())
     if tier == "UNRANKED":
-        return label
+        return "Brak rangi"
+    label = RANK_TO_ROLE.get(tier, tier.replace("_", " ").title())
+    if tier == "GRANDMASTER":
+        label = "Grandmaster"
     division = (link.last_known_division or "").strip().upper()
     return f"{label} {division}".strip()
 

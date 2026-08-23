@@ -176,6 +176,17 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     assert fields["Win rate"] == "—"
 
 
+def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
+    profile = build_account_profile(
+        _link(last_known_rank="GRANDMASTER", last_known_division=None),
+        riot_id="Poro#EUNE",
+        now=NOW,
+    )
+    fields = {field.name: field.value for field in profile.embed.fields}
+
+    assert fields["Solo/Duo"] == "Grandmaster"
+
+
 def test_missing_cache_is_described_without_a_riot_call() -> None:
     profile = build_account_profile(
         _link(
