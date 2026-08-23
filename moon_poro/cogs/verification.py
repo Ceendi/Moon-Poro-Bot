@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,6 +11,11 @@ from discord import app_commands
 from discord.app_commands import Choice
 from discord.ext import commands, tasks
 
+from moon_poro.account_profile import (
+    AccountProfilePresentation,
+    AccountProfileState,
+    build_account_profile,
+)
 from moon_poro.bot import MoonPoroBot
 from moon_poro.models import VerificationLink, VerificationSession
 from moon_poro.permissions import administrator_only
@@ -35,6 +41,7 @@ logger = logging.getLogger("moon_poro.verification")
 
 type RiotPayload = dict[str, Any]
 type LeagueEntries = list[RiotPayload]
+type VerificationStarter = Callable[[discord.Interaction], Awaitable[None]]
 
 
 def _lookup_reason_choices() -> list[Choice[str]]:
@@ -803,10 +810,24 @@ def _timestamp_is_older_than(value: datetime | None, age: timedelta) -> bool:
 async def _remove_user_verification(
     bot: MoonPoroBot,
     interaction: discord.Interaction,
+    *,
+    expected_puuid: str | None = None,
+    expected_platform: str | None = None,
+    expected_created_at: datetime | None = None,
 ) -> str:
     guild_id = interaction.guild_id or 0
-    link = await bot.verifications.request_verification_deletion(guild_id, interaction.user.id)
+    link = await bot.verifications.request_verification_deletion(
+        guild_id,
+        interaction.user.id,
+        expected_puuid=expected_puuid,
+        expected_platform=expected_platform,
+        expected_created_at=expected_created_at,
+    )
     if link is None:
+        if any(
+            value is not None for value in (expected_puuid, expected_platform, expected_created_at)
+        ):
+            return "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."
         return "Nie masz zapisanego powiązania z kontem Riot."
     member = interaction.user if isinstance(interaction.user, discord.Member) else None
     completed = await _process_requested_verification_deletion(
@@ -942,6 +963,9 @@ async def _request_rank_refresh_from_panel(
         RankRefreshRequestStatus.BACKOFF_ACTIVE: (
             "Riot API jest chwilowo niedostępne. Odświeżenie wykona się automatycznie."
         ),
+        RankRefreshRequestStatus.LINK_CHANGED: (
+            "Powiązanie konta zmieniło się. Otwórz profil ponownie."
+        ),
         RankRefreshRequestStatus.NOT_LINKED: ("Najpierw zweryfikuj konto Riot na tym serwerze."),
     }
     if result.status == RankRefreshRequestStatus.COOLDOWN:
@@ -952,11 +976,204 @@ async def _request_rank_refresh_from_panel(
     await interaction.response.send_message(message, ephemeral=True)
 
 
+def _riot_id_from_link(link: VerificationLink | None) -> str | None:
+    if link is None:
+        return None
+    game_name = getattr(link, "riot_game_name", None)
+    tag_line = getattr(link, "riot_tag_line", None)
+    if not game_name or not tag_line:
+        return None
+    return f"{game_name}#{tag_line}"
+
+
+def _build_account_profile(
+    bot: MoonPoroBot,
+    link: VerificationLink | None,
+) -> AccountProfilePresentation:
+    return build_account_profile(
+        link,
+        riot_id=_riot_id_from_link(link),
+        manual_refresh_cooldown_seconds=(bot.settings.rank_refresh_button_cooldown_seconds),
+        rank_refresh_claim_timeout_seconds=(bot.settings.rank_refresh_claim_timeout_seconds),
+        riot_authorization_unavailable=bot.riot_auth_breaker.snapshot().blocked,
+    )
+
+
+class AccountProfileView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MoonPoroBot,
+        *,
+        owner_id: int,
+        presentation: AccountProfilePresentation,
+        link: VerificationLink | None,
+        start_verification: VerificationStarter,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.presentation = presentation
+        self.start_verification = start_verification
+        self.expected_puuid = link.puuid if link is not None else None
+        self.expected_platform = link.platform if link is not None else None
+        self.expected_created_at = link.created_at if link is not None else None
+
+        if presentation.state is AccountProfileState.UNVERIFIED:
+            self.remove_item(self.refresh_rank)
+            self.remove_item(self.remove_verification)
+        elif presentation.state is AccountProfileState.DELETING:
+            self.clear_items()
+        else:
+            self.remove_item(self.verify_account)
+            self.refresh_rank.label = presentation.refresh_button_label
+            self.refresh_rank.disabled = not presentation.refresh_enabled
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "Ten profil należy do innego użytkownika.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(
+        label="Zweryfikuj konto",
+        emoji="✅",
+        style=discord.ButtonStyle.green,
+        custom_id="account-profile:verify:v1",
+    )
+    async def verify_account(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[AccountProfileView],
+    ) -> None:
+        await self.start_verification(interaction)
+
+    @discord.ui.button(
+        label="Odśwież rangę",
+        emoji="🔄",
+        style=discord.ButtonStyle.blurple,
+        custom_id="account-profile:rank-refresh:v1",
+    )
+    async def refresh_rank(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[AccountProfileView],
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            if (
+                self.expected_puuid is not None
+                and self.expected_platform is not None
+                and self.expected_created_at is not None
+            ):
+                result = await self.bot.verifications.request_rank_refresh(
+                    interaction.guild_id or 0,
+                    self.owner_id,
+                    cooldown_seconds=(self.bot.settings.rank_refresh_button_cooldown_seconds),
+                    source="user",
+                    expected_puuid=self.expected_puuid,
+                    expected_platform=self.expected_platform,
+                    expected_created_at=self.expected_created_at,
+                )
+                if result.status is RankRefreshRequestStatus.LINK_CHANGED:
+                    await interaction.edit_original_response(
+                        content=("Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."),
+                        embed=None,
+                        view=None,
+                    )
+                    return
+            link = await self.bot.verifications.get_by_user(
+                interaction.guild_id or 0,
+                self.owner_id,
+            )
+            presentation = _build_account_profile(self.bot, link)
+            view = AccountProfileView(
+                self.bot,
+                owner_id=self.owner_id,
+                presentation=presentation,
+                link=link,
+                start_verification=self.start_verification,
+            )
+            await interaction.edit_original_response(
+                embed=presentation.embed,
+                view=view,
+            )
+        except Exception:
+            logger.exception("Could not refresh account profile for %s", self.owner_id)
+            await interaction.edit_original_response(
+                content="Nie udało się odświeżyć widoku. Spróbuj ponownie.",
+                view=self,
+            )
+
+    @discord.ui.button(
+        label="Usuń powiązanie",
+        emoji="🗑️",
+        style=discord.ButtonStyle.red,
+        custom_id="account-profile:delete:v1",
+    )
+    async def remove_verification(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[AccountProfileView],
+    ) -> None:
+        await _show_delete_confirmation(
+            self.bot,
+            interaction,
+            expected_puuid=self.expected_puuid,
+            expected_platform=self.expected_platform,
+            expected_created_at=self.expected_created_at,
+        )
+
+
+async def _show_account_profile(
+    bot: MoonPoroBot,
+    interaction: discord.Interaction,
+    *,
+    start_verification: VerificationStarter,
+) -> None:
+    if interaction.guild_id != bot.settings.guild_id or not isinstance(
+        interaction.user, discord.Member
+    ):
+        await interaction.response.send_message(
+            "Profil otworzysz na skonfigurowanym serwerze.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        link = await bot.verifications.get_by_user(interaction.guild_id, interaction.user.id)
+        presentation = _build_account_profile(bot, link)
+        view = AccountProfileView(
+            bot,
+            owner_id=interaction.user.id,
+            presentation=presentation,
+            link=link,
+            start_verification=start_verification,
+        )
+        await interaction.edit_original_response(embed=presentation.embed, view=view)
+    except Exception:
+        logger.exception("Could not open account profile for %s", interaction.user.id)
+        await interaction.edit_original_response(
+            content="Nie udało się otworzyć profilu. Spróbuj ponownie."
+        )
+
+
 class DeleteVerificationConfirmationView(discord.ui.View):
-    def __init__(self, bot: MoonPoroBot, *, owner_id: int) -> None:
+    def __init__(
+        self,
+        bot: MoonPoroBot,
+        *,
+        owner_id: int,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+    ) -> None:
         super().__init__(timeout=60)
         self.bot = bot
         self.owner_id = owner_id
+        self.expected_puuid = expected_puuid
+        self.expected_platform = expected_platform
+        self.expected_created_at = expected_created_at
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -976,8 +1193,19 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[DeleteVerificationConfirmationView],
     ) -> None:
-        message = await _remove_user_verification(self.bot, interaction)
-        await interaction.response.edit_message(content=message, view=None)
+        await interaction.response.edit_message(content="Usuwam powiązanie…", view=None)
+        try:
+            message = await _remove_user_verification(
+                self.bot,
+                interaction,
+                expected_puuid=self.expected_puuid,
+                expected_platform=self.expected_platform,
+                expected_created_at=self.expected_created_at,
+            )
+        except Exception:
+            logger.exception("Could not remove verification for %s", self.owner_id)
+            message = "Nie udało się zakończyć usuwania. Spróbuj ponownie."
+        await interaction.edit_original_response(content=message, view=None)
 
     @discord.ui.button(
         label="Anuluj",
@@ -995,6 +1223,10 @@ class DeleteVerificationConfirmationView(discord.ui.View):
 async def _show_delete_confirmation(
     bot: MoonPoroBot,
     interaction: discord.Interaction,
+    *,
+    expected_puuid: str | None = None,
+    expected_platform: str | None = None,
+    expected_created_at: datetime | None = None,
 ) -> None:
     if interaction.guild_id != bot.settings.guild_id or not isinstance(
         interaction.user, discord.Member
@@ -1003,14 +1235,39 @@ async def _show_delete_confirmation(
             "Powiązanie możesz usunąć na skonfigurowanym serwerze.", ephemeral=True
         )
         return
-    if await bot.verifications.get_by_user(interaction.guild_id, interaction.user.id) is None:
+    link = await bot.verifications.get_by_user(interaction.guild_id, interaction.user.id)
+    if link is None:
+        await interaction.response.send_message(
+            "Nie masz zapisanego powiązania z kontem Riot.", ephemeral=True
+        )
+        return
+    if (
+        (expected_puuid is not None and link.puuid != expected_puuid)
+        or (expected_platform is not None and link.platform != expected_platform)
+        or (expected_created_at is not None and link.created_at != expected_created_at)
+    ):
+        await interaction.response.send_message(
+            "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+            ephemeral=True,
+        )
+        return
+    if link.puuid is None:
         await interaction.response.send_message(
             "Nie masz zapisanego powiązania z kontem Riot.", ephemeral=True
         )
         return
     await interaction.response.send_message(
-        "Czy na pewno chcesz usunąć powiązanie z kontem Riot?",
-        view=DeleteVerificationConfirmationView(bot, owner_id=interaction.user.id),
+        (
+            "Czy na pewno chcesz usunąć powiązanie z kontem Riot? "
+            "Role regionu, rangi i użytkownika pozostaną bez zmian."
+        ),
+        view=DeleteVerificationConfirmationView(
+            bot,
+            owner_id=interaction.user.id,
+            expected_puuid=link.puuid,
+            expected_platform=link.platform,
+            expected_created_at=link.created_at,
+        ),
         ephemeral=True,
     )
 
@@ -1038,6 +1295,9 @@ class VerificationStartView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[VerificationStartView],
     ) -> None:
+        await self.begin_verification(interaction)
+
+    async def begin_verification(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
                 "Weryfikację rozpocznij na skonfigurowanym serwerze.", ephemeral=True
@@ -1098,6 +1358,23 @@ class VerificationStartView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
     @discord.ui.button(
+        label="Moje konto",
+        emoji="👤",
+        style=discord.ButtonStyle.secondary,
+        custom_id="verification:account-profile:v1",
+    )
+    async def account_profile(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[VerificationStartView],
+    ) -> None:
+        await _show_account_profile(
+            self.bot,
+            interaction,
+            start_verification=self.begin_verification,
+        )
+
+    @discord.ui.button(
         label="Odśwież rangę",
         emoji="🔄",
         style=discord.ButtonStyle.blurple,
@@ -1128,7 +1405,8 @@ class VerificationCog(commands.Cog):
     def __init__(self, bot: MoonPoroBot) -> None:
         self.bot = bot
         self._managed_role_updates: set[int] = set()
-        bot.add_view(VerificationStartView(bot))
+        self.rso_start_view = VerificationStartView(bot)
+        bot.add_view(self.rso_start_view)
         self.refresh_verified.change_interval(
             seconds=bot.settings.rank_refresh_worker_interval_seconds
         )
@@ -1398,14 +1676,22 @@ class VerificationCog(commands.Cog):
             inline=False,
         )
         embed.set_footer(text="Logowanie odbywa się na stronie Riot.")
-        await interaction.response.send_message(embed=embed, view=VerificationStartView(self.bot))
+        await interaction.response.send_message(embed=embed, view=self.rso_start_view)
 
     @app_commands.command(
         name="usun_weryfikacje", description="Usuwa Twoje powiązanie z kontem Riot"
     )
     async def remove_own_verification(self, interaction: discord.Interaction) -> None:
-        message = await _remove_user_verification(self.bot, interaction)
-        await interaction.response.send_message(message, ephemeral=True)
+        await _show_delete_confirmation(self.bot, interaction)
+
+    @app_commands.command(name="profil", description="Pokazuje Twoje konto Riot")
+    @app_commands.guild_only()
+    async def profile(self, interaction: discord.Interaction) -> None:
+        await _show_account_profile(
+            self.bot,
+            interaction,
+            start_verification=self.rso_start_view.begin_verification,
+        )
 
     async def _account_by_riot_id(self, nick: str, tag: str, platform: str) -> RiotPayload | None:
         return await riot_api_call(
