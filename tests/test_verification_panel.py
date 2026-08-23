@@ -289,18 +289,44 @@ async def test_unverified_profile_only_reuses_active_verification_provider() -> 
     starter.assert_awaited_once_with(interaction)
 
 
-async def test_profile_refresh_reuses_queue_identity_and_rerenders_same_message() -> None:
+async def test_profile_refresh_shows_queued_running_and_completed_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS", 0.0)
     bot = _panel_bot()
     original = _profile_link()
+    requested_at = datetime.now(UTC)
+    locked_baseline = requested_at - timedelta(minutes=1)
     queued = _profile_link(
         created_at=original.created_at,
-        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+        rank_last_checked_at=locked_baseline,
+        rank_next_refresh_at=requested_at - timedelta(seconds=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    running = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=locked_baseline,
+        rank_refresh_claimed_at=requested_at,
+        rank_next_refresh_at=requested_at - timedelta(seconds=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    completed = _profile_link(
+        created_at=original.created_at,
+        last_known_rank="DIAMOND",
+        last_known_division="IV",
+        last_known_league_points=73,
+        rank_last_checked_at=requested_at + timedelta(seconds=1),
+        rank_next_refresh_at=requested_at + timedelta(hours=6),
+        rank_user_refresh_requested_at=requested_at,
     )
     bot.verifications = SimpleNamespace(
         request_rank_refresh=AsyncMock(
-            return_value=RankRefreshRequestResult(RankRefreshRequestStatus.ENQUEUED)
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=locked_baseline,
+            )
         ),
-        get_by_user=AsyncMock(return_value=queued),
+        get_by_user=AsyncMock(side_effect=[queued, running, completed]),
     )
     starter = AsyncMock()
     view = AccountProfileView(
@@ -331,20 +357,256 @@ async def test_profile_refresh_reuses_queue_identity_and_rerenders_same_message(
         expected_platform=original.platform,
         expected_created_at=original.created_at,
     )
+    assert bot.verifications.get_by_user.await_count == 3
+    assert all(call.args == (123, 101) for call in bot.verifications.get_by_user.await_args_list)
+    assert interaction.edit_original_response.await_count == 3
+
+    queued_kwargs = interaction.edit_original_response.await_args_list[0].kwargs
+    assert queued_kwargs["embed"].description == (
+        "Odświeżenie czeka w kolejce. Pokazujemy dane z poprzedniej udanej aktualizacji."
+    )
+    assert isinstance(queued_kwargs["view"], AccountProfileView)
+    assert queued_kwargs["view"].children[0].label == "Odświeżanie…"
+    assert queued_kwargs["view"].children[0].disabled is True
+    assert queued_kwargs["view"].children[0].style.name == "secondary"
+
+    running_kwargs = interaction.edit_original_response.await_args_list[1].kwargs
+    assert running_kwargs["embed"].description == (
+        "Odświeżanie rangi trwa. Pokazujemy dane z poprzedniej udanej aktualizacji."
+    )
+    assert running_kwargs["view"].children[0].label == "Odświeżanie…"
+    assert running_kwargs["view"].children[0].disabled is True
+
+    completed_kwargs = interaction.edit_original_response.await_args_list[2].kwargs
+    assert completed_kwargs["embed"].description.startswith("Ranga została odświeżona.")
+    fields = {field.name: field.value for field in completed_kwargs["embed"].fields}
+    assert fields["Solo/Duo"] == "Diamond IV"
+    assert fields["LP"] == "73 LP"
+    assert completed_kwargs["view"].children[0].label == "Odśwież rangę"
+    assert completed_kwargs["view"].children[0].disabled is True
+
+
+async def test_profile_refresh_detects_completion_before_first_poll() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    completed = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=datetime.now(UTC) + timedelta(seconds=1),
+        rank_user_refresh_requested_at=datetime.now(UTC),
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ALREADY_CLAIMED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(return_value=completed),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
     bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
-    kwargs = interaction.edit_original_response.await_args.kwargs
-    assert kwargs["embed"].description == "Odświeżenie czeka w kolejce."
-    assert isinstance(kwargs["view"], AccountProfileView)
-    assert kwargs["view"].children[0].disabled is False
+    interaction.edit_original_response.assert_awaited_once()
+    assert interaction.edit_original_response.await_args.kwargs["embed"].description.startswith(
+        "Ranga została odświeżona."
+    )
 
 
-async def test_stale_profile_refresh_does_not_render_the_new_link() -> None:
+async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS", 0.0)
+    bot = _panel_bot()
+    original = _profile_link()
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+        rank_user_refresh_requested_at=datetime.now(UTC),
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(return_value=queued),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    bot.verifications.request_rank_refresh.assert_awaited_once()
+    assert bot.verifications.get_by_user.await_count == 2
+    timeout_kwargs = interaction.edit_original_response.await_args.kwargs
+    assert timeout_kwargs["embed"].description == (
+        "Odświeżanie potrwa dłużej. Pokazujemy dane z poprzedniej udanej aktualizacji. "
+        "Otwórz `/profil` ponownie za chwilę."
+    )
+    assert timeout_kwargs["view"].children[0].disabled is True
+    assert timeout_kwargs["view"].children[0].label == "Odświeżanie…"
+
+
+@pytest.mark.parametrize("final_state", ["completed", "temporary_failure"])
+async def test_profile_refresh_timeout_final_read_prefers_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    final_state: str,
+) -> None:
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS", 0.0)
+    bot = _panel_bot()
+    original = _profile_link()
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    final_link = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=(
+            datetime.now(UTC) + timedelta(seconds=1)
+            if final_state == "completed"
+            else original.rank_last_checked_at
+        ),
+        rank_next_refresh_at=datetime.now(UTC) + timedelta(hours=6),
+        rank_refresh_failures=1 if final_state == "temporary_failure" else 0,
+        rank_user_refresh_requested_at=datetime.now(UTC),
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(side_effect=[queued, final_link]),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    assert bot.verifications.get_by_user.await_count == 2
+    final_description = interaction.edit_original_response.await_args.kwargs["embed"].description
+    if final_state == "completed":
+        assert final_description.startswith("Ranga została odświeżona.")
+    else:
+        assert final_description == (
+            "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
+        )
+    assert "potrwa dłużej" not in final_description
+
+
+async def test_profile_refresh_stops_watching_after_temporary_riot_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS", 0.0)
+    bot = _panel_bot()
+    original = _profile_link()
+    requested_at = datetime.now(UTC)
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_next_refresh_at=requested_at - timedelta(seconds=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    failed = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_refresh_failures=1,
+        rank_next_refresh_at=requested_at + timedelta(minutes=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(side_effect=[queued, failed]),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    assert bot.verifications.get_by_user.await_count == 2
+    failure_kwargs = interaction.edit_original_response.await_args.kwargs
+    assert failure_kwargs["embed"].description == (
+        "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
+    )
+    assert failure_kwargs["view"].children[0].label == "Odśwież rangę"
+    assert failure_kwargs["view"].children[0].disabled is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RankRefreshRequestStatus.LINK_CHANGED, RankRefreshRequestStatus.NOT_LINKED],
+)
+async def test_stale_profile_refresh_does_not_render_the_new_link(
+    status: RankRefreshRequestStatus,
+) -> None:
     bot = _panel_bot()
     original = _profile_link()
     bot.verifications = SimpleNamespace(
-        request_rank_refresh=AsyncMock(
-            return_value=RankRefreshRequestResult(RankRefreshRequestStatus.LINK_CHANGED)
-        ),
+        request_rank_refresh=AsyncMock(return_value=RankRefreshRequestResult(status)),
         get_by_user=AsyncMock(),
     )
     view = AccountProfileView(
@@ -371,6 +633,168 @@ async def test_stale_profile_refresh_does_not_render_the_new_link() -> None:
         embed=None,
         view=None,
     )
+
+
+@pytest.mark.parametrize("link_change", ["reverified", "deleting"])
+async def test_profile_refresh_stops_if_link_changes_while_watching(
+    monkeypatch: pytest.MonkeyPatch,
+    link_change: str,
+) -> None:
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS", 0.0)
+    bot = _panel_bot()
+    original = _profile_link()
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    replacement = (
+        _profile_link(puuid="replacement-puuid")
+        if link_change == "reverified"
+        else _profile_link(
+            created_at=original.created_at,
+            rank_last_checked_at=original.rank_last_checked_at,
+            deletion_requested_at=datetime.now(UTC),
+        )
+    )
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(side_effect=[queued, replacement]),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    assert interaction.edit_original_response.await_args.kwargs == {
+        "content": "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        "embed": None,
+        "view": None,
+    }
+
+
+async def test_same_profile_view_rejects_a_second_refresh_callback() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    bot.verifications = SimpleNamespace(request_rank_refresh=AsyncMock())
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    view._refresh_in_progress = True
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    bot.verifications.request_rank_refresh.assert_not_awaited()
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "Odświeżanie rangi już trwa.",
+        ephemeral=True,
+    )
+
+
+async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(side_effect=RuntimeError("internal database details"))
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Nie udało się odświeżyć widoku. Spróbuj ponownie.",
+        view=view,
+    )
+    assert "internal" not in interaction.edit_original_response.await_args.kwargs["content"]
+    assert refresh.label == "Odśwież rangę"
+    assert refresh.disabled is False
+    assert view._refresh_in_progress is False
+
+
+async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> None:
+    bot = _panel_bot()
+    original = _profile_link()
+    bot.verifications = SimpleNamespace(
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+        get_by_user=AsyncMock(side_effect=RuntimeError("internal database details")),
+    )
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=verification._build_account_profile(bot, original),
+        link=original,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    refresh = next(
+        item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
+    )
+    await refresh.callback(interaction)
+
+    kwargs = interaction.edit_original_response.await_args.kwargs
+    assert kwargs["content"] is None
+    assert kwargs["embed"].description == (
+        "Nie udało się automatycznie zaktualizować tego widoku. "
+        "Odświeżenie może nadal trwać. Otwórz `/profil` ponownie za chwilę."
+    )
+    assert "database" not in kwargs["embed"].description
+    assert kwargs["view"] is view
+    assert refresh.label == "Odświeżanie…"
+    assert refresh.disabled is True
+    assert view._refresh_in_progress is True
 
 
 async def test_profile_delete_passes_captured_identity_to_confirmation(

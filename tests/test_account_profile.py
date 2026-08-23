@@ -8,6 +8,7 @@ import pytest
 
 from moon_poro.account_profile import (
     REFRESH_BUTTON_LABEL,
+    REFRESH_PENDING_BUTTON_LABEL,
     AccountProfileState,
     build_account_profile,
 )
@@ -228,9 +229,9 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
         (AccountProfileState.DELETING, False),
         (AccountProfileState.AUTHORIZATION_UNAVAILABLE, False),
         (AccountProfileState.REFRESH_COOLDOWN, False),
-        (AccountProfileState.TEMPORARY_UNAVAILABLE, True),
-        (AccountProfileState.REFRESH_RUNNING, True),
-        (AccountProfileState.REFRESH_QUEUED, True),
+        (AccountProfileState.TEMPORARY_UNAVAILABLE, False),
+        (AccountProfileState.REFRESH_RUNNING, False),
+        (AccountProfileState.REFRESH_QUEUED, False),
         (AccountProfileState.SUCCESS, True),
     ],
 )
@@ -260,7 +261,31 @@ def test_refresh_button_availability(
 
     assert profile.state is state
     assert profile.refresh_enabled is expected_enabled
-    assert profile.refresh_button_label == REFRESH_BUTTON_LABEL == "Odśwież rangę"
+    expected_label = (
+        REFRESH_PENDING_BUTTON_LABEL
+        if state in {AccountProfileState.REFRESH_RUNNING, AccountProfileState.REFRESH_QUEUED}
+        else REFRESH_BUTTON_LABEL
+    )
+    assert profile.refresh_button_label == expected_label
+
+
+@pytest.mark.parametrize(
+    ("link", "expected_prefix"),
+    [
+        (_link(rank_refresh_claimed_at=NOW), "Odświeżanie rangi trwa."),
+        (_link(rank_next_refresh_at=NOW), "Odświeżenie czeka w kolejce."),
+    ],
+)
+def test_pending_refresh_explains_that_cached_data_remains_visible(
+    link: SimpleNamespace,
+    expected_prefix: str,
+) -> None:
+    profile = build_account_profile(link, now=NOW)
+
+    assert profile.embed.description == (
+        f"{expected_prefix} Pokazujemy dane z poprzedniej udanej aktualizacji."
+    )
+    assert profile.refresh_button_label == REFRESH_PENDING_BUTTON_LABEL == "Odświeżanie…"
 
 
 def test_presentation_never_offers_check_status_or_technical_errors() -> None:

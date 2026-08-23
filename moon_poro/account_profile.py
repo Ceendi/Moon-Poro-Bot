@@ -13,6 +13,7 @@ import discord
 from moon_poro.riot import RANK_TO_ROLE
 
 REFRESH_BUTTON_LABEL: Final = "Odśwież rangę"
+REFRESH_PENDING_BUTTON_LABEL: Final = "Odświeżanie…"
 
 _REGION_LABELS: Final = {
     "EUN1": "EUNE",
@@ -110,16 +111,16 @@ def build_account_profile(
     if state is not AccountProfileState.UNVERIFIED and link is not None:
         _add_profile_fields(embed, link, riot_id=riot_id)
 
-    refresh_enabled = state in {
-        AccountProfileState.SUCCESS,
-        AccountProfileState.REFRESH_QUEUED,
-        AccountProfileState.REFRESH_RUNNING,
-        AccountProfileState.TEMPORARY_UNAVAILABLE,
-    }
+    refresh_enabled = state is AccountProfileState.SUCCESS
+    refresh_button_label = (
+        REFRESH_PENDING_BUTTON_LABEL
+        if state in {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}
+        else REFRESH_BUTTON_LABEL
+    )
     return AccountProfilePresentation(
         state=state,
         embed=embed,
-        refresh_button_label=REFRESH_BUTTON_LABEL,
+        refresh_button_label=refresh_button_label,
         refresh_enabled=refresh_enabled,
     )
 
@@ -201,9 +202,9 @@ def _status_text(state: AccountProfileState, cooldown_remaining: timedelta) -> s
     if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
         return "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
     if state is AccountProfileState.REFRESH_RUNNING:
-        return "Odświeżanie rangi trwa."
+        return "Odświeżanie rangi trwa. Pokazujemy dane z poprzedniej udanej aktualizacji."
     if state is AccountProfileState.REFRESH_QUEUED:
-        return "Odświeżenie czeka w kolejce."
+        return "Odświeżenie czeka w kolejce. Pokazujemy dane z poprzedniej udanej aktualizacji."
     if state is AccountProfileState.REFRESH_COOLDOWN:
         minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
         return f"Kolejne odświeżenie będzie dostępne za około {minutes} min."
@@ -293,6 +294,7 @@ def _as_utc(value: datetime) -> datetime:
 
 __all__ = [
     "REFRESH_BUTTON_LABEL",
+    "REFRESH_PENDING_BUTTON_LABEL",
     "AccountProfilePresentation",
     "AccountProfileState",
     "VerificationLinkLike",

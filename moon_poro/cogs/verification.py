@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -12,6 +13,7 @@ from discord.app_commands import Choice
 from discord.ext import commands, tasks
 
 from moon_poro.account_profile import (
+    REFRESH_PENDING_BUTTON_LABEL,
     AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
@@ -42,6 +44,29 @@ logger = logging.getLogger("moon_poro.verification")
 type RiotPayload = dict[str, Any]
 type LeagueEntries = list[RiotPayload]
 type VerificationStarter = Callable[[discord.Interaction], Awaitable[None]]
+
+_ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS = 60.0
+_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS = 2.0
+_ACCOUNT_PROFILE_PENDING_STATES = frozenset(
+    {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}
+)
+_ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
+    {
+        RankRefreshRequestStatus.ENQUEUED,
+        RankRefreshRequestStatus.ALREADY_DUE,
+        RankRefreshRequestStatus.ALREADY_CLAIMED,
+        RankRefreshRequestStatus.COOLDOWN,
+    }
+)
+_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."
+_ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
+    "Odświeżanie potrwa dłużej. Pokazujemy dane z poprzedniej udanej aktualizacji. "
+    "Otwórz `/profil` ponownie za chwilę."
+)
+_ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
+    "Nie udało się automatycznie zaktualizować tego widoku. "
+    "Odświeżenie może nadal trwać. Otwórz `/profil` ponownie za chwilę."
+)
 
 
 def _lookup_reason_choices() -> list[Choice[str]]:
@@ -999,6 +1024,14 @@ def _build_account_profile(
     )
 
 
+def _same_timestamp(left: datetime | None, right: datetime | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    normalized_left = left.replace(tzinfo=UTC) if left.tzinfo is None else left.astimezone(UTC)
+    normalized_right = right.replace(tzinfo=UTC) if right.tzinfo is None else right.astimezone(UTC)
+    return normalized_left == normalized_right
+
+
 class AccountProfileView(discord.ui.View):
     def __init__(
         self,
@@ -1017,6 +1050,7 @@ class AccountProfileView(discord.ui.View):
         self.expected_puuid = link.puuid if link is not None else None
         self.expected_platform = link.platform if link is not None else None
         self.expected_created_at = link.created_at if link is not None else None
+        self._refresh_in_progress = False
 
         if presentation.state is AccountProfileState.UNVERIFIED:
             self.remove_item(self.refresh_rank)
@@ -1027,6 +1061,129 @@ class AccountProfileView(discord.ui.View):
             self.remove_item(self.verify_account)
             self.refresh_rank.label = presentation.refresh_button_label
             self.refresh_rank.disabled = not presentation.refresh_enabled
+            if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+                self.refresh_rank.style = discord.ButtonStyle.secondary
+
+    def _matches_current_link(self, link: VerificationLink | None) -> bool:
+        return bool(
+            link is not None
+            and link.deletion_requested_at is None
+            and self.expected_puuid is not None
+            and link.puuid == self.expected_puuid
+            and self.expected_platform is not None
+            and link.platform == self.expected_platform
+            and self.expected_created_at is not None
+            and _same_timestamp(link.created_at, self.expected_created_at)
+        )
+
+    def _new_view(
+        self,
+        presentation: AccountProfilePresentation,
+        link: VerificationLink | None,
+    ) -> AccountProfileView:
+        return AccountProfileView(
+            self.bot,
+            owner_id=self.owner_id,
+            presentation=presentation,
+            link=link,
+            start_verification=self.start_verification,
+        )
+
+    async def _edit_profile(
+        self,
+        interaction: discord.Interaction,
+        link: VerificationLink,
+        *,
+        description: str | None = None,
+        description_prefix: str | None = None,
+    ) -> AccountProfilePresentation:
+        presentation = _build_account_profile(self.bot, link)
+        if description is not None:
+            presentation.embed.description = description
+        elif description_prefix is not None:
+            current_description = presentation.embed.description or ""
+            presentation.embed.description = f"{description_prefix} {current_description}".strip()
+        await self._edit_presentation(interaction, presentation, link)
+        return presentation
+
+    async def _edit_presentation(
+        self,
+        interaction: discord.Interaction,
+        presentation: AccountProfilePresentation,
+        link: VerificationLink,
+    ) -> None:
+        await interaction.edit_original_response(
+            content=None,
+            embed=presentation.embed,
+            view=self._new_view(presentation, link),
+        )
+
+    async def _edit_stale_profile(self, interaction: discord.Interaction) -> None:
+        await interaction.edit_original_response(
+            content=_ACCOUNT_PROFILE_STALE_MESSAGE,
+            embed=None,
+            view=None,
+        )
+
+    async def _watch_rank_refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        initial_state: AccountProfileState,
+        baseline_rank_last_checked_at: datetime | None,
+    ) -> None:
+        guild_id = interaction.guild_id or 0
+        current_state = initial_state
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                link = await self.bot.verifications.get_by_user(guild_id, self.owner_id)
+                if link is None or not self._matches_current_link(link):
+                    await self._edit_stale_profile(interaction)
+                    return
+                if not _same_timestamp(
+                    link.rank_last_checked_at,
+                    baseline_rank_last_checked_at,
+                ):
+                    await self._edit_profile(
+                        interaction,
+                        link,
+                        description_prefix="Ranga została odświeżona.",
+                    )
+                    return
+                presentation = _build_account_profile(self.bot, link)
+                if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+                    presentation.embed.description = _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE
+                await self._edit_presentation(interaction, presentation, link)
+                return
+
+            await asyncio.sleep(min(_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS, remaining))
+            link = await self.bot.verifications.get_by_user(guild_id, self.owner_id)
+            if link is None or not self._matches_current_link(link):
+                await self._edit_stale_profile(interaction)
+                return
+
+            if not _same_timestamp(
+                link.rank_last_checked_at,
+                baseline_rank_last_checked_at,
+            ):
+                await self._edit_profile(
+                    interaction,
+                    link,
+                    description_prefix="Ranga została odświeżona.",
+                )
+                return
+
+            presentation = _build_account_profile(self.bot, link)
+            if presentation.state not in _ACCOUNT_PROFILE_PENDING_STATES:
+                await self._edit_presentation(interaction, presentation, link)
+                return
+            if presentation.state is not current_state:
+                await self._edit_presentation(interaction, presentation, link)
+                current_state = presentation.state
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -1058,49 +1215,87 @@ class AccountProfileView(discord.ui.View):
     async def refresh_rank(
         self,
         interaction: discord.Interaction,
-        _button: discord.ui.Button[AccountProfileView],
+        button: discord.ui.Button[AccountProfileView],
     ) -> None:
-        await interaction.response.defer()
+        if self._refresh_in_progress:
+            await interaction.response.send_message(
+                "Odświeżanie rangi już trwa.",
+                ephemeral=True,
+            )
+            return
+        self._refresh_in_progress = True
+        button.disabled = True
+        button.label = REFRESH_PENDING_BUTTON_LABEL
+        button.style = discord.ButtonStyle.secondary
+        request_recorded = False
         try:
+            await interaction.response.defer()
             if (
-                self.expected_puuid is not None
-                and self.expected_platform is not None
-                and self.expected_created_at is not None
+                self.expected_puuid is None
+                or self.expected_platform is None
+                or self.expected_created_at is None
             ):
-                result = await self.bot.verifications.request_rank_refresh(
-                    interaction.guild_id or 0,
-                    self.owner_id,
-                    cooldown_seconds=(self.bot.settings.rank_refresh_button_cooldown_seconds),
-                    source="user",
-                    expected_puuid=self.expected_puuid,
-                    expected_platform=self.expected_platform,
-                    expected_created_at=self.expected_created_at,
-                )
-                if result.status is RankRefreshRequestStatus.LINK_CHANGED:
-                    await interaction.edit_original_response(
-                        content=("Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."),
-                        embed=None,
-                        view=None,
-                    )
-                    return
+                await self._edit_stale_profile(interaction)
+                return
+            result = await self.bot.verifications.request_rank_refresh(
+                interaction.guild_id or 0,
+                self.owner_id,
+                cooldown_seconds=(self.bot.settings.rank_refresh_button_cooldown_seconds),
+                source="user",
+                expected_puuid=self.expected_puuid,
+                expected_platform=self.expected_platform,
+                expected_created_at=self.expected_created_at,
+            )
+            if result.status in {
+                RankRefreshRequestStatus.LINK_CHANGED,
+                RankRefreshRequestStatus.NOT_LINKED,
+            }:
+                await self._edit_stale_profile(interaction)
+                return
+            request_recorded = True
             link = await self.bot.verifications.get_by_user(
                 interaction.guild_id or 0,
                 self.owner_id,
             )
-            presentation = _build_account_profile(self.bot, link)
-            view = AccountProfileView(
-                self.bot,
-                owner_id=self.owner_id,
-                presentation=presentation,
-                link=link,
-                start_verification=self.start_verification,
-            )
-            await interaction.edit_original_response(
-                embed=presentation.embed,
-                view=view,
-            )
+            if link is None or not self._matches_current_link(link):
+                await self._edit_stale_profile(interaction)
+                return
+            if not _same_timestamp(
+                link.rank_last_checked_at,
+                result.baseline_rank_last_checked_at,
+            ):
+                await self._edit_profile(
+                    interaction,
+                    link,
+                    description_prefix="Ranga została odświeżona.",
+                )
+                return
+            presentation = await self._edit_profile(interaction, link)
+            if (
+                result.status in _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS
+                and presentation.state in _ACCOUNT_PROFILE_PENDING_STATES
+            ):
+                await self._watch_rank_refresh(
+                    interaction,
+                    initial_state=presentation.state,
+                    baseline_rank_last_checked_at=result.baseline_rank_last_checked_at,
+                )
         except Exception:
             logger.exception("Could not refresh account profile for %s", self.owner_id)
+            if request_recorded:
+                self.presentation.embed.description = (
+                    _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE
+                )
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=self.presentation.embed,
+                    view=self,
+                )
+                return
+            self._refresh_in_progress = False
+            button.label = self.presentation.refresh_button_label
+            button.disabled = not self.presentation.refresh_enabled
+            button.style = discord.ButtonStyle.blurple
             await interaction.edit_original_response(
                 content="Nie udało się odświeżyć widoku. Spróbuj ponownie.",
                 view=self,
