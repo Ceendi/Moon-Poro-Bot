@@ -15,7 +15,6 @@ export const siteConfig = {
   operatorName: required("PUBLIC_OPERATOR_NAME", "Moon Poro development operator"),
   operatorLocation: required("PUBLIC_OPERATOR_LOCATION", "Polska"),
   discordInviteUrl: required("PUBLIC_DISCORD_INVITE_URL", "https://discord.com/app"),
-  repositoryUrl: "https://github.com/Ceendi/Moon-Poro-Bot",
   appId: "524635",
   lastUpdated: "24 sierpnia 2026",
   lastUpdatedEn: "24 August 2026",
