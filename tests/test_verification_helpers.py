@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
@@ -17,6 +18,7 @@ from moon_poro.cogs.verification import (
     _retry_next_verified_marker_cleanup,
 )
 from moon_poro.rank_refresh import RankRefreshDecision
+from moon_poro.repositories import VerificationLinkIdentity
 from moon_poro.riot import RiotAPINotFound, RiotAuthBreaker
 from moon_poro.verification_sessions import CreatedVerificationSession
 
@@ -24,6 +26,49 @@ from moon_poro.verification_sessions import CreatedVerificationSession
 class FakeRole:
     def __init__(self, name: str) -> None:
         self.name = name
+
+
+def _guarded_verifications(
+    *links: SimpleNamespace,
+    guard_results: list[bool] | None = None,
+    **attributes: object,
+) -> SimpleNamespace:
+    expected = {
+        (
+            link.guild_id,
+            link.discord_user_id,
+            link.puuid,
+            link.platform,
+            link.created_at,
+        )
+        for link in links
+    }
+    results = iter(guard_results or [])
+
+    async def run_guarded_role_update(
+        guild_id: int,
+        user_id: int,
+        *,
+        identity: VerificationLinkIdentity,
+        operation: Callable[[], Awaitable[None]],
+    ) -> bool:
+        assert isinstance(identity, VerificationLinkIdentity)
+        assert (
+            guild_id,
+            user_id,
+            identity.puuid,
+            identity.platform,
+            identity.created_at,
+        ) in expected
+        result = next(results, True)
+        if result:
+            await operation()
+        return result
+
+    return SimpleNamespace(
+        **attributes,
+        run_verification_role_update_with_identity=AsyncMock(side_effect=run_guarded_role_update),
+    )
 
 
 async def test_get_leagues_keeps_successful_empty_response_distinct(
@@ -219,7 +264,8 @@ async def test_rank_refresh_worker_updates_one_due_link(
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
     checked_at = datetime(2026, 8, 15, tzinfo=UTC)
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         claim_due_rank_refreshes=AsyncMock(return_value=[link]),
         record_rank_snapshot=AsyncMock(return_value=checked_at),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
@@ -384,7 +430,8 @@ async def test_rank_refresh_worker_requires_two_empty_200_responses_for_unranked
         link.rank_last_checked_at = next(checked_times)
         return link.rank_last_checked_at
 
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         claim_due_rank_refreshes=AsyncMock(return_value=[link]),
         record_rank_snapshot=AsyncMock(side_effect=record_snapshot),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
@@ -446,6 +493,7 @@ async def test_discord_role_retry_uses_cached_snapshot_without_riot_call(
 ) -> None:
     member = SimpleNamespace(id=101)
     link = SimpleNamespace(
+        guild_id=123,
         discord_user_id=101,
         platform="EUN1",
         last_known_rank="DIAMOND",
@@ -461,7 +509,8 @@ async def test_discord_role_retry_uses_cached_snapshot_without_riot_call(
     )
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         claim_due_rank_role_syncs=AsyncMock(return_value=[link]),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
         retry_rank_role_sync=AsyncMock(),
@@ -529,6 +578,7 @@ async def test_claimed_role_sync_compensates_when_delete_tombstone_wins_race(
 ) -> None:
     member = SimpleNamespace(id=101)
     link = SimpleNamespace(
+        guild_id=123,
         discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
@@ -546,7 +596,8 @@ async def test_claimed_role_sync_compensates_when_delete_tombstone_wins_race(
     deleting.deletion_requested_at = datetime(2026, 8, 15, 1, tzinfo=UTC)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         claim_due_rank_role_syncs=AsyncMock(return_value=[link]),
         get_by_user=AsyncMock(return_value=deleting),
         acknowledge_rank_role_sync=AsyncMock(),
@@ -642,6 +693,8 @@ async def test_marker_cleanup_restores_reverified_generation_that_wins_during_de
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
     replacement = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUW1",
         puuid="replacement-puuid",
         created_at=datetime(2026, 8, 15, tzinfo=UTC),
@@ -655,7 +708,8 @@ async def test_marker_cleanup_restores_reverified_generation_that_wins_during_de
         rank_last_checked_at=datetime(2026, 8, 15, 1, tzinfo=UTC),
     )
     cleanup = SimpleNamespace(discord_user_id=101, generation=1)
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        replacement,
         claim_due_verified_marker_cleanups=AsyncMock(return_value=[cleanup]),
         get_by_user=AsyncMock(side_effect=[None, replacement, replacement]),
         acknowledge_verified_marker_cleanup=AsyncMock(),
@@ -701,6 +755,8 @@ async def test_marker_cleanup_compensates_delete_during_replacement_role_restore
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
     replacement = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUW1",
         puuid="replacement-puuid",
         created_at=datetime(2026, 8, 15, tzinfo=UTC),
@@ -714,7 +770,8 @@ async def test_marker_cleanup_compensates_delete_during_replacement_role_restore
         rank_last_checked_at=datetime(2026, 8, 15, 1, tzinfo=UTC),
     )
     cleanup = SimpleNamespace(discord_user_id=101, generation=1)
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        replacement,
         claim_due_verified_marker_cleanups=AsyncMock(return_value=[cleanup]),
         get_by_user=AsyncMock(side_effect=[replacement, None, None, None]),
         acknowledge_verified_marker_cleanup=AsyncMock(),
@@ -755,11 +812,15 @@ async def test_reconcile_compensates_delete_during_replacement_role_restore(
     guild = SimpleNamespace(id=123)
     member.guild = guild
     old_link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="old-puuid",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
     )
     replacement = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUW1",
         puuid="replacement-puuid",
         created_at=datetime(2026, 8, 15, tzinfo=UTC),
@@ -772,7 +833,8 @@ async def test_reconcile_compensates_delete_during_replacement_role_restore(
         last_known_inactive=False,
         rank_last_checked_at=datetime(2026, 8, 15, 1, tzinfo=UTC),
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        replacement,
         get_by_user=AsyncMock(side_effect=[replacement, None, None, None]),
         enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
         acknowledge_verified_marker_cleanup=AsyncMock(),
@@ -822,7 +884,8 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
         deletion_requested_at=None,
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         get_by_user=AsyncMock(return_value=link),
         record_rank_snapshot=AsyncMock(return_value=checked_at),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
@@ -928,7 +991,8 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
         last_known_inactive=False,
         rank_last_checked_at=checked_at,
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
         get_by_user=AsyncMock(return_value=link),
         record_rank_snapshot=AsyncMock(),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
@@ -1018,7 +1082,9 @@ async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
     replacement = SimpleNamespace(**vars(link))
     replacement.puuid = "replacement-puuid"
     replacement.created_at = datetime(2026, 8, 15, 10, 2, tzinfo=UTC)
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
+        link,
+        replacement,
         get_by_user=AsyncMock(side_effect=[link, link, replacement, None, None, None, None]),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
         retry_rank_role_sync=AsyncMock(),

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from moon_poro.models import Base, VerificationLink, VerificationSessionStatus
+from moon_poro.models import (
+    Base,
+    VerificationLink,
+    VerificationSession,
+    VerificationSessionStatus,
+)
 from moon_poro.verification_sessions import (
+    CreatedVerificationSession,
     LinkReservationResult,
     SessionAlreadyUsed,
     SessionExpired,
@@ -35,7 +41,7 @@ async def authorize_session(
     guild_id: int,
     user_id: int,
     state: str,
-):
+) -> tuple[CreatedVerificationSession, VerificationSession]:
     created = await repository.create(guild_id=guild_id, user_id=user_id, ttl_seconds=600)
     started = await repository.begin_oauth(token=created.token, state=state)
     assert started.oauth_state_hash == hash_secret(state)
@@ -78,6 +84,8 @@ async def test_complete_rso_lifecycle(
     assert link is not None
     assert link.riot_game_name == "Moon"
     assert link.riot_tag_line == "EUNE"
+    assert link.message_id == 987
+    assert link.audit_channel_id == 654
 
 
 async def test_new_session_supersedes_previous_link(
@@ -94,6 +102,46 @@ async def test_new_session_supersedes_previous_link(
     assert first_record.error_code == "SUPERSEDED"
     assert second_record is not None
     assert second_record.status == VerificationSessionStatus.CREATED.value
+
+
+async def test_cancel_for_user_only_cancels_active_sessions_created_by_cutoff(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    older = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    older_record = await session_repository.get_by_start_token(older.token)
+    assert older_record is not None
+    cutoff = older_record.created_at
+    newer_token = "newer-session-token"
+    newer_created_at = cutoff + timedelta(seconds=1)
+    async with session_repository._sessions.begin() as session:
+        session.add(
+            VerificationSession(
+                guild_id=123,
+                discord_user_id=456,
+                start_token_hash=hash_secret(newer_token),
+                status=VerificationSessionStatus.CREATED.value,
+                created_at=newer_created_at,
+                expires_at=newer_created_at + timedelta(minutes=10),
+                updated_at=newer_created_at,
+            )
+        )
+
+    await session_repository.cancel_for_user(
+        123,
+        456,
+        created_at_or_before=cutoff,
+    )
+
+    cancelled = await session_repository.get_by_start_token(older.token)
+    still_active = await session_repository.get_by_start_token(newer_token)
+    assert cancelled is not None
+    assert cancelled.status == VerificationSessionStatus.CANCELLED.value
+    assert cancelled.error_code == "USER_REMOVED_LINK"
+    assert cancelled.completed_at is not None
+    assert still_active is not None
+    assert still_active.status == VerificationSessionStatus.CREATED.value
+    assert still_active.error_code is None
+    assert still_active.completed_at is None
 
 
 async def test_oauth_state_is_one_time(
@@ -162,6 +210,7 @@ async def test_existing_discord_link_rejects_rso_reservation(
                 guild_id=123,
                 discord_user_id=456,
                 message_id=5,
+                audit_channel_id=6,
                 platform="EUN1",
                 puuid="old-puuid",
                 verification_method="PROFILE_ICON",
@@ -203,7 +252,11 @@ async def test_cancellation_wins_race_with_discord_completion(
     )
     pending = await session_repository.claim_pending()
 
-    await session_repository.cancel_for_user(123, 456)
+    await session_repository.cancel_for_user(
+        123,
+        456,
+        created_at_or_before=pending[0].created_at,
+    )
     completed = await session_repository.complete_discord(
         pending[0].id,
         message_id=987,
@@ -235,7 +288,11 @@ async def test_orphan_audit_cleanup_survives_retry_and_repository_restart(
         tag_line="EUNE",
     )
     pending = await session_repository.claim_pending()
-    await session_repository.cancel_for_user(123, 456)
+    await session_repository.cancel_for_user(
+        123,
+        456,
+        created_at_or_before=pending[0].created_at,
+    )
     assert not await session_repository.complete_discord(
         pending[0].id,
         message_id=999,

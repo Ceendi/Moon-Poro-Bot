@@ -74,6 +74,13 @@ def test_zero_channel_id_is_normalized_to_missing() -> None:
     assert settings.komendy_botowe_channel_id is None
 
 
+def test_legacy_audit_channel_requires_an_explicit_positive_id() -> None:
+    assert make_settings(legacy_audit_channel_id=0).legacy_audit_channel_id is None
+    assert make_settings(legacy_audit_channel_id=987).legacy_audit_channel_id == 987
+    with pytest.raises(ValidationError):
+        make_settings(legacy_audit_channel_id=-1)
+
+
 def test_verification_requires_public_rso_url() -> None:
     with pytest.raises(ValidationError, match="RSO_PUBLIC_BASE_URL"):
         make_settings(rso_public_base_url=None)

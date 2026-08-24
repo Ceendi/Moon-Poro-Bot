@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from alembic.config import Config
@@ -25,6 +26,11 @@ from moon_poro.repositories import (
     GuildFeatureRepository,
     ModerationStatsRepository,
     RankRefreshRequestStatus,
+    VerificationDeletionAccessLog,
+    VerificationDeletionPolicy,
+    VerificationDeletionProcessStatus,
+    VerificationDeletionRequestStatus,
+    VerificationLinkIdentity,
     VerificationRepository,
     WarningRepository,
 )
@@ -40,6 +46,18 @@ pytestmark = pytest.mark.skipif(
     "TEST_POSTGRES_PORT" not in os.environ,
     reason="requires an isolated PostgreSQL test database",
 )
+
+
+async def _delete_verification_link(
+    repository: VerificationRepository,
+    guild_id: int,
+    user_id: int,
+) -> VerificationLink | None:
+    async with repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (guild_id, user_id), with_for_update=True)
+        if link is not None:
+            await session.delete(link)
+        return link
 
 
 async def test_migrations_and_repositories_against_postgres(
@@ -109,6 +127,8 @@ async def test_migrations_and_repositories_against_postgres(
             "rank_user_refresh_requested_at",
             "deletion_requested_at",
             "deletion_next_attempt_at",
+            "deletion_remove_rank_region_roles",
+            "audit_channel_id",
         } <= verification_columns
         assert "ix_verification_links_rank_role_sync_due" in verification_indexes
         assert "ix_verification_links_deletion_due" in verification_indexes
@@ -121,6 +141,7 @@ async def test_migrations_and_repositories_against_postgres(
             guild_id=guild_id,
             user_id=101,
             message_id=201,
+            audit_channel_id=301,
             platform="EUN1",
             puuid="integration-puuid",
             riot_game_name="Moon Poro",
@@ -392,10 +413,10 @@ async def test_migrations_and_repositories_against_postgres(
         stats = await ModerationStatsRepository(connection.session_factory).list_for_guild(guild_id)
         assert {(row.moderator_id, row.warnings_count) for row in stats} == {(501, 1), (502, 1)}
 
-        removed = await verifications.delete_by_user(guild_id, 101)
+        removed = await _delete_verification_link(verifications, guild_id, 101)
         assert removed is not None and removed.puuid == "integration-puuid"
         assert await verifications.get_by_user(guild_id, 101) is None
-        await verifications.delete_by_user(guild_id, 102)
+        await _delete_verification_link(verifications, guild_id, 102)
     finally:
         await connection.close()
 
@@ -422,16 +443,18 @@ async def test_stale_riot_response_cannot_overwrite_reverified_link(
             guild_id=guild_id,
             user_id=701,
             message_id=801,
+            audit_channel_id=901,
             platform="EUN1",
             puuid="same-puuid",
             rank_snapshot=RankSnapshot("GOLD", "I", 90, 10, 5, False),
         )
-        await repository.delete_by_user(guild_id, 701)
+        await _delete_verification_link(repository, guild_id, 701)
         await asyncio.sleep(0.002)
         new = await repository.create(
             guild_id=guild_id,
             user_id=701,
             message_id=802,
+            audit_channel_id=901,
             platform="EUN1",
             puuid="same-puuid",
             rank_snapshot=RankSnapshot("SILVER", "IV", 10, 2, 3, False),
@@ -462,7 +485,7 @@ async def test_stale_riot_response_cannot_overwrite_reverified_link(
         assert current.created_at == new.created_at
         assert current.last_known_rank == "SILVER"
     finally:
-        await repository.delete_by_user(guild_id, 701)
+        await _delete_verification_link(repository, guild_id, 701)
         await connection.close()
 
 
@@ -488,16 +511,18 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
             guild_id=guild_id,
             user_id=703,
             message_id=801,
+            audit_channel_id=901,
             platform="EUN1",
             puuid="same-claim-puuid",
             rank_snapshot=RankSnapshot("GOLD", "I", 90, 10, 5, False),
         )
-        await repository.delete_by_user(guild_id, 703)
+        await _delete_verification_link(repository, guild_id, 703)
         await asyncio.sleep(0.002)
         new = await repository.create(
             guild_id=guild_id,
             user_id=703,
             message_id=802,
+            audit_channel_id=901,
             platform="EUN1",
             puuid="same-claim-puuid",
             rank_snapshot=RankSnapshot("SILVER", "IV", 10, 2, 3, False),
@@ -527,16 +552,13 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
             expected_created_at=old.created_at,
         )
         assert stale_refresh.status == RankRefreshRequestStatus.LINK_CHANGED
-        assert (
-            await repository.request_verification_deletion(
-                guild_id,
-                703,
-                expected_puuid=old.puuid or "",
-                expected_platform=old.platform,
-                expected_created_at=old.created_at,
-            )
-            is None
+        stale_deletion = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            703,
+            identity=VerificationLinkIdentity.from_link(old),
+            policy=VerificationDeletionPolicy.USER,
         )
+        assert stale_deletion.status is VerificationDeletionRequestStatus.LINK_CHANGED
         assert (
             await repository.retry_rank_refresh(
                 guild_id,
@@ -572,7 +594,7 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
         assert current.rank_role_sync_claimed_at == claim_marker
         assert current.rank_role_sync_next_attempt_at == claim_marker
     finally:
-        await repository.delete_by_user(guild_id, 703)
+        await _delete_verification_link(repository, guild_id, 703)
         await connection.close()
 
 
@@ -598,12 +620,20 @@ async def test_delete_tombstone_blocks_workers_and_survives_claim_restart(
             guild_id=guild_id,
             user_id=702,
             message_id=803,
+            audit_channel_id=901,
             platform="EUN1",
             puuid="delete-puuid",
             rank_snapshot=RankSnapshot("EMERALD", "II", 50, 20, 10, False),
         )
-        requested = await repository.request_verification_deletion(guild_id, 702)
-        assert requested is not None and requested.deletion_requested_at is not None
+        identity = VerificationLinkIdentity.from_link(link)
+        request = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            702,
+            identity=identity,
+            policy=VerificationDeletionPolicy.USER,
+        )
+        assert request.status is VerificationDeletionRequestStatus.REQUESTED
+        assert request.link is not None and request.link.deletion_requested_at is not None
         assert (
             await repository.claim_due_rank_refreshes(guild_id, limit=1, claim_timeout_seconds=300)
             == []
@@ -627,13 +657,20 @@ async def test_delete_tombstone_blocks_workers_and_survives_claim_restart(
             guild_id, limit=1, claim_timeout_seconds=300
         )
         assert [item.discord_user_id for item in claimed] == [702]
-        delay = await repository.retry_verification_deletion(
+        claimed_at = claimed[0].deletion_claimed_at
+        assert claimed_at is not None
+        retry_operation = AsyncMock(return_value=False)
+        retry_result = await repository.process_verification_deletion_with_identity(
             guild_id,
             702,
-            expected_created_at=link.created_at,
+            identity=identity,
+            expected_claimed_at=claimed_at,
             base_delay_seconds=60,
+            operation=retry_operation,
         )
-        assert delay is not None
+        assert retry_result.status is VerificationDeletionProcessStatus.RETRY_SCHEDULED
+        assert retry_result.retry_after_seconds is not None
+        retry_operation.assert_awaited_once_with()
         assert (
             await repository.claim_due_verification_deletions(
                 guild_id, limit=1, claim_timeout_seconds=300
@@ -648,13 +685,19 @@ async def test_delete_tombstone_blocks_workers_and_survives_claim_restart(
             guild_id, limit=1, claim_timeout_seconds=300
         )
         assert [item.discord_user_id for item in claimed] == [702]
-        assert await repository.finalize_verification_deletion(
+        claimed_at = claimed[0].deletion_claimed_at
+        assert claimed_at is not None
+        delete_operation = AsyncMock(return_value=True)
+        delete_result = await repository.process_verification_deletion_with_identity(
             guild_id,
             702,
-            expected_puuid=link.puuid or "",
-            expected_platform=link.platform,
-            expected_created_at=link.created_at,
+            identity=identity,
+            expected_claimed_at=claimed_at,
+            base_delay_seconds=60,
+            operation=delete_operation,
         )
+        assert delete_result.status is VerificationDeletionProcessStatus.DELETED
+        delete_operation.assert_awaited_once_with()
         assert await repository.get_by_user(guild_id, 702) is None
 
         cleanup_generation = await repository.enqueue_verified_marker_cleanup(guild_id, 702)
@@ -716,7 +759,318 @@ async def test_delete_tombstone_blocks_workers_and_survives_claim_restart(
             == []
         )
     finally:
-        await repository.delete_by_user(guild_id, 702)
+        await _delete_verification_link(repository, guild_id, 702)
+        await connection.close()
+
+
+async def test_strict_null_puuid_admin_deletion_lifecycle_against_postgres(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=704,
+            message_id=None,
+            audit_channel_id=804,
+            platform="EUN1",
+            puuid=None,
+        )
+        identity = VerificationLinkIdentity.from_link(link)
+        request = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            704,
+            identity=identity,
+            policy=VerificationDeletionPolicy.ADMIN,
+            access_log=VerificationDeletionAccessLog(
+                actor_id=900,
+                reason="Administracyjne usunięcie: " + "x" * 400,
+            ),
+        )
+        repeated = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            704,
+            identity=identity,
+            policy=VerificationDeletionPolicy.ADMIN,
+            access_log=VerificationDeletionAccessLog(actor_id=900, reason="Powtórzenie"),
+        )
+
+        assert request.status is VerificationDeletionRequestStatus.REQUESTED
+        assert repeated.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED
+        assert request.link is not None
+        assert request.link.puuid is None
+        assert request.link.audit_channel_id == 804
+        assert request.link.deletion_remove_rank_region_roles
+        claimed_at = request.link.deletion_claimed_at
+        assert claimed_at is not None
+        stale_operation = AsyncMock(return_value=True)
+        stale_result = await repository.process_verification_deletion_with_identity(
+            guild_id,
+            704,
+            identity=identity,
+            expected_claimed_at=claimed_at - timedelta(microseconds=1),
+            base_delay_seconds=60,
+            operation=stale_operation,
+        )
+        assert stale_result.status is VerificationDeletionProcessStatus.CLAIM_LOST
+        stale_operation.assert_not_awaited()
+        async with connection.engine.connect() as database_connection:
+            logs = (
+                await database_connection.execute(
+                    text(
+                        """
+                        SELECT actor_id, discord_user_id, puuid, reason
+                        FROM verification_access_logs
+                        WHERE guild_id = :guild_id AND discord_user_id = 704
+                        """
+                    ),
+                    {"guild_id": guild_id},
+                )
+            ).all()
+        assert len(logs) == 1
+        assert tuple(logs[0]) == (900, 704, None, "Administracyjne usunięcie: " + "x" * 273)
+        delete_operation = AsyncMock(return_value=True)
+        delete_result = await repository.process_verification_deletion_with_identity(
+            guild_id,
+            704,
+            identity=identity,
+            expected_claimed_at=claimed_at,
+            base_delay_seconds=60,
+            operation=delete_operation,
+        )
+        assert delete_result.status is VerificationDeletionProcessStatus.DELETED
+        delete_operation.assert_awaited_once_with()
+    finally:
+        await _delete_verification_link(repository, guild_id, 704)
+        async with connection.engine.begin() as database_connection:
+            await database_connection.execute(
+                text("DELETE FROM verification_access_logs WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
+        await connection.close()
+
+
+async def test_guarded_deletion_holds_row_lock_through_side_effect(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    competing_repository = VerificationRepository(connection.session_factory)
+    release_operation = asyncio.Event()
+    operation_started = asyncio.Event()
+    competing_claim_started = asyncio.Event()
+    side_effects: list[str] = []
+    process_task: asyncio.Task[object] | None = None
+    claim_task: asyncio.Task[object] | None = None
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=705,
+            message_id=None,
+            platform="EUN1",
+            puuid=None,
+        )
+        identity = VerificationLinkIdentity.from_link(link)
+        request = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            705,
+            identity=identity,
+            policy=VerificationDeletionPolicy.USER,
+        )
+        assert request.link is not None
+        stale_claim = datetime.now(UTC) - timedelta(seconds=301)
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(VerificationLink, (guild_id, 705), with_for_update=True)
+            assert stored is not None
+            stored.deletion_claimed_at = stale_claim
+            stored.deletion_next_attempt_at = stale_claim
+
+        async def operation() -> bool:
+            side_effects.append("executed")
+            operation_started.set()
+            await release_operation.wait()
+            return True
+
+        async def competing_claim() -> list[VerificationLink]:
+            competing_claim_started.set()
+            return await competing_repository.claim_due_verification_deletions(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            )
+
+        process_task = asyncio.create_task(
+            repository.process_verification_deletion_with_identity(
+                guild_id,
+                705,
+                identity=identity,
+                expected_claimed_at=stale_claim,
+                base_delay_seconds=10,
+                operation=operation,
+            )
+        )
+        await asyncio.wait_for(operation_started.wait(), timeout=2)
+        claim_task = asyncio.create_task(competing_claim())
+        await asyncio.wait_for(competing_claim_started.wait(), timeout=2)
+        competing_claims = await asyncio.wait_for(claim_task, timeout=2)
+
+        assert competing_claims == []
+        assert side_effects == ["executed"]
+        release_operation.set()
+        process_result = await asyncio.wait_for(process_task, timeout=2)
+
+        assert process_result.status is VerificationDeletionProcessStatus.DELETED
+        assert await repository.get_by_user(guild_id, 705) is None
+    finally:
+        release_operation.set()
+        pending_tasks = [task for task in (process_task, claim_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        await _delete_verification_link(repository, guild_id, 705)
+        await connection.close()
+
+
+async def test_guarded_role_apply_serializes_admin_deletion_cleanup(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    role_repository = VerificationRepository(connection.session_factory)
+    deletion_repository = VerificationRepository(connection.session_factory)
+    role_apply_started = asyncio.Event()
+    deletion_started = asyncio.Event()
+    release_role_apply = asyncio.Event()
+    effects: list[str] = []
+    apply_task: asyncio.Task[object] | None = None
+    deletion_task: asyncio.Task[object] | None = None
+    try:
+        link = await role_repository.create(
+            guild_id=guild_id,
+            user_id=706,
+            message_id=806,
+            audit_channel_id=807,
+            platform="EUN1",
+            puuid="role-fence-puuid",
+        )
+        identity = VerificationLinkIdentity.from_link(link)
+
+        async def apply_roles() -> None:
+            effects.append("role-apply-started")
+            role_apply_started.set()
+            await release_role_apply.wait()
+            effects.append("role-apply-finished")
+
+        async def request_admin_deletion() -> object:
+            deletion_started.set()
+            return await deletion_repository.request_verification_deletion_with_identity(
+                guild_id,
+                706,
+                identity=identity,
+                policy=VerificationDeletionPolicy.ADMIN,
+                access_log=VerificationDeletionAccessLog(
+                    actor_id=900,
+                    reason="Test serializacji usuwania",
+                ),
+            )
+
+        apply_task = asyncio.create_task(
+            role_repository.run_verification_role_update_with_identity(
+                guild_id,
+                706,
+                identity=identity,
+                operation=apply_roles,
+            )
+        )
+        await asyncio.wait_for(role_apply_started.wait(), timeout=2)
+        deletion_task = asyncio.create_task(request_admin_deletion())
+        await asyncio.wait_for(deletion_started.wait(), timeout=2)
+        completed, _pending = await asyncio.wait({deletion_task}, timeout=0.1)
+
+        assert completed == set()
+        assert effects == ["role-apply-started"]
+
+        release_role_apply.set()
+        applied = await asyncio.wait_for(apply_task, timeout=2)
+        request = await asyncio.wait_for(deletion_task, timeout=2)
+
+        assert applied is True
+        assert request.status is VerificationDeletionRequestStatus.REQUESTED
+        assert request.link is not None
+
+        blocked_operation = AsyncMock()
+        blocked = await role_repository.run_verification_role_update_with_identity(
+            guild_id,
+            706,
+            identity=identity,
+            operation=blocked_operation,
+        )
+        assert not blocked
+        blocked_operation.assert_not_awaited()
+
+        async def cleanup_roles() -> bool:
+            effects.append("admin-cleanup")
+            return True
+
+        claimed_at = request.link.deletion_claimed_at
+        assert claimed_at is not None
+        deleted = await deletion_repository.process_verification_deletion_with_identity(
+            guild_id,
+            706,
+            identity=identity,
+            expected_claimed_at=claimed_at,
+            base_delay_seconds=10,
+            operation=cleanup_roles,
+        )
+
+        assert deleted.status is VerificationDeletionProcessStatus.DELETED
+        assert effects == ["role-apply-started", "role-apply-finished", "admin-cleanup"]
+    finally:
+        release_role_apply.set()
+        pending_tasks = [task for task in (apply_task, deletion_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        await _delete_verification_link(role_repository, guild_id, 706)
+        async with connection.engine.begin() as database_connection:
+            await database_connection.execute(
+                text("DELETE FROM verification_access_logs WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
         await connection.close()
 
 
@@ -934,7 +1288,7 @@ async def test_adaptive_rank_migration_downgrade_preserves_existing_link_data(
     config.set_main_option("sqlalchemy.url", url)
     config.attributes["guild_id"] = guild_id
     try:
-        await upgrade_database(settings)
+        await upgrade_database(settings, legacy_audit_channel_id=912)
         await asyncio.to_thread(command.downgrade, config, "20260815_0004")
         old_database = Database(settings)
         try:
@@ -1005,7 +1359,145 @@ async def test_adaptive_rank_migration_downgrade_preserves_existing_link_data(
         finally:
             await downgraded.close()
     finally:
-        await upgrade_database(settings)
+        await upgrade_database(settings, legacy_audit_channel_id=912)
+        cleanup = Database(settings)
+        try:
+            async with cleanup.engine.begin() as connection:
+                await connection.execute(
+                    text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                    {"guild_id": guild_id},
+                )
+        finally:
+            await cleanup.close()
+
+
+async def test_verification_deletion_lifecycle_migration_preserves_existing_links(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+        zweryfikowani_channel_id=912,
+    )
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    url = make_database_url(settings).render_as_string(hide_password=False).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", url)
+    config.attributes["guild_id"] = guild_id
+    try:
+        await upgrade_database(settings, legacy_audit_channel_id=912)
+        await asyncio.to_thread(command.downgrade, config, "20260823_0006")
+        old_database = Database(settings)
+        try:
+            async with old_database.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO verification_links (
+                            guild_id, discord_user_id, message_id, platform, puuid,
+                            verification_method, rank_next_refresh_at, created_at
+                        ) VALUES (
+                            :guild_id, 910, 811, 'EUN1', NULL,
+                            'LEGACY_MISSING', NOW(), NOW()
+                        )
+                        """
+                    ),
+                    {"guild_id": guild_id},
+                )
+        finally:
+            await old_database.close()
+
+        with pytest.raises(RuntimeError, match="legacy_audit_channel_id is required"):
+            await asyncio.to_thread(command.upgrade, config, "20260824_0007")
+        failed_upgrade = Database(settings)
+        try:
+            async with failed_upgrade.engine.connect() as connection:
+                columns = await connection.run_sync(
+                    lambda sync_connection: {
+                        column["name"]
+                        for column in inspect(sync_connection).get_columns("verification_links")
+                    }
+                )
+            assert "audit_channel_id" not in columns
+            assert "deletion_remove_rank_region_roles" not in columns
+        finally:
+            await failed_upgrade.close()
+
+        config.attributes["legacy_audit_channel_id"] = 912
+        await asyncio.to_thread(command.upgrade, config, "20260824_0007")
+        upgraded = Database(settings)
+        try:
+            async with upgraded.engine.connect() as connection:
+                columns = await connection.run_sync(
+                    lambda sync_connection: {
+                        column["name"]
+                        for column in inspect(sync_connection).get_columns("verification_links")
+                    }
+                )
+                check_constraints = await connection.run_sync(
+                    lambda sync_connection: {
+                        constraint["name"]
+                        for constraint in inspect(sync_connection).get_check_constraints(
+                            "verification_links"
+                        )
+                    }
+                )
+                row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT message_id, puuid, audit_channel_id,
+                                   deletion_remove_rank_region_roles
+                            FROM verification_links
+                            WHERE guild_id = :guild_id AND discord_user_id = 910
+                            """
+                        ),
+                        {"guild_id": guild_id},
+                    )
+                ).one()
+            assert {"audit_channel_id", "deletion_remove_rank_region_roles"} <= columns
+            assert "ck_verification_links_audit_message_channel" in check_constraints
+            assert tuple(row) == (811, None, 912, False)
+        finally:
+            await upgraded.close()
+
+        await asyncio.to_thread(command.downgrade, config, "20260823_0006")
+        downgraded = Database(settings)
+        try:
+            async with downgraded.engine.connect() as connection:
+                columns = await connection.run_sync(
+                    lambda sync_connection: {
+                        column["name"]
+                        for column in inspect(sync_connection).get_columns("verification_links")
+                    }
+                )
+                row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT message_id, platform, puuid, verification_method
+                            FROM verification_links
+                            WHERE guild_id = :guild_id AND discord_user_id = 910
+                            """
+                        ),
+                        {"guild_id": guild_id},
+                    )
+                ).one()
+            assert "audit_channel_id" not in columns
+            assert "deletion_remove_rank_region_roles" not in columns
+            assert tuple(row) == (811, "EUN1", None, "LEGACY_MISSING")
+        finally:
+            await downgraded.close()
+    finally:
+        config.attributes["legacy_audit_channel_id"] = 912
+        await asyncio.to_thread(command.upgrade, config, "head")
         cleanup = Database(settings)
         try:
             async with cleanup.engine.begin() as connection:

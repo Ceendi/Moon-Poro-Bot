@@ -1,13 +1,16 @@
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 from moon_poro.account_profile import build_account_profile
 from moon_poro.cogs import verification, verification_legacy
 from moon_poro.cogs.verification import (
     AccountProfileView,
+    AdminDeleteVerificationConfirmationView,
     DeleteVerificationConfirmationView,
     VerificationCog,
     VerificationStartView,
@@ -21,7 +24,17 @@ from moon_poro.cogs.verification_legacy import (
     LegacyVerificationRateLimiter,
     LegacyVerificationStartView,
 )
-from moon_poro.repositories import RankRefreshRequestResult, RankRefreshRequestStatus
+from moon_poro.repositories import (
+    RankRefreshRequestResult,
+    RankRefreshRequestStatus,
+    VerificationDeletionAccessLog,
+    VerificationDeletionPolicy,
+    VerificationDeletionProcessResult,
+    VerificationDeletionProcessStatus,
+    VerificationDeletionRequestResult,
+    VerificationDeletionRequestStatus,
+    VerificationLinkIdentity,
+)
 
 
 class FakeMember:
@@ -70,6 +83,32 @@ def _profile_link(**overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _guarded_deletion_process_mock(
+    status: VerificationDeletionProcessStatus,
+    *,
+    operation_result: bool | None,
+    retry_after_seconds: int | None = None,
+) -> AsyncMock:
+    async def process(
+        _guild_id: int,
+        _user_id: int,
+        *,
+        identity: VerificationLinkIdentity,
+        expected_claimed_at: datetime,
+        base_delay_seconds: int,
+        operation: Callable[[], Awaitable[bool]],
+    ) -> VerificationDeletionProcessResult:
+        del identity, expected_claimed_at, base_delay_seconds
+        if operation_result is not None:
+            assert await operation() is operation_result
+        return VerificationDeletionProcessResult(
+            status,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    return AsyncMock(side_effect=process)
 
 
 def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
@@ -215,6 +254,36 @@ async def test_rso_start_blocks_reverification_while_delete_is_pending(
     sessions.create.assert_not_awaited()
 
 
+async def test_rso_start_explains_incomplete_previous_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=123)
+    member = FakeMember(101, guild=guild)
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    incomplete_link = SimpleNamespace(puuid=None, deletion_requested_at=None)
+    sessions = SimpleNamespace(create=AsyncMock())
+    bot = _panel_bot()
+    bot.settings.verified_role_name = "Zweryfikowany"
+    bot.settings.role_ids = {}
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=incomplete_link))
+    bot.verification_sessions = sessions
+    response = SimpleNamespace(send_message=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        guild=guild,
+        user=member,
+        response=response,
+    )
+
+    await VerificationStartView(bot).children[0].callback(interaction)
+
+    response.send_message.assert_awaited_once_with(
+        "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+        ephemeral=True,
+    )
+    sessions.create.assert_not_awaited()
+
+
 async def test_rso_publishes_short_factual_embed() -> None:
     bot = _panel_bot()
     bot.settings.privacy_policy_url = "https://moonporo.pl/privacy/"
@@ -315,6 +384,24 @@ async def test_unverified_profile_only_reuses_active_verification_provider() -> 
     await view.children[0].callback(interaction)
 
     starter.assert_awaited_once_with(interaction)
+
+
+def test_incomplete_legacy_profile_only_offers_previous_link_removal() -> None:
+    bot = _panel_bot()
+    link = _profile_link(puuid=None)
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=build_account_profile(link),
+        link=link,
+        start_verification=AsyncMock(),
+    )
+
+    assert len(view.children) == 1
+    button = view.children[0]
+    assert button.label == "Usuń poprzednie powiązanie"
+    assert button.style is discord.ButtonStyle.red
+    assert button.custom_id == "account-profile:delete:v1"
 
 
 async def test_profile_refresh_shows_queued_running_and_completed_states(
@@ -1076,9 +1163,7 @@ async def test_profile_delete_passes_captured_identity_to_confirmation(
     show_confirmation.assert_awaited_once_with(
         bot,
         interaction,
-        expected_puuid=link.puuid,
-        expected_platform=link.platform,
-        expected_created_at=link.created_at,
+        expected_identity=VerificationLinkIdentity.from_link(link),
     )
 
 
@@ -1180,10 +1265,121 @@ async def test_delete_button_requires_ephemeral_confirmation(
     assert "Role regionu, rangi i użytkownika pozostaną bez zmian." in confirmation
     view = kwargs["view"]
     assert isinstance(view, DeleteVerificationConfirmationView)
-    assert view.expected_puuid == link.puuid
-    assert view.expected_platform == link.platform
-    assert view.expected_created_at == link.created_at
+    assert view.identity == VerificationLinkIdentity.from_link(link)
     assert {item.label for item in view.children} == {"Tak, usuń powiązanie", "Anuluj"}
+    allowed_mentions = kwargs["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.users is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.replied_user is False
+
+
+async def test_null_puuid_link_can_be_confirmed_and_deleted_with_strict_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    verified = object()
+    monkeypatch.setattr(verification, "find_role", Mock(return_value=verified))
+    requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
+    claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
+    guild = SimpleNamespace(id=123)
+    member = FakeMember(101, guild=guild)
+    member.roles = [verified]
+    current_link = _profile_link(
+        guild_id=123,
+        discord_user_id=101,
+        puuid=None,
+        message_id=None,
+        audit_channel_id=None,
+        deletion_remove_rank_region_roles=False,
+    )
+    claimed_link = _profile_link(
+        guild_id=123,
+        discord_user_id=101,
+        puuid=None,
+        created_at=current_link.created_at,
+        message_id=None,
+        audit_channel_id=None,
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=claimed_at,
+        deletion_remove_rank_region_roles=False,
+    )
+    identity = VerificationLinkIdentity.from_link(current_link)
+    repository = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=current_link),
+        request_verification_deletion_with_identity=AsyncMock(
+            return_value=VerificationDeletionRequestResult(
+                VerificationDeletionRequestStatus.REQUESTED,
+                claimed_link,
+            )
+        ),
+        process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+            VerificationDeletionProcessStatus.DELETED,
+            operation_result=True,
+        ),
+    )
+    bot = _panel_bot()
+    bot.settings.verified_role_name = "Zweryfikowany"
+    bot.settings.rank_refresh_retry_base_seconds = 300
+    bot.verifications = repository
+    bot.verification_sessions = SimpleNamespace(cancel_for_user=AsyncMock())
+    open_interaction = SimpleNamespace(
+        guild_id=123,
+        user=member,
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await _show_delete_confirmation(
+        bot,
+        open_interaction,
+        expected_identity=identity,
+    )
+
+    confirmation = open_interaction.response.send_message.await_args.args[0]
+    assert confirmation == (
+        "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
+        "Rola „Zweryfikowany” zostanie usunięta. "
+        "Role regionu, rangi i użytkownika pozostaną bez zmian.\n"
+        "Po usunięciu możesz ponownie połączyć konto Riot."
+    )
+    view = open_interaction.response.send_message.await_args.kwargs["view"]
+    assert isinstance(view, DeleteVerificationConfirmationView)
+    assert view.identity == identity
+
+    confirm_interaction = SimpleNamespace(
+        guild_id=123,
+        guild=guild,
+        user=member,
+        response=SimpleNamespace(edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    confirm = next(item for item in view.children if item.custom_id.endswith(":confirm:v1"))
+    await confirm.callback(confirm_interaction)
+
+    repository.request_verification_deletion_with_identity.assert_awaited_once_with(
+        123,
+        101,
+        identity=identity,
+        policy=VerificationDeletionPolicy.USER,
+    )
+    process_call = repository.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300
+    member.remove_roles.assert_awaited_once_with(
+        verified,
+        reason="Usunięcie weryfikacji przez użytkownika",
+    )
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
+        123,
+        101,
+        created_at_or_before=requested_at,
+    )
+    confirm_interaction.edit_original_response.assert_awaited_once_with(
+        content=("Usunięto poprzednie powiązanie. Możesz teraz ponownie połączyć konto Riot."),
+        view=None,
+    )
 
 
 async def test_delete_rejects_a_profile_for_an_old_link(
@@ -1202,9 +1398,40 @@ async def test_delete_rejects_a_profile_for_an_old_link(
     await _show_delete_confirmation(
         bot,
         interaction,
-        expected_puuid="old-puuid",
-        expected_platform="EUN1",
-        expected_created_at=current.created_at,
+        expected_identity=VerificationLinkIdentity(
+            puuid="old-puuid",
+            platform="EUN1",
+            created_at=current.created_at,
+        ),
+    )
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
+        ephemeral=True,
+    )
+
+
+async def test_delete_rejects_stale_null_puuid_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    current = _profile_link(puuid=None)
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=current))
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await _show_delete_confirmation(
+        bot,
+        interaction,
+        expected_identity=VerificationLinkIdentity(
+            puuid=None,
+            platform=current.platform,
+            created_at=current.created_at - timedelta(seconds=1),
+        ),
     )
 
     interaction.response.send_message.assert_awaited_once_with(
@@ -1235,12 +1462,15 @@ async def test_delete_confirmation_calls_the_shared_removal_once(
     remove = AsyncMock(return_value="Usunięto.")
     monkeypatch.setattr(verification, "_remove_user_verification", remove)
     created_at = datetime.now(UTC)
+    identity = VerificationLinkIdentity(
+        puuid="puuid-101",
+        platform="EUN1",
+        created_at=created_at,
+    )
     view = DeleteVerificationConfirmationView(
         bot,
         owner_id=101,
-        expected_puuid="puuid-101",
-        expected_platform="EUN1",
-        expected_created_at=created_at,
+        identity=identity,
     )
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=101),
@@ -1257,9 +1487,7 @@ async def test_delete_confirmation_calls_the_shared_removal_once(
     remove.assert_awaited_once_with(
         bot,
         interaction,
-        expected_puuid="puuid-101",
-        expected_platform="EUN1",
-        expected_created_at=created_at,
+        identity=identity,
     )
     interaction.edit_original_response.assert_awaited_once_with(content="Usunięto.", view=None)
 
@@ -1276,9 +1504,11 @@ async def test_delete_confirmation_hides_unexpected_internal_failure(
     view = DeleteVerificationConfirmationView(
         bot,
         owner_id=101,
-        expected_puuid="puuid-101",
-        expected_platform="EUN1",
-        expected_created_at=datetime.now(UTC),
+        identity=VerificationLinkIdentity(
+            puuid="puuid-101",
+            platform="EUN1",
+            created_at=datetime.now(UTC),
+        ),
     )
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=101),
@@ -1293,11 +1523,264 @@ async def test_delete_confirmation_hides_unexpected_internal_failure(
         content="Usuwanie powiązania…", view=None
     )
     interaction.edit_original_response.assert_awaited_once_with(
+        content=("Nie udało się dokończyć usuwania. Sprawdź aktualny stan w sekcji „Moje konto”."),
+        view=None,
+    )
+
+
+async def test_admin_delete_confirmation_is_owner_and_runtime_admin_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = VerificationLinkIdentity(
+        puuid="puuid-101",
+        platform="EUN1",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+    )
+    view = AdminDeleteVerificationConfirmationView(
+        _panel_bot(),
+        owner_id=900,
+        guild_id=123,
+        target_user_id=101,
+        identity=identity,
+        reason="Naruszenie zasad",
+    )
+    runtime_admin = Mock(return_value=True)
+    monkeypatch.setattr(verification, "is_administrator", runtime_admin)
+    foreign = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=901),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    assert await view.interaction_check(foreign) is False
+    foreign.response.send_message.assert_awaited_once_with(
+        "Nie możesz potwierdzić operacji rozpoczętej przez inną osobę.",
+        ephemeral=True,
+    )
+    runtime_admin.assert_not_called()
+
+    owner = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=900),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+    runtime_admin.return_value = False
+    assert await view.interaction_check(owner) is False
+    owner.response.send_message.assert_awaited_once_with(
+        "Nie masz już uprawnień do wykonania tej operacji.",
+        ephemeral=True,
+    )
+
+    runtime_admin.return_value = True
+    assert await view.interaction_check(owner) is True
+
+
+async def test_admin_delete_command_only_opens_confirmation_and_never_deletes_directly() -> None:
+    link = _profile_link(
+        guild_id=123,
+        discord_user_id=101,
+        deletion_remove_rank_region_roles=False,
+    )
+    repository = SimpleNamespace(
+        get_by_puuid=AsyncMock(return_value=link),
+        log_access=AsyncMock(),
+        request_verification_deletion_with_identity=AsyncMock(),
+        delete_by_puuid=AsyncMock(),
+    )
+    bot = _panel_bot()
+    bot.verifications = repository
+    cog = object.__new__(VerificationCog)
+    cog.bot = bot
+    cog._account_by_riot_id = AsyncMock(
+        return_value={
+            "puuid": link.puuid,
+            "gameName": "Moon Poro",
+            "tagLine": "EUNE",
+        }
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=900),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await VerificationCog.remove_by_riot_id.callback(
+        cog,
+        interaction,
+        nick="Moon Poro",
+        tag="EUNE",
+        server="EUN1",
+        powod="Naruszenie zasad",
+    )
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    repository.log_access.assert_awaited_once_with(
+        guild_id=123,
+        actor_id=900,
+        reason="Sprawdzenie przed usunięciem: Naruszenie zasad",
+        discord_user_id=101,
+        puuid=link.puuid,
+    )
+    kwargs = interaction.followup.send.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    view = kwargs["view"]
+    assert isinstance(view, AdminDeleteVerificationConfirmationView)
+    assert view.owner_id == 900
+    assert view.guild_id == 123
+    assert view.target_user_id == 101
+    assert view.identity == VerificationLinkIdentity.from_link(link)
+    assert view.reason == "Naruszenie zasad"
+    allowed_mentions = kwargs["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.users is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.replied_user is False
+    repository.request_verification_deletion_with_identity.assert_not_awaited()
+    repository.delete_by_puuid.assert_not_awaited()
+
+
+async def test_admin_confirmation_uses_admin_policy_and_atomic_access_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = VerificationLinkIdentity(
+        puuid="puuid-101",
+        platform="EUN1",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+    )
+    claimed_link = SimpleNamespace(discord_user_id=101)
+    repository = SimpleNamespace(
+        request_verification_deletion_with_identity=AsyncMock(
+            return_value=VerificationDeletionRequestResult(
+                VerificationDeletionRequestStatus.REQUESTED,
+                claimed_link,
+            )
+        ),
+        log_access=AsyncMock(),
+        delete_by_puuid=AsyncMock(),
+    )
+    bot = _panel_bot()
+    bot.verifications = repository
+    bot.get_guild = Mock()
+    process_deletion = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        verification,
+        "_process_requested_verification_deletion",
+        process_deletion,
+    )
+    view = AdminDeleteVerificationConfirmationView(
+        bot,
+        owner_id=900,
+        guild_id=123,
+        target_user_id=101,
+        identity=identity,
+        reason="Naruszenie zasad",
+    )
+    guild = SimpleNamespace(get_member=Mock(return_value=None))
+    interaction = SimpleNamespace(
+        guild_id=123,
+        guild=guild,
+        user=SimpleNamespace(id=900),
+        response=SimpleNamespace(edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    confirm = next(item for item in view.children if item.custom_id.endswith(":confirm:v1"))
+
+    await confirm.callback(interaction)
+
+    repository.request_verification_deletion_with_identity.assert_awaited_once_with(
+        123,
+        101,
+        identity=identity,
+        policy=VerificationDeletionPolicy.ADMIN,
+        access_log=VerificationDeletionAccessLog(
+            actor_id=900,
+            reason="Usunięcie powiązania: Naruszenie zasad",
+        ),
+    )
+    process_deletion.assert_awaited_once_with(
+        bot,
+        guild=guild,
+        member=None,
+        link=claimed_link,
+    )
+    repository.log_access.assert_not_awaited()
+    repository.delete_by_puuid.assert_not_awaited()
+    interaction.edit_original_response.assert_awaited_once_with(
         content=(
-            "Nie udało się usunąć powiązania. Otwórz profil ponownie, aby sprawdzić aktualny stan."
+            "Usunięto powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi. "
+            "Rola „Użytkownik” pozostała bez zmian."
         ),
         view=None,
     )
+
+
+async def test_admin_deletion_removes_verification_roles_but_keeps_member_role() -> None:
+    member_role = SimpleNamespace(id=1, name="Użytkownik")
+    verified = SimpleNamespace(id=2, name="Zweryfikowany")
+    region = SimpleNamespace(id=3, name="EUNE")
+    rank = SimpleNamespace(id=4, name="Emerald")
+    guild = SimpleNamespace()
+    member = FakeMember(101, guild=guild)
+    member.roles = [member_role, verified, region, rank]
+    requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
+    claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        message_id=None,
+        audit_channel_id=None,
+        puuid="puuid-101",
+        platform="EUN1",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=claimed_at,
+        deletion_remove_rank_region_roles=True,
+    )
+    identity = VerificationLinkIdentity.from_link(link)
+    repository = SimpleNamespace(
+        process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+            VerificationDeletionProcessStatus.DELETED,
+            operation_result=True,
+        ),
+    )
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            lol_ranks=["Iron", "Emerald"],
+            lol_servers=["EUNE", "EUW", "NA"],
+            verified_role_name="Zweryfikowany",
+            role_ids={},
+            rank_refresh_retry_base_seconds=300,
+        ),
+        verifications=repository,
+        verification_sessions=SimpleNamespace(cancel_for_user=AsyncMock()),
+    )
+
+    completed = await verification._process_requested_verification_deletion(
+        bot,
+        guild=guild,
+        member=member,
+        link=link,
+    )
+
+    assert completed is True
+    member.remove_roles.assert_awaited_once_with(
+        verified,
+        region,
+        rank,
+        reason="Administracyjne usunięcie powiązania Riot",
+    )
+    assert member_role not in member.remove_roles.await_args.args
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
+        123,
+        101,
+        created_at_or_before=requested_at,
+    )
+    process_call = repository.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300
 
 
 async def test_shared_delete_keeps_region_rank_and_member_roles(
@@ -1318,14 +1801,21 @@ async def test_shared_delete_keeps_region_rank_and_member_roles(
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))
     monkeypatch.setattr(verification, "find_role", Mock(return_value=verified))
     created_at = datetime(2026, 8, 15, tzinfo=UTC)
+    requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
+    claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
         message_id=456,
+        audit_channel_id=789,
         puuid="puuid",
         platform="EUN1",
         created_at=created_at,
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=claimed_at,
+        deletion_remove_rank_region_roles=False,
     )
+    identity = VerificationLinkIdentity.from_link(link)
     bot = SimpleNamespace(
         settings=SimpleNamespace(
             verified_role_name="Zweryfikowany",
@@ -1333,29 +1823,45 @@ async def test_shared_delete_keeps_region_rank_and_member_roles(
             rank_refresh_retry_base_seconds=300,
         ),
         verifications=SimpleNamespace(
-            request_verification_deletion=AsyncMock(return_value=link),
-            finalize_verification_deletion=AsyncMock(return_value=True),
-            retry_verification_deletion=AsyncMock(),
+            request_verification_deletion_with_identity=AsyncMock(
+                return_value=VerificationDeletionRequestResult(
+                    VerificationDeletionRequestStatus.REQUESTED,
+                    link,
+                )
+            ),
+            process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+                VerificationDeletionProcessStatus.DELETED,
+                operation_result=True,
+            ),
         ),
         verification_sessions=SimpleNamespace(cancel_for_user=AsyncMock()),
     )
     interaction = SimpleNamespace(guild_id=123, user=member, guild=guild)
 
-    message = await _remove_user_verification(bot, interaction)
+    message = await _remove_user_verification(bot, interaction, identity=identity)
 
+    bot.verifications.request_verification_deletion_with_identity.assert_awaited_once_with(
+        123,
+        101,
+        identity=identity,
+        policy=VerificationDeletionPolicy.USER,
+    )
     member.remove_roles.assert_awaited_once_with(
         verified, reason="Usunięcie weryfikacji przez użytkownika"
     )
     assert region in member.roles and rank in member.roles and member_role in member.roles
     assert "pozostają bez zmian" in message
     audit_delete.assert_awaited_once()
-    bot.verifications.finalize_verification_deletion.assert_awaited_once_with(
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
         123,
         101,
-        expected_puuid="puuid",
-        expected_platform="EUN1",
-        expected_created_at=created_at,
+        created_at_or_before=requested_at,
     )
+    process_call = bot.verifications.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300
 
 
 async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
@@ -1373,18 +1879,32 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
     monkeypatch.setattr(verification, "find_role", Mock(return_value=verified))
+    requested_at = created_at + timedelta(seconds=30)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
         message_id=456,
+        audit_channel_id=789,
         puuid="puuid",
         platform="EUN1",
         created_at=created_at,
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=created_at + timedelta(minutes=1),
+        deletion_remove_rank_region_roles=False,
     )
+    identity = VerificationLinkIdentity.from_link(link)
     repository = SimpleNamespace(
-        request_verification_deletion=AsyncMock(return_value=link),
-        retry_verification_deletion=AsyncMock(return_value=300),
-        finalize_verification_deletion=AsyncMock(),
+        request_verification_deletion_with_identity=AsyncMock(
+            return_value=VerificationDeletionRequestResult(
+                VerificationDeletionRequestStatus.REQUESTED,
+                link,
+            )
+        ),
+        process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+            VerificationDeletionProcessStatus.RETRY_SCHEDULED,
+            operation_result=False,
+            retry_after_seconds=300,
+        ),
     )
     bot = SimpleNamespace(
         settings=SimpleNamespace(
@@ -1397,16 +1917,19 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
     )
     interaction = SimpleNamespace(guild_id=123, user=member, guild=guild)
 
-    message = await _remove_user_verification(bot, interaction)
+    message = await _remove_user_verification(bot, interaction, identity=identity)
 
     assert message == ("Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie.")
-    repository.retry_verification_deletion.assert_awaited_once_with(
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
         123,
         101,
-        expected_created_at=created_at,
-        base_delay_seconds=300,
+        created_at_or_before=requested_at,
     )
-    repository.finalize_verification_deletion.assert_not_awaited()
+    process_call = repository.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == link.deletion_claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300
 
 
 async def test_shared_delete_retries_audit_cleanup_before_finalizing(
@@ -1426,18 +1949,32 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))
     monkeypatch.setattr(verification, "find_role", Mock(return_value=None))
+    requested_at = created_at + timedelta(seconds=30)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
         message_id=456,
+        audit_channel_id=789,
         puuid="puuid",
         platform="EUN1",
         created_at=created_at,
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=created_at + timedelta(minutes=1),
+        deletion_remove_rank_region_roles=False,
     )
+    identity = VerificationLinkIdentity.from_link(link)
     repository = SimpleNamespace(
-        request_verification_deletion=AsyncMock(return_value=link),
-        retry_verification_deletion=AsyncMock(return_value=300),
-        finalize_verification_deletion=AsyncMock(),
+        request_verification_deletion_with_identity=AsyncMock(
+            return_value=VerificationDeletionRequestResult(
+                VerificationDeletionRequestStatus.REQUESTED,
+                link,
+            )
+        ),
+        process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+            VerificationDeletionProcessStatus.RETRY_SCHEDULED,
+            operation_result=False,
+            retry_after_seconds=300,
+        ),
     )
     bot = SimpleNamespace(
         settings=SimpleNamespace(
@@ -1450,9 +1987,78 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
     )
 
     message = await _remove_user_verification(
-        bot, SimpleNamespace(guild_id=123, user=member, guild=guild)
+        bot,
+        SimpleNamespace(guild_id=123, user=member, guild=guild),
+        identity=identity,
     )
 
     assert message == ("Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie.")
-    repository.retry_verification_deletion.assert_awaited_once()
-    repository.finalize_verification_deletion.assert_not_awaited()
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
+        123,
+        101,
+        created_at_or_before=requested_at,
+    )
+    process_call = repository.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == link.deletion_claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300
+
+
+async def test_guarded_delete_does_not_run_discord_cleanup_after_claim_is_lost() -> None:
+    verified = object()
+    audit_delete = AsyncMock()
+    channel = SimpleNamespace(
+        get_partial_message=Mock(return_value=SimpleNamespace(delete=audit_delete))
+    )
+    guild = SimpleNamespace(get_channel=Mock(return_value=channel))
+    member = FakeMember(101, guild=guild)
+    member.roles = [verified]
+    requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
+    claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        message_id=456,
+        audit_channel_id=789,
+        puuid="puuid",
+        platform="EUN1",
+        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        deletion_requested_at=requested_at,
+        deletion_claimed_at=claimed_at,
+        deletion_remove_rank_region_roles=False,
+    )
+    identity = VerificationLinkIdentity.from_link(link)
+    repository = SimpleNamespace(
+        process_verification_deletion_with_identity=_guarded_deletion_process_mock(
+            VerificationDeletionProcessStatus.CLAIM_LOST,
+            operation_result=None,
+        )
+    )
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(rank_refresh_retry_base_seconds=300),
+        verifications=repository,
+        verification_sessions=SimpleNamespace(cancel_for_user=AsyncMock()),
+    )
+
+    completed = await verification._process_requested_verification_deletion(
+        bot,
+        guild=guild,
+        member=member,
+        link=link,
+    )
+
+    assert completed is False
+    member.remove_roles.assert_not_awaited()
+    guild.get_channel.assert_not_called()
+    audit_delete.assert_not_awaited()
+    bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
+        123,
+        101,
+        created_at_or_before=requested_at,
+    )
+    process_call = repository.process_verification_deletion_with_identity.await_args
+    assert process_call.args == (123, 101)
+    assert process_call.kwargs["identity"] == identity
+    assert process_call.kwargs["expected_claimed_at"] == claimed_at
+    assert process_call.kwargs["base_delay_seconds"] == 300

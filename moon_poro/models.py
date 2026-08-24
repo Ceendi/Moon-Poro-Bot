@@ -6,6 +6,7 @@ from enum import StrEnum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -46,6 +47,10 @@ class VerificationSessionStatus(StrEnum):
 class VerificationLink(Base):
     __tablename__ = "verification_links"
     __table_args__ = (
+        CheckConstraint(
+            "message_id IS NULL OR audit_channel_id IS NOT NULL",
+            name="ck_verification_links_audit_message_channel",
+        ),
         UniqueConstraint("guild_id", "puuid", name="uq_verification_links_guild_puuid"),
         Index(
             "ix_verification_links_rank_refresh_due",
@@ -70,6 +75,7 @@ class VerificationLink(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
+    audit_channel_id: Mapped[int | None] = mapped_column(BigInteger)
     platform: Mapped[str] = mapped_column(String(10), nullable=False)
     puuid: Mapped[str | None] = mapped_column(String(255))
     riot_game_name: Mapped[str | None] = mapped_column(String(100))
@@ -119,6 +125,9 @@ class VerificationLink(Base):
     deletion_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deletion_failures: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0"), nullable=False
+    )
+    deletion_remove_rank_region_roles: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -212,7 +221,9 @@ class VerificationAccessLog(Base):
     __tablename__ = "verification_access_logs"
     __table_args__ = (Index("ix_verification_access_logs_retention", "guild_id", "created_at"),)
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     actor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     discord_user_id: Mapped[int | None] = mapped_column(BigInteger)

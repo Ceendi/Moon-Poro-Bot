@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -24,6 +25,7 @@ from moon_poro.models import (
 )
 from moon_poro.outbox import mark_outbox_claimed
 from moon_poro.rank_refresh import RankRefreshDecision, RankSnapshot, retry_delay_with_jitter
+from moon_poro.time_utils import timestamps_match
 
 
 class RankRefreshRequestStatus(StrEnum):
@@ -41,6 +43,61 @@ class RankRefreshRequestResult:
     status: RankRefreshRequestStatus
     retry_after_seconds: int | None = None
     baseline_rank_last_checked_at: datetime | None = None
+
+
+class VerificationDeletionPolicy(StrEnum):
+    USER = "user"
+    ADMIN = "admin"
+
+
+class VerificationDeletionRequestStatus(StrEnum):
+    REQUESTED = "REQUESTED"
+    ALREADY_REQUESTED = "ALREADY_REQUESTED"
+    POLICY_CONFLICT = "POLICY_CONFLICT"
+    LINK_CHANGED = "LINK_CHANGED"
+    NOT_LINKED = "NOT_LINKED"
+
+
+class VerificationDeletionProcessStatus(StrEnum):
+    DELETED = "DELETED"
+    RETRY_SCHEDULED = "RETRY_SCHEDULED"
+    ALREADY_DELETED = "ALREADY_DELETED"
+    LINK_CHANGED = "LINK_CHANGED"
+    CLAIM_LOST = "CLAIM_LOST"
+    NOT_REQUESTED = "NOT_REQUESTED"
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationLinkIdentity:
+    puuid: str | None
+    platform: str
+    created_at: datetime
+
+    @classmethod
+    def from_link(cls, link: VerificationLink) -> VerificationLinkIdentity:
+        return cls(
+            puuid=link.puuid,
+            platform=link.platform,
+            created_at=link.created_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationDeletionAccessLog:
+    actor_id: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationDeletionRequestResult:
+    status: VerificationDeletionRequestStatus
+    link: VerificationLink | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationDeletionProcessResult:
+    status: VerificationDeletionProcessStatus
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +152,10 @@ class VerificationRepository:
         *,
         guild_id: int,
         user_id: int,
-        message_id: int,
+        message_id: int | None,
         platform: str,
-        puuid: str,
+        puuid: str | None,
+        audit_channel_id: int | None = None,
         riot_game_name: str | None = None,
         riot_tag_line: str | None = None,
         method: str = "PROFILE_ICON",
@@ -113,6 +171,7 @@ class VerificationRepository:
             guild_id=guild_id,
             discord_user_id=user_id,
             message_id=message_id,
+            audit_channel_id=audit_channel_id,
             platform=platform,
             puuid=puuid,
             riot_game_name=riot_game_name,
@@ -656,15 +715,25 @@ class VerificationRepository:
                 expected_created_at=expected_created_at,
             )
 
-    async def request_verification_deletion(
+    async def request_verification_deletion_with_identity(
         self,
         guild_id: int,
         user_id: int,
         *,
-        expected_puuid: str | None = None,
-        expected_platform: str | None = None,
-        expected_created_at: datetime | None = None,
-    ) -> VerificationLink | None:
+        identity: VerificationLinkIdentity,
+        policy: VerificationDeletionPolicy,
+        access_log: VerificationDeletionAccessLog | None = None,
+    ) -> VerificationDeletionRequestResult:
+        policy = VerificationDeletionPolicy(policy)
+        if policy is VerificationDeletionPolicy.ADMIN:
+            if access_log is None:
+                raise ValueError("admin deletion requires an access log")
+            access_reason = _verification_access_reason(access_log.reason)
+        else:
+            if access_log is not None:
+                raise ValueError("user deletion cannot include an admin access log")
+            access_reason = None
+
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
             link = await session.get(
@@ -673,23 +742,45 @@ class VerificationRepository:
                 with_for_update=True,
             )
             if link is None:
-                return None
-            if not _link_identity_matches(
-                link,
-                expected_puuid=expected_puuid,
-                expected_platform=expected_platform,
-                expected_created_at=expected_created_at,
-                allow_deleting=True,
-            ):
-                return None
-            link.deletion_requested_at = link.deletion_requested_at or now
+                return VerificationDeletionRequestResult(
+                    VerificationDeletionRequestStatus.NOT_LINKED
+                )
+            if not _strict_link_identity_matches(link, identity):
+                return VerificationDeletionRequestResult(
+                    VerificationDeletionRequestStatus.LINK_CHANGED
+                )
+            remove_rank_region_roles = policy is VerificationDeletionPolicy.ADMIN
+            if link.deletion_requested_at is not None:
+                status = (
+                    VerificationDeletionRequestStatus.ALREADY_REQUESTED
+                    if link.deletion_remove_rank_region_roles == remove_rank_region_roles
+                    else VerificationDeletionRequestStatus.POLICY_CONFLICT
+                )
+                return VerificationDeletionRequestResult(status, link)
+
+            link.deletion_requested_at = now
             link.deletion_claimed_at = now
             link.deletion_next_attempt_at = now
+            link.deletion_failures = 0
+            link.deletion_remove_rank_region_roles = remove_rank_region_roles
             link.rank_refresh_claimed_at = None
             link.rank_role_sync_pending = False
             link.rank_role_sync_claimed_at = None
             link.rank_role_sync_next_attempt_at = None
-            return link
+            if access_log is not None:
+                session.add(
+                    VerificationAccessLog(
+                        guild_id=guild_id,
+                        actor_id=access_log.actor_id,
+                        reason=cast(str, access_reason),
+                        discord_user_id=link.discord_user_id,
+                        puuid=link.puuid,
+                    )
+                )
+            return VerificationDeletionRequestResult(
+                VerificationDeletionRequestStatus.REQUESTED,
+                link,
+            )
 
     async def enqueue_verified_marker_cleanup(self, guild_id: int, user_id: int) -> int:
         now = datetime.now(UTC)
@@ -833,15 +924,20 @@ class VerificationRepository:
                 link.deletion_claimed_at = now
             return links
 
-    async def retry_verification_deletion(
+    async def run_verification_role_update_with_identity(
         self,
         guild_id: int,
         user_id: int,
         *,
-        expected_created_at: datetime,
-        base_delay_seconds: int,
-    ) -> int | None:
-        now = datetime.now(UTC)
+        identity: VerificationLinkIdentity,
+        operation: Callable[[], Awaitable[None]],
+    ) -> bool:
+        """Apply Discord roles only while the observed link is still active.
+
+        ``operation`` must perform Discord I/O only; calling back into a repository
+        here would risk a lock-order deadlock while this link row is locked.
+        """
+
         async with self._sessions.begin() as session:
             link = await session.get(
                 VerificationLink,
@@ -850,10 +946,89 @@ class VerificationRepository:
             )
             if (
                 link is None
-                or link.created_at != expected_created_at
-                or link.deletion_requested_at is None
+                or link.deletion_requested_at is not None
+                or not _strict_link_identity_matches(link, identity)
             ):
-                return None
+                return False
+            await operation()
+            return True
+
+    async def run_verification_deletion_role_cleanup_with_identity(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        identity: VerificationLinkIdentity,
+        expected_requested_at: datetime,
+        expected_remove_rank_region_roles: bool,
+        operation: Callable[[], Awaitable[None]],
+    ) -> bool:
+        """Fence Discord role cleanup to the observed pending deletion.
+
+        ``operation`` must perform Discord I/O only. Keeping the link row locked
+        until it finishes prevents an old join/member-update event from removing
+        roles after deletion completed and the user connected a new Riot account.
+        """
+
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if (
+                link is None
+                or not _strict_link_identity_matches(link, identity)
+                or not timestamps_match(link.deletion_requested_at, expected_requested_at)
+                or link.deletion_remove_rank_region_roles != expected_remove_rank_region_roles
+            ):
+                return False
+            await operation()
+            return True
+
+    async def process_verification_deletion_with_identity(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        identity: VerificationLinkIdentity,
+        expected_claimed_at: datetime,
+        base_delay_seconds: int,
+        operation: Callable[[], Awaitable[bool]],
+    ) -> VerificationDeletionProcessResult:
+        """Run Discord cleanup and finalize one strictly identified deletion claim.
+
+        ``operation`` must perform Discord I/O only; calling back into a repository
+        here would risk a lock-order deadlock while this link row is locked.
+        """
+
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if link is None:
+                return VerificationDeletionProcessResult(
+                    VerificationDeletionProcessStatus.ALREADY_DELETED
+                )
+            if not _strict_link_identity_matches(link, identity):
+                return VerificationDeletionProcessResult(
+                    VerificationDeletionProcessStatus.LINK_CHANGED
+                )
+            if link.deletion_requested_at is None:
+                return VerificationDeletionProcessResult(
+                    VerificationDeletionProcessStatus.NOT_REQUESTED
+                )
+            if not timestamps_match(link.deletion_claimed_at, expected_claimed_at):
+                return VerificationDeletionProcessResult(
+                    VerificationDeletionProcessStatus.CLAIM_LOST
+                )
+
+            if await operation():
+                await session.delete(link)
+                return VerificationDeletionProcessResult(VerificationDeletionProcessStatus.DELETED)
+
             failures = min(link.deletion_failures + 1, 16)
             delay = retry_delay_with_jitter(
                 base_delay_seconds,
@@ -863,57 +1038,11 @@ class VerificationRepository:
             )
             link.deletion_failures = failures
             link.deletion_claimed_at = None
-            link.deletion_next_attempt_at = now + timedelta(seconds=delay)
-            return delay
-
-    async def finalize_verification_deletion(
-        self,
-        guild_id: int,
-        user_id: int,
-        *,
-        expected_puuid: str,
-        expected_platform: str,
-        expected_created_at: datetime,
-    ) -> bool:
-        async with self._sessions.begin() as session:
-            link = await session.get(
-                VerificationLink,
-                (guild_id, user_id),
-                with_for_update=True,
+            link.deletion_next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+            return VerificationDeletionProcessResult(
+                VerificationDeletionProcessStatus.RETRY_SCHEDULED,
+                retry_after_seconds=delay,
             )
-            if link is None:
-                return True
-            if not _link_identity_matches(
-                link,
-                expected_puuid=expected_puuid,
-                expected_platform=expected_platform,
-                expected_created_at=expected_created_at,
-                allow_deleting=True,
-            ):
-                return False
-            if link.deletion_requested_at is None:
-                return False
-            await session.delete(link)
-            return True
-
-    async def delete_by_user(self, guild_id: int, user_id: int) -> VerificationLink | None:
-        async with self._sessions.begin() as session:
-            link = await session.get(VerificationLink, (guild_id, user_id))
-            if link is not None:
-                await session.delete(link)
-            return link
-
-    async def delete_by_puuid(self, guild_id: int, puuid: str) -> VerificationLink | None:
-        async with self._sessions.begin() as session:
-            link = await session.scalar(
-                select(VerificationLink).where(
-                    VerificationLink.guild_id == guild_id,
-                    VerificationLink.puuid == puuid,
-                )
-            )
-            if link is not None:
-                await session.delete(link)
-            return link
 
     async def log_access(
         self,
@@ -929,7 +1058,7 @@ class VerificationRepository:
                 VerificationAccessLog(
                     guild_id=guild_id,
                     actor_id=actor_id,
-                    reason=reason,
+                    reason=_verification_access_reason(reason),
                     discord_user_id=discord_user_id,
                     puuid=puuid,
                 )
@@ -969,6 +1098,24 @@ def _link_identity_matches(
         and (expected_platform is None or link.platform == expected_platform)
         and (expected_created_at is None or link.created_at == expected_created_at)
     )
+
+
+def _strict_link_identity_matches(
+    link: VerificationLink,
+    identity: VerificationLinkIdentity,
+) -> bool:
+    return (
+        link.puuid == identity.puuid
+        and link.platform == identity.platform
+        and timestamps_match(link.created_at, identity.created_at)
+    )
+
+
+def _verification_access_reason(reason: str) -> str:
+    normalized = reason.strip()
+    if not normalized:
+        raise ValueError("access log reason cannot be empty")
+    return normalized[:300]
 
 
 class WarningRepository:

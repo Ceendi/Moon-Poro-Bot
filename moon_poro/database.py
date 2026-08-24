@@ -51,15 +51,30 @@ class Database:
         await self.engine.dispose()
 
 
-def _upgrade_database(settings: DatabaseConfiguration) -> None:
+def _upgrade_database(
+    settings: DatabaseConfiguration,
+    legacy_audit_channel_id: int | None = None,
+) -> None:
     root = Path(__file__).resolve().parent.parent
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     url = make_database_url(settings).render_as_string(hide_password=False).replace("%", "%%")
     config.set_main_option("sqlalchemy.url", url)
     config.attributes["guild_id"] = settings.guild_id
+    # This value is intentionally not inferred from the current audit-channel
+    # setting. A channel may have changed since legacy messages were created.
+    configured_legacy_channel = getattr(settings, "legacy_audit_channel_id", None)
+    config.attributes["legacy_audit_channel_id"] = (
+        legacy_audit_channel_id
+        if legacy_audit_channel_id is not None
+        else configured_legacy_channel
+    )
     command.upgrade(config, "head")
 
 
-async def upgrade_database(settings: DatabaseConfiguration) -> None:
-    await asyncio.to_thread(_upgrade_database, settings)
+async def upgrade_database(
+    settings: DatabaseConfiguration,
+    *,
+    legacy_audit_channel_id: int | None = None,
+) -> None:
+    await asyncio.to_thread(_upgrade_database, settings, legacy_audit_channel_id)

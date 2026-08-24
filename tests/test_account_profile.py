@@ -43,9 +43,14 @@ def _link(**changes: Any) -> SimpleNamespace:
     ("link", "kwargs", "expected"),
     [
         (None, {}, AccountProfileState.UNVERIFIED),
-        (_link(puuid=None), {}, AccountProfileState.UNVERIFIED),
+        (_link(puuid=None), {}, AccountProfileState.INCOMPLETE_LEGACY),
         (
             _link(deletion_requested_at=NOW),
+            {},
+            AccountProfileState.DELETING,
+        ),
+        (
+            _link(puuid=None, deletion_requested_at=NOW),
             {},
             AccountProfileState.DELETING,
         ),
@@ -238,6 +243,7 @@ def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
     ("state", "expected_enabled"),
     [
         (AccountProfileState.UNVERIFIED, False),
+        (AccountProfileState.INCOMPLETE_LEGACY, False),
         (AccountProfileState.DELETING, False),
         (AccountProfileState.AUTHORIZATION_UNAVAILABLE, False),
         (AccountProfileState.REFRESH_COOLDOWN, True),
@@ -255,6 +261,8 @@ def test_refresh_button_availability(
     kwargs: dict[str, Any] = {}
     if state is AccountProfileState.UNVERIFIED:
         link = None
+    elif state is AccountProfileState.INCOMPLETE_LEGACY:
+        link = _link(puuid=None)
     elif state is AccountProfileState.DELETING:
         link = _link(deletion_requested_at=NOW)
     elif state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
@@ -320,6 +328,37 @@ def test_unverified_profile_uses_a_short_account_field() -> None:
     assert profile.embed.description is None
     assert [(field.name, field.value, field.inline) for field in profile.embed.fields] == [
         ("Konto Riot", "Niepołączone", False)
+    ]
+
+
+def test_incomplete_legacy_profile_explains_how_to_reconnect_without_rank_fields() -> None:
+    profile = build_account_profile(_link(puuid=None), now=NOW)
+
+    assert profile.state is AccountProfileState.INCOMPLETE_LEGACY
+    assert profile.embed.description is None
+    assert profile.embed.colour == discord.Colour.orange()
+    assert profile.refresh_enabled is False
+    assert [(field.name, field.value, field.inline) for field in profile.embed.fields] == [
+        ("Konto Riot", "Wymaga ponownego połączenia", False),
+        (
+            "Stan konta",
+            ("Poprzednie powiązanie jest nieaktualne. Usuń je, aby ponownie połączyć konto Riot."),
+            False,
+        ),
+    ]
+
+
+def test_deleting_incomplete_legacy_profile_does_not_render_rank_fields() -> None:
+    profile = build_account_profile(
+        _link(puuid=None, deletion_requested_at=NOW),
+        now=NOW,
+    )
+
+    assert profile.state is AccountProfileState.DELETING
+    assert profile.refresh_enabled is False
+    assert [(field.name, field.value, field.inline) for field in profile.embed.fields] == [
+        ("Konto Riot", "Wymaga ponownego połączenia", False),
+        ("Stan konta", "Trwa usuwanie powiązania.", False),
     ]
 
 
