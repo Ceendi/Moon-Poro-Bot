@@ -30,6 +30,7 @@ from moon_poro.cogs.verification import (
     _run_active_link_role_update,
     _show_account_profile,
     _show_delete_confirmation,
+    _verification_legal_links,
 )
 from moon_poro.permissions import administrator_only
 from moon_poro.rank_refresh import solo_rank_snapshot
@@ -847,6 +848,11 @@ class LegacyVerificationCog(VerificationCog):
                 "Bot nada rolę „Zweryfikowany” oraz będzie aktualizował role regionu "
                 "i rangi Solo/Duo."
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Zasady",
+            value=_verification_legal_links(self.bot),
             inline=False,
         )
         embed.set_footer(text="Kliknij „Zweryfikuj konto”, aby rozpocząć.")

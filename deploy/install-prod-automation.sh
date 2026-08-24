@@ -45,4 +45,4 @@ systemctl enable --now moon-poro-prod-backup.timer
 echo "Production deployment command: sudo /usr/local/sbin/deploy-moon-poro-prod"
 echo "Manual verified backup: sudo systemctl start moon-poro-prod-backup.service"
 echo "Daily backups remain for 90 days in $BACKUP_DIR/daily."
-echo "Pre-deploy backups in $BACKUP_DIR/pre-deploy are not deleted automatically."
+echo "Pre-deploy backups also remain for 90 days in $BACKUP_DIR/pre-deploy."

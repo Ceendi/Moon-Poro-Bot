@@ -88,6 +88,12 @@ def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
     return f"Rangę możesz odświeżyć za {seconds} s."
 
 
+def _verification_legal_links(bot: MoonPoroBot) -> str:
+    base_url = str(bot.settings.rso_base_url).rstrip("/")
+    privacy_url = str(bot.settings.privacy_policy_url or f"{base_url}/privacy/")
+    return f"[Polityka prywatności]({privacy_url}) · [Warunki korzystania]({base_url}/terms/)"
+
+
 def _lookup_reason_choices() -> list[Choice[str]]:
     return [
         Choice(name="Moderacja", value="Moderacja"),
@@ -2171,9 +2177,6 @@ class VerificationCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(name="weryfikacja", description="Publikuje panel weryfikacji Riot")
     async def publish_verification(self, interaction: discord.Interaction) -> None:
-        privacy_url = self.bot.settings.privacy_policy_url or (
-            f"{self.bot.settings.rso_base_url}/privacy"
-        )
         embed = discord.Embed(
             title="Weryfikacja konta League of Legends",
             description=(
@@ -2183,8 +2186,8 @@ class VerificationCog(commands.Cog):
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
         embed.add_field(
-            name="Prywatność",
-            value=f"[Polityka prywatności]({privacy_url})",
+            name="Zasady",
+            value=_verification_legal_links(self.bot),
             inline=False,
         )
         embed.set_footer(text="Logowanie odbywa się na stronie Riot.")

@@ -18,6 +18,7 @@ from moon_poro.cogs.verification import (
     _request_rank_refresh_from_panel,
     _show_account_profile,
     _show_delete_confirmation,
+    _verification_legal_links,
 )
 from moon_poro.cogs.verification_legacy import (
     LegacyVerificationCog,
@@ -54,6 +55,8 @@ def _panel_bot() -> SimpleNamespace:
             verification_global_rate_period_seconds=10,
             rank_refresh_button_cooldown_seconds=1800,
             rank_refresh_claim_timeout_seconds=300,
+            privacy_policy_url="https://moonporo.pl/privacy/",
+            rso_base_url="https://moonporo.pl",
         ),
         riot_auth_breaker=SimpleNamespace(
             snapshot=Mock(return_value=SimpleNamespace(blocked=False))
@@ -139,6 +142,17 @@ def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
     ]
     assert all(item.emoji is None for item in rso_view.children)
     assert all(item.emoji is None for item in legacy_view.children)
+
+
+def test_verification_legal_links_fall_back_to_the_public_site() -> None:
+    bot = _panel_bot()
+    bot.settings.privacy_policy_url = None
+    bot.settings.rso_base_url = "https://moonporo.pl/"
+
+    assert _verification_legal_links(bot) == (
+        "[Polityka prywatności](https://moonporo.pl/privacy/) · "
+        "[Warunki korzystania](https://moonporo.pl/terms/)"
+    )
 
 
 def test_profile_commands_are_guild_only() -> None:
@@ -286,8 +300,6 @@ async def test_rso_start_explains_incomplete_previous_link(
 
 async def test_rso_publishes_short_factual_embed() -> None:
     bot = _panel_bot()
-    bot.settings.privacy_policy_url = "https://moonporo.pl/privacy/"
-    bot.settings.rso_base_url = "https://moonporo.pl"
     cog = object.__new__(VerificationCog)
     cog.bot = bot
     cog.rso_start_view = VerificationStartView(bot)
@@ -299,6 +311,11 @@ async def test_rso_publishes_short_factual_embed() -> None:
     assert kwargs["embed"].title == "Weryfikacja konta League of Legends"
     assert "oficjalne logowanie Riot" in kwargs["embed"].description
     assert "dywiz" not in kwargs["embed"].description.lower()
+    assert kwargs["embed"].fields[0].name == "Zasady"
+    assert kwargs["embed"].fields[0].value == (
+        "[Polityka prywatności](https://moonporo.pl/privacy/) · "
+        "[Warunki korzystania](https://moonporo.pl/terms/)"
+    )
     assert isinstance(kwargs["view"], VerificationStartView)
 
 
@@ -316,6 +333,11 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
     assert kwargs["embed"].title == "Weryfikacja konta League of Legends"
     assert "ikonę profilu" in kwargs["embed"].description
     assert "rangi Solo/Duo" in kwargs["embed"].fields[0].value
+    assert kwargs["embed"].fields[1].name == "Zasady"
+    assert kwargs["embed"].fields[1].value == (
+        "[Polityka prywatności](https://moonporo.pl/privacy/) · "
+        "[Warunki korzystania](https://moonporo.pl/terms/)"
+    )
     assert isinstance(kwargs["view"], LegacyVerificationStartView)
 
 
