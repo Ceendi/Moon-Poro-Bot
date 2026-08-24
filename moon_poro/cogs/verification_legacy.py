@@ -154,7 +154,6 @@ class LegacyVerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Zweryfikuj konto",
-        emoji="✅",
         style=discord.ButtonStyle.green,
         custom_id="verification:start:profile-icon:v1",
     )
@@ -212,7 +211,6 @@ class LegacyVerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Moje konto",
-        emoji="👤",
         style=discord.ButtonStyle.secondary,
         custom_id="verification:account-profile:v1",
     )
@@ -229,7 +227,6 @@ class LegacyVerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Odśwież rangę",
-        emoji="🔄",
         style=discord.ButtonStyle.blurple,
         custom_id="verification:rank-refresh:v1",
     )
@@ -242,7 +239,6 @@ class LegacyVerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Usuń powiązanie",
-        emoji="🗑️",
         style=discord.ButtonStyle.red,
         custom_id="verification:delete:v1",
     )

@@ -98,6 +98,8 @@ def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
         "Odśwież rangę",
         "Usuń powiązanie",
     ]
+    assert all(item.emoji is None for item in rso_view.children)
+    assert all(item.emoji is None for item in legacy_view.children)
 
 
 def test_profile_commands_are_guild_only() -> None:
@@ -283,6 +285,7 @@ async def test_profile_is_ephemeral_and_owner_bound(
         "Odśwież rangę",
         "Usuń powiązanie",
     ]
+    assert all(item.emoji is None for item in view.children)
 
     foreign_interaction = SimpleNamespace(
         user=SimpleNamespace(id=202),
@@ -307,6 +310,7 @@ async def test_unverified_profile_only_reuses_active_verification_provider() -> 
     )
 
     assert [item.label for item in view.children] == ["Zweryfikuj konto"]
+    assert view.children[0].emoji is None
     interaction = SimpleNamespace()
     await view.children[0].callback(interaction)
 

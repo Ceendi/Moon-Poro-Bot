@@ -1212,7 +1212,6 @@ class AccountProfileView(discord.ui.View):
 
     @discord.ui.button(
         label="Zweryfikuj konto",
-        emoji="✅",
         style=discord.ButtonStyle.green,
         custom_id="account-profile:verify:v1",
     )
@@ -1225,7 +1224,6 @@ class AccountProfileView(discord.ui.View):
 
     @discord.ui.button(
         label="Odśwież rangę",
-        emoji="🔄",
         style=discord.ButtonStyle.blurple,
         custom_id="account-profile:rank-refresh:v1",
     )
@@ -1348,7 +1346,6 @@ class AccountProfileView(discord.ui.View):
 
     @discord.ui.button(
         label="Usuń powiązanie",
-        emoji="🗑️",
         style=discord.ButtonStyle.red,
         custom_id="account-profile:delete:v1",
     )
@@ -1527,7 +1524,6 @@ class VerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Zweryfikuj konto",
-        emoji="✅",
         style=discord.ButtonStyle.green,
         custom_id="verification:start:rso:v1",
     )
@@ -1609,7 +1605,6 @@ class VerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Moje konto",
-        emoji="👤",
         style=discord.ButtonStyle.secondary,
         custom_id="verification:account-profile:v1",
     )
@@ -1626,7 +1621,6 @@ class VerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Odśwież rangę",
-        emoji="🔄",
         style=discord.ButtonStyle.blurple,
         custom_id="verification:rank-refresh:v1",
     )
@@ -1639,7 +1633,6 @@ class VerificationStartView(discord.ui.View):
 
     @discord.ui.button(
         label="Usuń powiązanie",
-        emoji="🗑️",
         style=discord.ButtonStyle.red,
         custom_id="verification:delete:v1",
     )
