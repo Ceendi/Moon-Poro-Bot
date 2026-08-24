@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -13,10 +14,11 @@ from discord.app_commands import Choice
 from discord.ext import commands, tasks
 
 from moon_poro.account_profile import (
-    REFRESH_PENDING_BUTTON_LABEL,
+    REFRESH_RUNNING_BUTTON_LABEL,
     AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
+    set_account_profile_status,
 )
 from moon_poro.bot import MoonPoroBot
 from moon_poro.models import VerificationLink, VerificationSession
@@ -60,9 +62,7 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
 )
 _ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie."
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie trwa dłużej niż zwykle.\n"
-    "Na razie pokazujemy poprzednie dane.\n"
-    "Otwórz `/profil` ponownie za chwilę."
+    "Odświeżanie trwa dłużej niż zwykle.\nOtwórz `/profil` ponownie za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
     "Nie udało się pokazać wyniku odświeżania.\n"
@@ -864,7 +864,7 @@ async def _remove_user_verification(
         link=link,
     )
     if not completed:
-        return "Usuwanie powiązania czeka na dokończenie. Bot spróbuje ponownie automatycznie."
+        return "Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie."
     return (
         "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
         "Role regionu, rangi i użytkownika pozostają bez zmian."
@@ -991,7 +991,7 @@ async def _request_rank_refresh_from_panel(
         RankRefreshRequestStatus.ALREADY_DUE: "Odświeżenie rangi jest już w kolejce.",
         RankRefreshRequestStatus.ALREADY_CLAIMED: "Trwa już odświeżanie rangi.",
         RankRefreshRequestStatus.BACKOFF_ACTIVE: (
-            "Riot jest chwilowo niedostępny. Bot spróbuje ponownie automatycznie."
+            "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
         ),
         RankRefreshRequestStatus.LINK_CHANGED: (
             "Dane konta zmieniły się. Otwórz `/profil`, aby zobaczyć aktualny stan."
@@ -1100,16 +1100,8 @@ class AccountProfileView(discord.ui.View):
         self,
         interaction: discord.Interaction,
         link: VerificationLink,
-        *,
-        description: str | None = None,
-        description_prefix: str | None = None,
     ) -> AccountProfilePresentation:
         presentation = _build_account_profile(self.bot, link)
-        if description is not None:
-            presentation.embed.description = description
-        elif description_prefix is not None:
-            current_description = presentation.embed.description or ""
-            presentation.embed.description = f"{description_prefix}\n{current_description}".strip()
         await self._edit_presentation(interaction, presentation, link)
         return presentation
 
@@ -1155,15 +1147,14 @@ class AccountProfileView(discord.ui.View):
                     link.rank_last_checked_at,
                     baseline_rank_last_checked_at,
                 ):
-                    await self._edit_profile(
-                        interaction,
-                        link,
-                        description_prefix="Ranga została odświeżona.",
-                    )
+                    await self._edit_profile(interaction, link)
                     return
                 presentation = _build_account_profile(self.bot, link)
                 if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
-                    presentation.embed.description = _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE
+                    set_account_profile_status(
+                        presentation.embed,
+                        _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE,
+                    )
                 await self._edit_presentation(interaction, presentation, link)
                 return
 
@@ -1177,11 +1168,7 @@ class AccountProfileView(discord.ui.View):
                 link.rank_last_checked_at,
                 baseline_rank_last_checked_at,
             ):
-                await self._edit_profile(
-                    interaction,
-                    link,
-                    description_prefix="Ranga została odświeżona.",
-                )
+                await self._edit_profile(interaction, link)
                 return
 
             presentation = _build_account_profile(self.bot, link)
@@ -1232,7 +1219,7 @@ class AccountProfileView(discord.ui.View):
             return
         self._refresh_in_progress = True
         button.disabled = True
-        button.label = REFRESH_PENDING_BUTTON_LABEL
+        button.label = REFRESH_RUNNING_BUTTON_LABEL
         button.style = discord.ButtonStyle.secondary
         request_recorded = False
         try:
@@ -1271,11 +1258,7 @@ class AccountProfileView(discord.ui.View):
                 link.rank_last_checked_at,
                 result.baseline_rank_last_checked_at,
             ):
-                await self._edit_profile(
-                    interaction,
-                    link,
-                    description_prefix="Ranga została odświeżona.",
-                )
+                await self._edit_profile(interaction, link)
                 return
             presentation = await self._edit_profile(interaction, link)
             if (
@@ -1290,8 +1273,9 @@ class AccountProfileView(discord.ui.View):
         except Exception:
             logger.exception("Could not refresh account profile for %s", self.owner_id)
             if request_recorded:
-                self.presentation.embed.description = (
-                    _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE
+                set_account_profile_status(
+                    self.presentation.embed,
+                    _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
                 )
                 await interaction.edit_original_response(
                     content=None,
@@ -1303,8 +1287,13 @@ class AccountProfileView(discord.ui.View):
             button.label = self.presentation.refresh_button_label
             button.disabled = not self.presentation.refresh_enabled
             button.style = discord.ButtonStyle.blurple
+            set_account_profile_status(
+                self.presentation.embed,
+                "Nie udało się rozpocząć odświeżania.\nSpróbuj ponownie.",
+            )
             await interaction.edit_original_response(
-                content="Nie udało się rozpocząć odświeżania rangi. Spróbuj ponownie.",
+                content=None,
+                embed=self.presentation.embed,
                 view=self,
             )
 
@@ -1509,7 +1498,7 @@ class VerificationStartView(discord.ui.View):
         retry_after = self.cooldowns.update_rate_limit(interaction)
         if retry_after:
             await interaction.response.send_message(
-                f"Spróbuj ponownie za {int(retry_after)} s.", ephemeral=True
+                f"Spróbuj ponownie za {math.ceil(retry_after)} s.", ephemeral=True
             )
             return
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):

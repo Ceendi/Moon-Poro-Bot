@@ -4,11 +4,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import discord
 import pytest
 
 from moon_poro.account_profile import (
     REFRESH_BUTTON_LABEL,
-    REFRESH_PENDING_BUTTON_LABEL,
+    REFRESH_QUEUED_BUTTON_LABEL,
+    REFRESH_RUNNING_BUTTON_LABEL,
+    AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
 )
@@ -134,8 +137,11 @@ def test_authorization_message_does_not_claim_an_alert_was_sent() -> None:
         riot_authorization_unavailable=True,
     )
 
-    assert profile.embed.description == (
-        "Odświeżanie rangi jest teraz niedostępne.\nProblem musi rozwiązać administrator."
+    fields = {field.name: field.value for field in profile.embed.fields}
+
+    assert profile.embed.description is None
+    assert fields["Stan odświeżania"] == (
+        "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera."
     )
 
 
@@ -146,7 +152,8 @@ def test_rendered_profile_uses_cached_rank_data() -> None:
 
     assert profile.state is AccountProfileState.SUCCESS
     assert profile.embed.title == "Moje konto"
-    assert profile.embed.description == "Pokazujemy dane z ostatniej udanej aktualizacji."
+    assert profile.embed.description is None
+    assert profile.embed.footer.text is None
     assert fields == {
         "Riot ID": "Moon Poro#EUNE",
         "Region": "EUNE",
@@ -210,7 +217,7 @@ def test_missing_cache_is_described_without_a_riot_call() -> None:
     assert fields["Region"] == "Brak danych"
     assert fields["Solo/Duo"] == "Brak danych"
     assert fields["Ostatnia udana aktualizacja"] == "Jeszcze nie sprawdzono"
-    assert profile.embed.description == "Ranga nie została jeszcze sprawdzona."
+    assert profile.embed.description is None
 
 
 def test_cooldown_text_rounds_remaining_time_up() -> None:
@@ -221,7 +228,9 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
     )
 
     assert profile.state is AccountProfileState.REFRESH_COOLDOWN
-    assert profile.embed.description == "Rangę możesz odświeżyć ponownie za około 11 min."
+    assert profile.embed.description is None
+    assert profile.embed.footer.text == "Otwórz /profil ponownie za 11 min"
+    assert profile.embed.colour == discord.Colour.green()
 
 
 @pytest.mark.parametrize(
@@ -263,29 +272,30 @@ def test_refresh_button_availability(
 
     assert profile.state is state
     assert profile.refresh_enabled is expected_enabled
-    expected_label = (
-        REFRESH_PENDING_BUTTON_LABEL
-        if state in {AccountProfileState.REFRESH_RUNNING, AccountProfileState.REFRESH_QUEUED}
-        else REFRESH_BUTTON_LABEL
-    )
+    if state is AccountProfileState.REFRESH_QUEUED:
+        expected_label = REFRESH_QUEUED_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_RUNNING:
+        expected_label = REFRESH_RUNNING_BUTTON_LABEL
+    else:
+        expected_label = REFRESH_BUTTON_LABEL
     assert profile.refresh_button_label == expected_label
 
 
 @pytest.mark.parametrize(
-    ("link", "expected_prefix"),
+    ("link", "expected_label"),
     [
-        (_link(rank_refresh_claimed_at=NOW), "Trwa odświeżanie rangi."),
-        (_link(rank_next_refresh_at=NOW), "Odświeżenie rangi czeka w kolejce."),
+        (_link(rank_refresh_claimed_at=NOW), REFRESH_RUNNING_BUTTON_LABEL),
+        (_link(rank_next_refresh_at=NOW), REFRESH_QUEUED_BUTTON_LABEL),
     ],
 )
-def test_pending_refresh_explains_that_cached_data_remains_visible(
+def test_pending_refresh_uses_only_the_button_for_status(
     link: SimpleNamespace,
-    expected_prefix: str,
+    expected_label: str,
 ) -> None:
     profile = build_account_profile(link, now=NOW)
 
-    assert profile.embed.description == (f"{expected_prefix}\nNa razie pokazujemy poprzednie dane.")
-    assert profile.refresh_button_label == REFRESH_PENDING_BUTTON_LABEL == "Odświeżanie…"
+    assert profile.embed.description is None
+    assert profile.refresh_button_label == expected_label
 
 
 @pytest.mark.parametrize(
@@ -295,12 +305,49 @@ def test_pending_refresh_explains_that_cached_data_remains_visible(
         _link(rank_last_checked_at=None, rank_next_refresh_at=NOW),
     ],
 )
-def test_first_refresh_does_not_claim_that_previous_data_exists(link: SimpleNamespace) -> None:
+def test_first_refresh_keeps_the_same_compact_layout(link: SimpleNamespace) -> None:
     profile = build_account_profile(link, now=NOW)
+    fields = {field.name: field.value for field in profile.embed.fields}
 
-    assert profile.embed.description is not None
-    assert profile.embed.description.endswith("Dane pojawią się po zakończeniu odświeżania.")
-    assert "poprzednie dane" not in profile.embed.description
+    assert profile.embed.description is None
+    assert fields["Ostatnia udana aktualizacja"] == "Jeszcze nie sprawdzono"
+
+
+def test_unverified_profile_uses_a_short_account_field() -> None:
+    profile = build_account_profile(None, now=NOW)
+
+    assert profile.embed.description is None
+    assert [(field.name, field.value, field.inline) for field in profile.embed.fields] == [
+        ("Konto Riot", "Niepołączone", False)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("profile", "field_name", "message"),
+    [
+        (
+            build_account_profile(_link(deletion_requested_at=NOW), now=NOW),
+            "Stan konta",
+            "Trwa usuwanie powiązania.",
+        ),
+        (
+            build_account_profile(_link(), now=NOW, riot_temporary_unavailable=True),
+            "Stan odświeżania",
+            "Riot jest chwilowo niedostępny.\nSpróbujemy ponownie automatycznie.",
+        ),
+    ],
+)
+def test_exceptional_states_use_a_bottom_status_field(
+    profile: AccountProfilePresentation,
+    field_name: str,
+    message: str,
+) -> None:
+    embed = profile.embed
+
+    assert embed.description is None
+    assert embed.fields[-1].name == field_name
+    assert embed.fields[-1].value == message
+    assert embed.fields[-1].inline is False
 
 
 def test_presentation_never_offers_check_status_or_technical_errors() -> None:

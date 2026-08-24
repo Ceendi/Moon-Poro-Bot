@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import traceback
 
 import discord
@@ -30,7 +31,7 @@ async def handle_known_error(
 ) -> bool:
     original = getattr(error, "original", error)
     if isinstance(error, app_commands.CommandOnCooldown):
-        await safe_send(interaction, f"⏳ Spróbuj ponownie za {int(error.retry_after)} s.")
+        await safe_send(interaction, f"⏳ Spróbuj ponownie za {math.ceil(error.retry_after)} s.")
         return True
     if isinstance(error, app_commands.CheckFailure):
         await safe_send(interaction, "❌ Nie masz uprawnień do użycia tej komendy.")

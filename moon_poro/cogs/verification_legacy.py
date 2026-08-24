@@ -174,7 +174,7 @@ class LegacyVerificationStartView(discord.ui.View):
         retry_after = self.cooldowns.update_rate_limit(interaction)
         if retry_after:
             await interaction.response.send_message(
-                f"Spróbuj ponownie za {int(retry_after)} s.", ephemeral=True
+                f"Spróbuj ponownie za {math.ceil(retry_after)} s.", ephemeral=True
             )
             return
         if not isinstance(interaction.user, discord.Member):

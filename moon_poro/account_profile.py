@@ -13,7 +13,10 @@ import discord
 from moon_poro.riot import RANK_TO_ROLE
 
 REFRESH_BUTTON_LABEL: Final = "Odśwież rangę"
-REFRESH_PENDING_BUTTON_LABEL: Final = "Odświeżanie…"
+REFRESH_QUEUED_BUTTON_LABEL: Final = "W kolejce…"
+REFRESH_RUNNING_BUTTON_LABEL: Final = "Odświeżanie…"
+PROFILE_REFRESH_STATUS_FIELD_NAME: Final = "Stan odświeżania"
+PROFILE_ACCOUNT_STATUS_FIELD_NAME: Final = "Stan konta"
 
 _REGION_LABELS: Final = {
     "EUN1": "EUNE",
@@ -94,34 +97,27 @@ def build_account_profile(
         riot_authorization_unavailable=riot_authorization_unavailable,
     )
 
-    awaiting_first_refresh = (
-        state is AccountProfileState.SUCCESS
-        and link is not None
-        and link.rank_last_checked_at is None
-    )
-    has_previous_data = link is not None and link.rank_last_checked_at is not None
     embed = discord.Embed(
         title="Moje konto",
-        description=(
-            "Ranga nie została jeszcze sprawdzona."
-            if awaiting_first_refresh
-            else _status_text(
-                state,
-                cooldown_remaining,
-                has_previous_data=has_previous_data,
-            )
-        ),
         colour=_state_colour(state),
     )
     if state is not AccountProfileState.UNVERIFIED and link is not None:
         _add_profile_fields(embed, link, riot_id=riot_id)
+    else:
+        embed.add_field(name="Konto Riot", value="Niepołączone", inline=False)
+
+    _add_state_field(embed, state)
+    if state is AccountProfileState.REFRESH_COOLDOWN:
+        minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
+        embed.set_footer(text=f"Otwórz /profil ponownie za {minutes} min")
 
     refresh_enabled = state is AccountProfileState.SUCCESS
-    refresh_button_label = (
-        REFRESH_PENDING_BUTTON_LABEL
-        if state in {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}
-        else REFRESH_BUTTON_LABEL
-    )
+    if state is AccountProfileState.REFRESH_QUEUED:
+        refresh_button_label = REFRESH_QUEUED_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_RUNNING:
+        refresh_button_label = REFRESH_RUNNING_BUTTON_LABEL
+    else:
+        refresh_button_label = REFRESH_BUTTON_LABEL
     return AccountProfilePresentation(
         state=state,
         embed=embed,
@@ -197,49 +193,51 @@ def _add_profile_fields(
     )
 
 
-def _status_text(
-    state: AccountProfileState,
-    cooldown_remaining: timedelta,
-    *,
-    has_previous_data: bool,
-) -> str:
-    if state is AccountProfileState.UNVERIFIED:
-        return "Nie masz jeszcze połączonego konta Riot."
+def _add_state_field(embed: discord.Embed, state: AccountProfileState) -> None:
     if state is AccountProfileState.DELETING:
-        return "Trwa usuwanie powiązania."
-    if state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
-        return "Odświeżanie rangi jest teraz niedostępne.\nProblem musi rozwiązać administrator."
-    if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
-        return "Riot jest chwilowo niedostępny.\nBot spróbuje ponownie automatycznie."
-    if state is AccountProfileState.REFRESH_RUNNING:
-        details = (
-            "Na razie pokazujemy poprzednie dane."
-            if has_previous_data
-            else "Dane pojawią się po zakończeniu odświeżania."
+        set_account_profile_status(
+            embed,
+            "Trwa usuwanie powiązania.",
+            field_name=PROFILE_ACCOUNT_STATUS_FIELD_NAME,
         )
-        return f"Trwa odświeżanie rangi.\n{details}"
-    if state is AccountProfileState.REFRESH_QUEUED:
-        details = (
-            "Na razie pokazujemy poprzednie dane."
-            if has_previous_data
-            else "Dane pojawią się po zakończeniu odświeżania."
+    elif state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
+        set_account_profile_status(
+            embed,
+            "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera.",
         )
-        return f"Odświeżenie rangi czeka w kolejce.\n{details}"
-    if state is AccountProfileState.REFRESH_COOLDOWN:
-        minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
-        return f"Rangę możesz odświeżyć ponownie za około {minutes} min."
-    return "Pokazujemy dane z ostatniej udanej aktualizacji."
+    elif state is AccountProfileState.TEMPORARY_UNAVAILABLE:
+        set_account_profile_status(
+            embed,
+            "Riot jest chwilowo niedostępny.\nSpróbujemy ponownie automatycznie.",
+        )
+
+
+def set_account_profile_status(
+    embed: discord.Embed,
+    message: str,
+    *,
+    field_name: str = PROFILE_REFRESH_STATUS_FIELD_NAME,
+) -> None:
+    """Add or replace the profile's single user-facing status field."""
+
+    for index, field in enumerate(embed.fields):
+        if field.name == field_name:
+            embed.set_field_at(
+                index,
+                name=field_name,
+                value=message,
+                inline=False,
+            )
+            return
+    embed.add_field(name=field_name, value=message, inline=False)
 
 
 def _state_colour(state: AccountProfileState) -> discord.Colour:
-    if state is AccountProfileState.SUCCESS:
+    if state in {AccountProfileState.SUCCESS, AccountProfileState.REFRESH_COOLDOWN}:
         return discord.Colour.green()
     if state in {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}:
         return discord.Colour.blurple()
-    if state in {
-        AccountProfileState.REFRESH_COOLDOWN,
-        AccountProfileState.TEMPORARY_UNAVAILABLE,
-    }:
+    if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
         return discord.Colour.orange()
     if state in {AccountProfileState.DELETING, AccountProfileState.AUTHORIZATION_UNAVAILABLE}:
         return discord.Colour.red()
@@ -313,10 +311,14 @@ def _as_utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "PROFILE_ACCOUNT_STATUS_FIELD_NAME",
+    "PROFILE_REFRESH_STATUS_FIELD_NAME",
     "REFRESH_BUTTON_LABEL",
-    "REFRESH_PENDING_BUTTON_LABEL",
+    "REFRESH_QUEUED_BUTTON_LABEL",
+    "REFRESH_RUNNING_BUTTON_LABEL",
     "AccountProfilePresentation",
     "AccountProfileState",
     "VerificationLinkLike",
     "build_account_profile",
+    "set_account_profile_status",
 ]
