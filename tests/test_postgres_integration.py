@@ -35,6 +35,7 @@ from moon_poro.repositories import (
     WarningRepository,
 )
 from moon_poro.settings import Settings
+from moon_poro.time_utils import timestamps_match
 from moon_poro.verification_sessions import (
     LinkReservationResult,
     VerificationSessionRepository,
@@ -180,6 +181,8 @@ async def test_migrations_and_repositories_against_postgres(
             claim_timeout_seconds=300,
         )
         assert [link.discord_user_id for link in reclaimed] == [101]
+        reclaimed_at = reclaimed[0].rank_refresh_claimed_at
+        assert reclaimed_at is not None
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         retry_delay = await verifications.retry_rank_refresh(
             guild_id,
@@ -188,6 +191,7 @@ async def test_migrations_and_repositories_against_postgres(
             expected_puuid=created.puuid or "",
             expected_platform=created.platform,
             expected_created_at=created.created_at,
+            expected_claimed_at=reclaimed_at,
         )
         assert retry_delay is not None and 240 <= retry_delay <= 360
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 0
@@ -222,6 +226,22 @@ async def test_migrations_and_repositories_against_postgres(
             )
             == []
         )
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(
+                VerificationLink,
+                (guild_id, 101),
+                with_for_update=True,
+            )
+            assert stored is not None
+            stored.rank_next_refresh_at = datetime.now(UTC)
+        defer_claims = await verifications.claim_due_rank_refreshes(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in defer_claims] == [101]
+        defer_claimed_at = defer_claims[0].rank_refresh_claimed_at
+        assert defer_claimed_at is not None
         assert await verifications.defer_rank_refresh(
             guild_id,
             101,
@@ -229,21 +249,26 @@ async def test_migrations_and_repositories_against_postgres(
             expected_puuid=created.puuid or "",
             expected_platform=created.platform,
             expected_created_at=created.created_at,
+            expected_claimed_at=defer_claimed_at,
         )
-        assert [
-            link.discord_user_id
-            for link in await verifications.claim_due_rank_refreshes(
-                guild_id,
-                limit=1,
-                claim_timeout_seconds=300,
-            )
-        ] == [101]
+        completion_claims = await verifications.claim_due_rank_refreshes(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [link.discord_user_id for link in completion_claims] == [101]
+        completion_claimed_at = completion_claims[0].rank_refresh_claimed_at
+        assert completion_claimed_at is not None
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         assert await verifications.complete_rank_refresh(
             guild_id,
             101,
             rank_tier="EMERALD",
             refresh_interval_hours=24,
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+            expected_claimed_at=completion_claimed_at,
         )
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 0
         refreshed = await verifications.get_by_user(guild_id, 101)
@@ -273,6 +298,8 @@ async def test_migrations_and_repositories_against_postgres(
             expected_puuid=created.puuid or "",
             expected_platform=created.platform,
             expected_created_at=created.created_at,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=refreshed.rank_last_checked_at,
             decision=RankRefreshDecision(
                 snapshot=RankSnapshot("DIAMOND", "IV", 20, 120, 100, False),
                 interval_seconds=21_600,
@@ -299,6 +326,8 @@ async def test_migrations_and_repositories_against_postgres(
             expected_puuid=created.puuid or "",
             expected_platform=created.platform,
             expected_created_at=created.created_at,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=stored,
             decision=RankRefreshDecision(
                 snapshot=RankSnapshot("DIAMOND", "III", 40, 121, 100, False),
                 interval_seconds=43_200,
@@ -466,6 +495,8 @@ async def test_stale_riot_response_cannot_overwrite_reverified_link(
             expected_puuid=old.puuid or "",
             expected_platform=old.platform,
             expected_created_at=old.created_at,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=old.rank_last_checked_at,
             decision=RankRefreshDecision(
                 snapshot=RankSnapshot("DIAMOND", "IV", 20, 100, 90, False),
                 interval_seconds=21_600,
@@ -486,6 +517,190 @@ async def test_stale_riot_response_cannot_overwrite_reverified_link(
         assert current.last_known_rank == "SILVER"
     finally:
         await _delete_verification_link(repository, guild_id, 701)
+        await connection.close()
+
+
+async def test_rank_refresh_claim_reclaim_fences_stale_worker_and_unclaimed_writer(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    connection = Database(settings)
+    repository = VerificationRepository(connection.session_factory)
+    competing_repository = VerificationRepository(connection.session_factory)
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=704,
+            message_id=804,
+            audit_channel_id=904,
+            platform="EUN1",
+            puuid="claim-reclaim-puuid",
+        )
+        concurrent_claims = await asyncio.gather(
+            repository.claim_due_rank_refreshes(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            ),
+            competing_repository.claim_due_rank_refreshes(
+                guild_id,
+                limit=1,
+                claim_timeout_seconds=300,
+            ),
+        )
+        first_claims = [claimed for batch in concurrent_claims for claimed in batch]
+        assert [claimed.discord_user_id for claimed in first_claims] == [704]
+        first_claimed_at = first_claims[0].rank_refresh_claimed_at
+        assert first_claimed_at is not None
+
+        async with connection.session_factory.begin() as session:
+            stored = await session.get(
+                VerificationLink,
+                (guild_id, 704),
+                with_for_update=True,
+            )
+            assert stored is not None
+            stored.rank_refresh_claimed_at = first_claimed_at - timedelta(seconds=301)
+        await asyncio.sleep(0.002)
+        second_claims = await repository.claim_due_rank_refreshes(
+            guild_id,
+            limit=1,
+            claim_timeout_seconds=300,
+        )
+        assert [claimed.discord_user_id for claimed in second_claims] == [704]
+        second_claimed_at = second_claims[0].rank_refresh_claimed_at
+        assert second_claimed_at is not None
+        assert not timestamps_match(first_claimed_at, second_claimed_at)
+        second_next_refresh_at = second_claims[0].rank_next_refresh_at
+        identity = {
+            "expected_puuid": link.puuid or "",
+            "expected_platform": link.platform,
+            "expected_created_at": link.created_at,
+        }
+        stale_decision = RankRefreshDecision(
+            snapshot=RankSnapshot("DIAMOND", "IV", 20, 100, 90, False),
+            interval_seconds=21_600,
+            schedule_class="6h",
+            reason="tier_changed",
+            activity_observed=True,
+            tier_changed=True,
+            counter_reset=False,
+            unranked_confirmations=0,
+        )
+
+        assert (
+            await repository.record_rank_snapshot(
+                guild_id,
+                704,
+                expected_claimed_at=first_claimed_at,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
+                decision=stale_decision,
+                next_interval_seconds=21_600,
+                **identity,
+            )
+            is None
+        )
+        assert (
+            await repository.retry_rank_refresh(
+                guild_id,
+                704,
+                base_delay_seconds=300,
+                expected_claimed_at=first_claimed_at,
+                **identity,
+            )
+            is None
+        )
+        assert not await repository.release_rank_refresh_claim(
+            guild_id,
+            704,
+            expected_claimed_at=first_claimed_at,
+            **identity,
+        )
+        assert not await repository.defer_rank_refresh(
+            guild_id,
+            704,
+            delay_seconds=600,
+            expected_claimed_at=first_claimed_at,
+            **identity,
+        )
+        assert (
+            await repository.record_rank_snapshot(
+                guild_id,
+                704,
+                expected_claimed_at=None,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
+                decision=stale_decision,
+                next_interval_seconds=21_600,
+                **identity,
+            )
+            is None
+        )
+
+        still_claimed = await repository.get_by_user(guild_id, 704)
+        assert still_claimed is not None
+        assert timestamps_match(still_claimed.rank_refresh_claimed_at, second_claimed_at)
+        assert still_claimed.rank_next_refresh_at == second_next_refresh_at
+        assert still_claimed.rank_refresh_failures == 0
+        assert still_claimed.last_known_rank is None
+
+        completed_at = await repository.record_rank_snapshot(
+            guild_id,
+            704,
+            expected_claimed_at=second_claimed_at,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
+            decision=stale_decision,
+            next_interval_seconds=21_600,
+            **identity,
+        )
+        assert completed_at is not None
+        unclaimed_decision = RankRefreshDecision(
+            snapshot=RankSnapshot("EMERALD", "II", 75, 23, 19, False),
+            interval_seconds=43_200,
+            schedule_class="12h",
+            reason="activity_observed",
+            activity_observed=True,
+            tier_changed=True,
+            counter_reset=False,
+            unranked_confirmations=0,
+        )
+        stale_after_intervening_snapshot = await repository.record_rank_snapshot(
+            guild_id,
+            704,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
+            decision=unclaimed_decision,
+            next_interval_seconds=43_200,
+            **identity,
+        )
+        assert stale_after_intervening_snapshot is None
+        unclaimed_at = await repository.record_rank_snapshot(
+            guild_id,
+            704,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=completed_at,
+            decision=unclaimed_decision,
+            next_interval_seconds=43_200,
+            **identity,
+        )
+
+        assert unclaimed_at is not None
+        completed = await repository.get_by_user(guild_id, 704)
+        assert completed is not None
+        assert completed.rank_refresh_claimed_at is None
+        assert completed.last_known_rank == "EMERALD"
+    finally:
+        await _delete_verification_link(repository, guild_id, 704)
         await connection.close()
 
 
@@ -542,6 +757,7 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
             "expected_platform": old.platform,
             "expected_created_at": old.created_at,
         }
+        stale_claim_marker = claim_marker - timedelta(microseconds=1)
         stale_refresh = await repository.request_rank_refresh(
             guild_id,
             703,
@@ -564,15 +780,22 @@ async def test_stale_claim_mutations_cannot_change_reverified_link(
                 guild_id,
                 703,
                 base_delay_seconds=300,
+                expected_claimed_at=stale_claim_marker,
                 **identity,
             )
             is None
         )
-        assert not await repository.release_rank_refresh_claim(guild_id, 703, **identity)
+        assert not await repository.release_rank_refresh_claim(
+            guild_id,
+            703,
+            expected_claimed_at=stale_claim_marker,
+            **identity,
+        )
         assert not await repository.defer_rank_refresh(
             guild_id,
             703,
             delay_seconds=7 * 86_400,
+            expected_claimed_at=stale_claim_marker,
             **identity,
         )
         assert not await repository.defer_rank_role_sync(

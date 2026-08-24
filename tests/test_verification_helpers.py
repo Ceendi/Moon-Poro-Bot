@@ -247,6 +247,9 @@ def _rank_refresh_settings() -> SimpleNamespace:
     )
 
 
+_RANK_REFRESH_CLAIMED_AT = datetime(2026, 8, 14, 12, tzinfo=UTC)
+
+
 async def test_rank_refresh_worker_updates_one_due_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,9 +260,11 @@ async def test_rank_refresh_worker_updates_one_due_link(
         platform="EUN1",
         puuid="puuid",
         last_known_rank=None,
+        rank_last_checked_at=None,
         rank_unranked_confirmations=0,
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
         deletion_requested_at=None,
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
@@ -294,6 +299,14 @@ async def test_rank_refresh_worker_updates_one_due_link(
     cog.apply_verified_roles.assert_awaited_once()
     assert cog.apply_verified_roles.await_args.args[2][0]["tier"] == "EMERALD"
     verifications.record_rank_snapshot.assert_awaited_once()
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_claimed_at"]
+        == _RANK_REFRESH_CLAIMED_AT
+    )
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_rank_last_checked_at"]
+        is None
+    )
     verifications.acknowledge_rank_role_sync.assert_awaited_once_with(
         123,
         101,
@@ -305,6 +318,53 @@ async def test_rank_refresh_worker_updates_one_due_link(
     verifications.retry_rank_refresh.assert_not_awaited()
 
 
+async def test_rank_refresh_worker_does_not_apply_roles_after_losing_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        last_known_rank=None,
+        rank_last_checked_at=None,
+        rank_unranked_confirmations=0,
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=None,
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        record_rank_snapshot=AsyncMock(return_value=None),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+        riot_auth_breaker=RiotAuthBreaker(),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(return_value=[{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]),
+    )
+
+    await _refresh_next_verified(cog)
+
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_claimed_at"]
+        == _RANK_REFRESH_CLAIMED_AT
+    )
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_rank_last_checked_at"]
+        is None
+    )
+    cog.apply_verified_roles.assert_not_awaited()
+
+
 async def test_rank_refresh_worker_retries_riot_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -314,6 +374,7 @@ async def test_rank_refresh_worker_retries_riot_failure(
         platform="EUN1",
         puuid="puuid",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     verifications = SimpleNamespace(
@@ -344,7 +405,75 @@ async def test_rank_refresh_worker_retries_riot_failure(
         expected_puuid="puuid",
         expected_platform="EUN1",
         expected_created_at=link.created_at,
+        expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
+
+
+async def test_rank_refresh_worker_releases_only_its_claim_after_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        release_rank_refresh_claim=AsyncMock(return_value=True),
+        retry_rank_refresh=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+        riot_auth_breaker=RiotAuthBreaker(),
+    )
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(side_effect=verification.RiotAPIUnavailable(status=401)),
+    )
+
+    await _refresh_next_verified(SimpleNamespace(bot=bot))
+
+    verifications.release_rank_refresh_claim.assert_awaited_once_with(
+        123,
+        101,
+        expected_puuid="puuid",
+        expected_platform="EUN1",
+        expected_created_at=link.created_at,
+        expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    verifications.retry_rank_refresh.assert_not_awaited()
+
+
+async def test_rank_refresh_worker_rejects_a_claim_without_ownership_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    link = SimpleNamespace(
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        rank_refresh_claimed_at=None,
+    )
+    riot_call = AsyncMock()
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=SimpleNamespace(
+            claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        ),
+        get_guild=Mock(return_value=SimpleNamespace(id=123)),
+        riot_auth_breaker=RiotAuthBreaker(),
+    )
+    monkeypatch.setattr(verification, "_get_leagues", riot_call)
+
+    await _refresh_next_verified(SimpleNamespace(bot=bot))
+
+    riot_call.assert_not_awaited()
 
 
 async def test_rank_refresh_worker_treats_404_as_record_error_not_unranked(
@@ -356,6 +485,7 @@ async def test_rank_refresh_worker_treats_404_as_record_error_not_unranked(
         platform="EUN1",
         puuid="missing",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     verifications = SimpleNamespace(
@@ -384,6 +514,7 @@ async def test_rank_refresh_worker_treats_404_as_record_error_not_unranked(
         expected_puuid="missing",
         expected_platform="EUN1",
         expected_created_at=link.created_at,
+        expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     cog.apply_verified_roles.assert_not_awaited()
 
@@ -405,7 +536,9 @@ async def test_rank_refresh_worker_requires_two_empty_200_responses_for_unranked
         last_known_wins=100,
         last_known_losses=90,
         last_known_inactive=False,
+        rank_last_checked_at=None,
         rank_unranked_confirmations=0,
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     member = SimpleNamespace(id=101)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
@@ -463,6 +596,7 @@ async def test_rank_refresh_worker_defers_member_outside_guild() -> None:
         platform="EUN1",
         puuid="puuid",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=None))
     verifications = SimpleNamespace(
@@ -485,6 +619,7 @@ async def test_rank_refresh_worker_defers_member_outside_guild() -> None:
         expected_puuid="puuid",
         expected_platform="EUN1",
         expected_created_at=link.created_at,
+        expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
 
 
@@ -940,6 +1075,11 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
     await cog._complete_rso_verification(record)
 
     verifications.record_rank_snapshot.assert_awaited_once()
+    assert verifications.record_rank_snapshot.await_args.kwargs["expected_claimed_at"] is None
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_rank_last_checked_at"]
+        is None
+    )
     cog.apply_verified_roles.assert_awaited_once()
     verifications.acknowledge_rank_role_sync.assert_awaited_once_with(
         123,
@@ -958,6 +1098,76 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
         "Twoje konto Riot zostało zweryfikowane. "
         "Na serwerze **Test** zaktualizowano role regionu i rangi."
     )
+
+
+async def test_rso_completion_retries_if_rank_worker_owns_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        last_known_rank=None,
+        rank_last_checked_at=None,
+        rank_unranked_confirmations=0,
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=None,
+    )
+    verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=link),
+        record_rank_snapshot=AsyncMock(return_value=None),
+    )
+    sessions = SimpleNamespace(
+        retry_discord=AsyncMock(),
+        fail_discord=AsyncMock(),
+        complete_discord=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            rank_refresh_policy="adaptive",
+            rank_refresh_rollout_percent=100,
+            rank_refresh_interval_hours=24,
+        ),
+        verifications=verifications,
+        verification_sessions=sessions,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = bot
+    cog.apply_verified_roles = AsyncMock()
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(return_value=[{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]),
+    )
+    record = SimpleNamespace(
+        id=2,
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        completion_attempts=1,
+        created_at=datetime(2026, 8, 15, 10, tzinfo=UTC),
+    )
+
+    await cog._complete_rso_verification(record)
+
+    assert verifications.record_rank_snapshot.await_args.kwargs["expected_claimed_at"] is None
+    assert (
+        verifications.record_rank_snapshot.await_args.kwargs["expected_rank_last_checked_at"]
+        is None
+    )
+    sessions.retry_discord.assert_awaited_once_with(
+        2,
+        error_code="RANK_SNAPSHOT_CONFLICT",
+        delay_seconds=5,
+    )
+    sessions.fail_discord.assert_not_awaited()
+    sessions.complete_discord.assert_not_awaited()
+    cog.apply_verified_roles.assert_not_awaited()
 
 
 async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call(

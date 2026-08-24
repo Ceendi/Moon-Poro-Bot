@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from moon_poro.models import Base, VerificationAccessLog, VerificationLink
-from moon_poro.rank_refresh import RankSnapshot
+from moon_poro.rank_refresh import RankRefreshDecision, RankSnapshot
 from moon_poro.repositories import (
     RankRefreshRequestStatus,
     VerificationDeletionAccessLog,
@@ -22,6 +23,13 @@ from moon_poro.repositories import (
     VerificationLinkIdentity,
     VerificationRepository,
 )
+from moon_poro.time_utils import timestamps_match
+
+
+class _RankRefreshIdentity(TypedDict):
+    expected_puuid: str
+    expected_platform: str
+    expected_created_at: datetime
 
 
 @pytest_asyncio.fixture
@@ -225,6 +233,224 @@ async def test_rank_refresh_request_returns_snapshot_baseline_from_locked_link(
     assert result.status is RankRefreshRequestStatus.ALREADY_CLAIMED
     assert result.baseline_rank_last_checked_at is not None
     assert result.baseline_rank_last_checked_at.replace(tzinfo=UTC) == link.rank_last_checked_at
+
+
+async def test_rank_refresh_claim_fences_all_stale_worker_mutations(
+    verification_repository: VerificationRepository,
+) -> None:
+    link = await verification_repository.create(
+        guild_id=123,
+        user_id=301,
+        message_id=401,
+        audit_channel_id=501,
+        platform="EUN1",
+        puuid="claim-fencing-puuid",
+    )
+    first_claims = await verification_repository.claim_due_rank_refreshes(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    assert [claimed.discord_user_id for claimed in first_claims] == [301]
+    first_claimed_at = first_claims[0].rank_refresh_claimed_at
+    assert first_claimed_at is not None
+
+    async with verification_repository._sessions.begin() as session:
+        stored = await session.get(VerificationLink, (123, 301), with_for_update=True)
+        assert stored is not None
+        stored.rank_refresh_claimed_at = first_claimed_at - timedelta(seconds=301)
+    await asyncio.sleep(0.05)
+    second_claims = await verification_repository.claim_due_rank_refreshes(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    assert [claimed.discord_user_id for claimed in second_claims] == [301]
+    second_claimed_at = second_claims[0].rank_refresh_claimed_at
+    assert second_claimed_at is not None
+    assert not timestamps_match(first_claimed_at, second_claimed_at)
+    second_next_refresh_at = second_claims[0].rank_next_refresh_at
+
+    stale_decision = RankRefreshDecision(
+        snapshot=RankSnapshot("DIAMOND", "IV", 20, 100, 90, False),
+        interval_seconds=21_600,
+        schedule_class="6h",
+        reason="tier_changed",
+        activity_observed=True,
+        tier_changed=True,
+        counter_reset=False,
+        unranked_confirmations=0,
+    )
+    identity: _RankRefreshIdentity = {
+        "expected_puuid": link.puuid or "",
+        "expected_platform": link.platform,
+        "expected_created_at": link.created_at,
+    }
+
+    assert (
+        await verification_repository.record_rank_snapshot(
+            123,
+            301,
+            expected_claimed_at=first_claimed_at,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
+            decision=stale_decision,
+            next_interval_seconds=21_600,
+            **identity,
+        )
+        is None
+    )
+    assert not await verification_repository.complete_rank_refresh(
+        123,
+        301,
+        rank_tier="MASTER",
+        refresh_interval_hours=6,
+        expected_claimed_at=first_claimed_at,
+        **identity,
+    )
+    assert not await verification_repository.complete_rank_refresh(
+        123,
+        301,
+        rank_tier="MASTER",
+        refresh_interval_hours=6,
+        expected_puuid="different-puuid",
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=second_claimed_at,
+    )
+    assert (
+        await verification_repository.retry_rank_refresh(
+            123,
+            301,
+            base_delay_seconds=300,
+            expected_claimed_at=first_claimed_at,
+            **identity,
+        )
+        is None
+    )
+    assert not await verification_repository.release_rank_refresh_claim(
+        123,
+        301,
+        expected_claimed_at=first_claimed_at,
+        **identity,
+    )
+    assert not await verification_repository.defer_rank_refresh(
+        123,
+        301,
+        delay_seconds=600,
+        expected_claimed_at=first_claimed_at,
+        **identity,
+    )
+
+    still_claimed = await verification_repository.get_by_user(123, 301)
+    assert still_claimed is not None
+    assert timestamps_match(still_claimed.rank_refresh_claimed_at, second_claimed_at)
+    assert still_claimed.rank_next_refresh_at == second_next_refresh_at
+    assert still_claimed.rank_refresh_failures == 0
+    assert still_claimed.last_known_rank is None
+
+    completed_at = await verification_repository.record_rank_snapshot(
+        123,
+        301,
+        expected_claimed_at=second_claimed_at,
+        expected_rank_last_checked_at=link.rank_last_checked_at,
+        decision=stale_decision,
+        next_interval_seconds=21_600,
+        **identity,
+    )
+    assert completed_at is not None
+    completed = await verification_repository.get_by_user(123, 301)
+    assert completed is not None
+    assert completed.rank_refresh_claimed_at is None
+    assert completed.last_known_rank == "DIAMOND"
+
+
+async def test_unclaimed_snapshot_write_requires_explicit_none_claim(
+    verification_repository: VerificationRepository,
+) -> None:
+    link = await verification_repository.create(
+        guild_id=123,
+        user_id=302,
+        message_id=402,
+        audit_channel_id=502,
+        platform="EUW1",
+        puuid="unclaimed-snapshot-puuid",
+    )
+    claims = await verification_repository.claim_due_rank_refreshes(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    assert [claimed.discord_user_id for claimed in claims] == [302]
+    claimed_at = claims[0].rank_refresh_claimed_at
+    assert claimed_at is not None
+    decision = RankRefreshDecision(
+        snapshot=RankSnapshot("EMERALD", "II", 75, 23, 19, False),
+        interval_seconds=43_200,
+        schedule_class="12h",
+        reason="activity_observed",
+        activity_observed=True,
+        tier_changed=False,
+        counter_reset=False,
+        unranked_confirmations=0,
+    )
+    identity: _RankRefreshIdentity = {
+        "expected_puuid": link.puuid or "",
+        "expected_platform": link.platform,
+        "expected_created_at": link.created_at,
+    }
+
+    assert (
+        await verification_repository.record_rank_snapshot(
+            123,
+            302,
+            expected_claimed_at=None,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
+            decision=decision,
+            next_interval_seconds=43_200,
+            **identity,
+        )
+        is None
+    )
+    assert await verification_repository.release_rank_refresh_claim(
+        123,
+        302,
+        expected_claimed_at=claimed_at,
+        **identity,
+    )
+    completed_at = await verification_repository.record_rank_snapshot(
+        123,
+        302,
+        expected_claimed_at=None,
+        expected_rank_last_checked_at=link.rank_last_checked_at,
+        decision=decision,
+        next_interval_seconds=43_200,
+        **identity,
+    )
+
+    assert completed_at is not None
+    stale_after_intervening_snapshot = await verification_repository.record_rank_snapshot(
+        123,
+        302,
+        expected_claimed_at=None,
+        expected_rank_last_checked_at=link.rank_last_checked_at,
+        decision=RankRefreshDecision(
+            snapshot=RankSnapshot("DIAMOND", "IV", 20, 100, 90, False),
+            interval_seconds=21_600,
+            schedule_class="6h",
+            reason="tier_changed",
+            activity_observed=True,
+            tier_changed=True,
+            counter_reset=False,
+            unranked_confirmations=0,
+        ),
+        next_interval_seconds=21_600,
+        **identity,
+    )
+    assert stale_after_intervening_snapshot is None
+    stored = await verification_repository.get_by_user(123, 302)
+    assert stored is not None
+    assert stored.rank_refresh_claimed_at is None
+    assert stored.last_known_rank == "EMERALD"
 
 
 async def test_null_puuid_identity_and_claim_token_fence_deletion_lifecycle(

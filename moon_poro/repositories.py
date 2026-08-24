@@ -307,6 +307,8 @@ class VerificationRepository:
         expected_puuid: str,
         expected_platform: str,
         expected_created_at: datetime,
+        expected_claimed_at: datetime | None,
+        expected_rank_last_checked_at: datetime | None,
         decision: RankRefreshDecision,
         next_interval_seconds: int,
     ) -> datetime | None:
@@ -324,6 +326,14 @@ class VerificationRepository:
                 or link.puuid != expected_puuid
                 or link.platform != expected_platform
                 or link.created_at != expected_created_at
+                or not timestamps_match(
+                    link.rank_last_checked_at,
+                    expected_rank_last_checked_at,
+                )
+                or not timestamps_match(
+                    link.rank_refresh_claimed_at,
+                    expected_claimed_at,
+                )
             ):
                 return None
             link.last_known_rank = snapshot.tier
@@ -359,6 +369,10 @@ class VerificationRepository:
         *,
         rank_tier: str,
         refresh_interval_hours: int,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+        expected_claimed_at: datetime,
     ) -> bool:
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
@@ -367,7 +381,19 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None or link.deletion_requested_at is not None:
+            if (
+                link is None
+                or not _link_identity_matches(
+                    link,
+                    expected_puuid=expected_puuid,
+                    expected_platform=expected_platform,
+                    expected_created_at=expected_created_at,
+                )
+                or not timestamps_match(
+                    link.rank_refresh_claimed_at,
+                    expected_claimed_at,
+                )
+            ):
                 return False
             link.last_known_rank = rank_tier
             link.rank_last_checked_at = now
@@ -385,6 +411,7 @@ class VerificationRepository:
         expected_puuid: str,
         expected_platform: str,
         expected_created_at: datetime,
+        expected_claimed_at: datetime,
         max_delay_seconds: int = 21_600,
     ) -> int | None:
         now = datetime.now(UTC)
@@ -394,11 +421,18 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None or not _link_identity_matches(
-                link,
-                expected_puuid=expected_puuid,
-                expected_platform=expected_platform,
-                expected_created_at=expected_created_at,
+            if (
+                link is None
+                or not _link_identity_matches(
+                    link,
+                    expected_puuid=expected_puuid,
+                    expected_platform=expected_platform,
+                    expected_created_at=expected_created_at,
+                )
+                or not timestamps_match(
+                    link.rank_refresh_claimed_at,
+                    expected_claimed_at,
+                )
             ):
                 return None
             failures = min(int(link.rank_refresh_failures) + 1, 16)
@@ -422,6 +456,7 @@ class VerificationRepository:
         expected_puuid: str,
         expected_platform: str,
         expected_created_at: datetime,
+        expected_claimed_at: datetime,
     ) -> bool:
         async with self._sessions.begin() as session:
             link = await session.get(
@@ -429,11 +464,18 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None or not _link_identity_matches(
-                link,
-                expected_puuid=expected_puuid,
-                expected_platform=expected_platform,
-                expected_created_at=expected_created_at,
+            if (
+                link is None
+                or not _link_identity_matches(
+                    link,
+                    expected_puuid=expected_puuid,
+                    expected_platform=expected_platform,
+                    expected_created_at=expected_created_at,
+                )
+                or not timestamps_match(
+                    link.rank_refresh_claimed_at,
+                    expected_claimed_at,
+                )
             ):
                 return False
             link.rank_refresh_claimed_at = None
@@ -448,6 +490,7 @@ class VerificationRepository:
         expected_puuid: str,
         expected_platform: str,
         expected_created_at: datetime,
+        expected_claimed_at: datetime,
     ) -> bool:
         next_refresh = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         async with self._sessions.begin() as session:
@@ -456,11 +499,18 @@ class VerificationRepository:
                 (guild_id, user_id),
                 with_for_update=True,
             )
-            if link is None or not _link_identity_matches(
-                link,
-                expected_puuid=expected_puuid,
-                expected_platform=expected_platform,
-                expected_created_at=expected_created_at,
+            if (
+                link is None
+                or not _link_identity_matches(
+                    link,
+                    expected_puuid=expected_puuid,
+                    expected_platform=expected_platform,
+                    expected_created_at=expected_created_at,
+                )
+                or not timestamps_match(
+                    link.rank_refresh_claimed_at,
+                    expected_claimed_at,
+                )
             ):
                 return False
             link.rank_next_refresh_at = next_refresh
