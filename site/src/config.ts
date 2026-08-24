@@ -9,6 +9,7 @@ const siteUrl = required("PUBLIC_SITE_URL", "http://localhost:4321").replace(/\/
 
 export const siteConfig = {
   name: "Moon Poro Bot",
+  operatorDisplayName: "Ceendi",
   siteUrl,
   contactEmail: required("PUBLIC_CONTACT_EMAIL", "dev@localhost.invalid"),
   operatorName: required("PUBLIC_OPERATOR_NAME", "Moon Poro development operator"),
