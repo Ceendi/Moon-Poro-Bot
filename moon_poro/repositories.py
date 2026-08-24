@@ -40,6 +40,7 @@ class RankRefreshRequestStatus(StrEnum):
 class RankRefreshRequestResult:
     status: RankRefreshRequestStatus
     retry_after_seconds: int | None = None
+    baseline_rank_last_checked_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +458,7 @@ class VerificationRepository:
                 expected_created_at=expected_created_at,
             ):
                 return RankRefreshRequestResult(RankRefreshRequestStatus.LINK_CHANGED)
+            baseline_rank_last_checked_at = link.rank_last_checked_at
             requested_at = cast(datetime | None, getattr(link, timestamp_name))
             if requested_at is not None:
                 retry_after = cooldown_seconds - int((now - requested_at).total_seconds())
@@ -464,16 +466,29 @@ class VerificationRepository:
                     return RankRefreshRequestResult(
                         RankRefreshRequestStatus.COOLDOWN,
                         retry_after_seconds=retry_after,
+                        baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                     )
             setattr(link, timestamp_name, now)
             if link.rank_refresh_claimed_at is not None:
-                return RankRefreshRequestResult(RankRefreshRequestStatus.ALREADY_CLAIMED)
+                return RankRefreshRequestResult(
+                    RankRefreshRequestStatus.ALREADY_CLAIMED,
+                    baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+                )
             if link.rank_next_refresh_at <= now:
-                return RankRefreshRequestResult(RankRefreshRequestStatus.ALREADY_DUE)
+                return RankRefreshRequestResult(
+                    RankRefreshRequestStatus.ALREADY_DUE,
+                    baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+                )
             if link.rank_refresh_failures > 0:
-                return RankRefreshRequestResult(RankRefreshRequestStatus.BACKOFF_ACTIVE)
+                return RankRefreshRequestResult(
+                    RankRefreshRequestStatus.BACKOFF_ACTIVE,
+                    baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+                )
             link.rank_next_refresh_at = now
-            return RankRefreshRequestResult(RankRefreshRequestStatus.ENQUEUED)
+            return RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+            )
 
     async def claim_due_rank_role_syncs(
         self,

@@ -4,10 +4,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import discord
 import pytest
 
 from moon_poro.account_profile import (
     REFRESH_BUTTON_LABEL,
+    REFRESH_QUEUED_BUTTON_LABEL,
+    REFRESH_RUNNING_BUTTON_LABEL,
+    AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
 )
@@ -133,8 +137,11 @@ def test_authorization_message_does_not_claim_an_alert_was_sent() -> None:
         riot_authorization_unavailable=True,
     )
 
-    assert profile.embed.description == (
-        "Odświeżanie jest teraz niedostępne. Problem wymaga działania administratora."
+    fields = {field.name: field.value for field in profile.embed.fields}
+
+    assert profile.embed.description is None
+    assert fields["Stan odświeżania"] == (
+        "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera."
     )
 
 
@@ -145,15 +152,18 @@ def test_rendered_profile_uses_cached_rank_data() -> None:
 
     assert profile.state is AccountProfileState.SUCCESS
     assert profile.embed.title == "Moje konto"
+    assert profile.embed.description is None
+    assert profile.embed.footer.text is None
     assert fields == {
         "Riot ID": "Moon Poro#EUNE",
         "Region": "EUNE",
         "Solo/Duo": "Emerald IV",
         "LP": "20 LP",
         "Bilans": "120 W / 100 P",
-        "Win rate": "54,5%",
+        "Wygrane": "54,5%",
         "Ostatnia udana aktualizacja": (f"<t:{expected_timestamp}:f> • <t:{expected_timestamp}:R>"),
     }
+    assert [field.inline for field in profile.embed.fields] == [True] * 6 + [False]
 
 
 def test_unranked_profile_does_not_invent_lp_or_results() -> None:
@@ -173,7 +183,7 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     assert fields["Solo/Duo"] == "Brak rangi"
     assert fields["LP"] == "—"
     assert fields["Bilans"] == "—"
-    assert fields["Win rate"] == "—"
+    assert fields["Wygrane"] == "—"
 
 
 def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
@@ -203,14 +213,14 @@ def test_missing_cache_is_described_without_a_riot_call() -> None:
     )
     fields = {field.name: field.value for field in profile.embed.fields}
 
-    assert fields["Riot ID"] == "Niedostępny"
-    assert fields["Region"] == "Nieznany"
+    assert fields["Riot ID"] == "Brak danych"
+    assert fields["Region"] == "Brak danych"
     assert fields["Solo/Duo"] == "Brak danych"
     assert fields["Ostatnia udana aktualizacja"] == "Jeszcze nie sprawdzono"
-    assert profile.embed.description == "Oczekiwanie na pierwszą aktualizację."
+    assert profile.embed.description is None
 
 
-def test_cooldown_text_rounds_remaining_time_up() -> None:
+def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
     profile = build_account_profile(
         _link(rank_user_refresh_requested_at=NOW - timedelta(seconds=1199)),
         now=NOW,
@@ -218,7 +228,10 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
     )
 
     assert profile.state is AccountProfileState.REFRESH_COOLDOWN
-    assert profile.embed.description == ("Kolejne odświeżenie będzie dostępne za około 11 min.")
+    assert profile.embed.description is None
+    assert profile.embed.footer.text is None
+    assert profile.embed.colour == discord.Colour.green()
+    assert profile.refresh_enabled is True
 
 
 @pytest.mark.parametrize(
@@ -227,10 +240,10 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
         (AccountProfileState.UNVERIFIED, False),
         (AccountProfileState.DELETING, False),
         (AccountProfileState.AUTHORIZATION_UNAVAILABLE, False),
-        (AccountProfileState.REFRESH_COOLDOWN, False),
-        (AccountProfileState.TEMPORARY_UNAVAILABLE, True),
-        (AccountProfileState.REFRESH_RUNNING, True),
-        (AccountProfileState.REFRESH_QUEUED, True),
+        (AccountProfileState.REFRESH_COOLDOWN, True),
+        (AccountProfileState.TEMPORARY_UNAVAILABLE, False),
+        (AccountProfileState.REFRESH_RUNNING, False),
+        (AccountProfileState.REFRESH_QUEUED, False),
         (AccountProfileState.SUCCESS, True),
     ],
 )
@@ -260,7 +273,82 @@ def test_refresh_button_availability(
 
     assert profile.state is state
     assert profile.refresh_enabled is expected_enabled
-    assert profile.refresh_button_label == REFRESH_BUTTON_LABEL == "Odśwież rangę"
+    if state is AccountProfileState.REFRESH_QUEUED:
+        expected_label = REFRESH_QUEUED_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_RUNNING:
+        expected_label = REFRESH_RUNNING_BUTTON_LABEL
+    else:
+        expected_label = REFRESH_BUTTON_LABEL
+    assert profile.refresh_button_label == expected_label
+
+
+@pytest.mark.parametrize(
+    ("link", "expected_label"),
+    [
+        (_link(rank_refresh_claimed_at=NOW), REFRESH_RUNNING_BUTTON_LABEL),
+        (_link(rank_next_refresh_at=NOW), REFRESH_QUEUED_BUTTON_LABEL),
+    ],
+)
+def test_pending_refresh_uses_only_the_button_for_status(
+    link: SimpleNamespace,
+    expected_label: str,
+) -> None:
+    profile = build_account_profile(link, now=NOW)
+
+    assert profile.embed.description is None
+    assert profile.refresh_button_label == expected_label
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        _link(rank_last_checked_at=None, rank_refresh_claimed_at=NOW),
+        _link(rank_last_checked_at=None, rank_next_refresh_at=NOW),
+    ],
+)
+def test_first_refresh_keeps_the_same_compact_layout(link: SimpleNamespace) -> None:
+    profile = build_account_profile(link, now=NOW)
+    fields = {field.name: field.value for field in profile.embed.fields}
+
+    assert profile.embed.description is None
+    assert fields["Ostatnia udana aktualizacja"] == "Jeszcze nie sprawdzono"
+
+
+def test_unverified_profile_uses_a_short_account_field() -> None:
+    profile = build_account_profile(None, now=NOW)
+
+    assert profile.embed.description is None
+    assert [(field.name, field.value, field.inline) for field in profile.embed.fields] == [
+        ("Konto Riot", "Niepołączone", False)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("profile", "field_name", "message"),
+    [
+        (
+            build_account_profile(_link(deletion_requested_at=NOW), now=NOW),
+            "Stan konta",
+            "Trwa usuwanie powiązania.",
+        ),
+        (
+            build_account_profile(_link(), now=NOW, riot_temporary_unavailable=True),
+            "Stan odświeżania",
+            "Riot jest chwilowo niedostępny.\nSpróbujemy ponownie automatycznie.",
+        ),
+    ],
+)
+def test_exceptional_states_use_a_bottom_status_field(
+    profile: AccountProfilePresentation,
+    field_name: str,
+    message: str,
+) -> None:
+    embed = profile.embed
+
+    assert embed.description is None
+    assert embed.fields[-1].name == field_name
+    assert embed.fields[-1].value == message
+    assert embed.fields[-1].inline is False
 
 
 def test_presentation_never_offers_check_status_or_technical_errors() -> None:
@@ -274,6 +362,7 @@ def test_presentation_never_offers_check_status_or_technical_errors() -> None:
         assert "Sprawdź stan" not in rendered
         assert "401" not in rendered
         assert "403" not in rendered
+        assert "API" not in rendered
         assert "token" not in rendered.lower()
         assert "exception" not in rendered.lower()
 

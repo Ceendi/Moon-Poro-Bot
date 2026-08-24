@@ -59,6 +59,23 @@ async def test_handle_known_error_rejects_failed_check(
     assert "uprawnień" in safe_send.await_args.args[1]
 
 
+async def test_handle_known_error_rounds_cooldown_up_to_one_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safe_send = AsyncMock()
+    monkeypatch.setattr(responses, "safe_send", safe_send)
+    error = app_commands.CommandOnCooldown(app_commands.Cooldown(1, 30), 0.1)
+    interaction = make_interaction()
+
+    handled = await responses.handle_known_error(interaction, error)
+
+    assert handled
+    safe_send.assert_awaited_once_with(
+        interaction,
+        "⏳ Spróbuj ponownie za 1 s.",
+    )
+
+
 async def test_handle_known_error_reports_missing_discord_permission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

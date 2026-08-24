@@ -13,11 +13,12 @@ from moon_poro.cogs.verification_legacy import (
     LegacyVerificationModal,
     LegacyVerificationRateLimiter,
     LegacyVerificationRetryView,
+    LegacyVerificationStartView,
     _normalize_riot_id_parts,
     _riot_id_validation_error,
 )
 from moon_poro.rank_refresh import RankSnapshot
-from moon_poro.riot import RiotAuthBreaker
+from moon_poro.riot import RiotAPIUnavailable, RiotAuthBreaker
 
 
 class FakeRole:
@@ -96,6 +97,15 @@ def test_legacy_modal_uses_constrained_inputs_and_region_select() -> None:
         discord.ComponentType.label.value,
     ]
     assert components[2]["component"]["type"] == discord.ComponentType.string_select.value
+    assert modal.title == "Weryfikacja konta Riot"
+    assert [(component["label"], component.get("description")) for component in components] == [
+        ("Nazwa", "Część Riot ID przed #"),
+        ("Tag", "Część Riot ID po # (3-5 liter lub cyfr)"),
+        ("Region", None),
+    ]
+    assert components[0]["component"]["placeholder"] == "np. Moon Poro"
+    assert components[1]["component"]["placeholder"] == "np. EUNE"
+    assert components[2]["component"]["placeholder"] == "Wybierz region"
 
 
 async def test_legacy_modal_passes_normalized_values_and_offers_retry(
@@ -122,7 +132,37 @@ async def test_legacy_modal_passes_normalized_values_and_offers_retry(
     response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
     account_lookup.assert_awaited_once_with(bot, "Moon Poro", "EUNE", "EUN1")
     assert isinstance(followup.send.await_args.kwargs["view"], LegacyVerificationRetryView)
-    assert "Moon Poro#EUNE" in followup.send.await_args.args[0]
+    assert followup.send.await_args.args[0] == (
+        "Nie znaleziono Riot ID **Moon Poro#EUNE** w regionie **EUNE**.\n"
+        "Sprawdź Riot ID z profilu Riot (nie nazwę logowania) oraz wybrany region."
+    )
+
+
+async def test_legacy_start_explains_pending_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMember:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    pending_link = SimpleNamespace(deletion_requested_at=datetime.now(UTC))
+    bot = _modal_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=pending_link))
+    view = LegacyVerificationStartView(bot, _rate_limiter())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+    )
+
+    await view.begin_verification(interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+        ephemeral=True,
+    )
+    interaction.response.send_modal.assert_not_awaited()
 
 
 async def test_retry_view_reopens_prefilled_modal() -> None:
@@ -196,8 +236,40 @@ async def test_legacy_modal_rate_limit_blocks_riot_lookup(
 
     account_lookup.assert_not_awaited()
     response.defer.assert_not_awaited()
-    assert "Zbyt wiele prób" in response.send_message.await_args.args[0]
+    assert "Za dużo prób" in response.send_message.await_args.args[0]
     assert isinstance(response.send_message.await_args.kwargs["view"], LegacyVerificationRetryView)
+
+
+async def test_legacy_modal_hides_riot_api_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    modal = LegacyVerificationModal(bot, _rate_limiter())
+    modal.game_name._value = "Moon Poro"
+    modal.tag_line._value = "EUNE"
+    modal.platform._values = ["EUN1"]
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    followup = SimpleNamespace(send=AsyncMock())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=response,
+        followup=followup,
+    )
+    monkeypatch.setattr(
+        verification_legacy,
+        "_get_account",
+        AsyncMock(side_effect=RiotAPIUnavailable(status=503)),
+    )
+
+    await modal.on_submit(interaction)
+
+    response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    followup.send.assert_awaited_once_with(
+        "Riot jest chwilowo niedostępny. Spróbuj ponownie później.",
+        ephemeral=True,
+    )
+    assert "API" not in followup.send.await_args.args[0]
 
 
 async def test_remove_own_verification_marker_keeps_rank_and_region(
@@ -471,6 +543,55 @@ async def test_remove_own_verification_deletes_link_and_audit_only(
     response.send_message.assert_not_awaited()
 
 
+async def test_icon_confirmation_explains_pending_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMember:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    pending_link = SimpleNamespace(deletion_requested_at=datetime.now(UTC))
+    verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=pending_link),
+        get_by_puuid=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_timeout=120,
+            verification_icon_check_cooldown=5,
+        ),
+        verifications=verifications,
+    )
+    view = LegacyIconConfirmationView(
+        bot,
+        _rate_limiter(),
+        owner_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+        expected_icon_id=42,
+    )
+    interaction = SimpleNamespace(
+        guild=object(),
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await view.children[0].callback(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    interaction.followup.send.assert_awaited_once_with(
+        "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+        ephemeral=True,
+    )
+    verifications.get_by_puuid.assert_not_awaited()
+
+
 async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -565,7 +686,7 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
         expected_created_at=created_at,
     )
     audit_message.delete.assert_not_awaited()
-    assert "ponowi nadanie ról" in followup.send.await_args.args[0]
+    assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
 
 
 async def test_manual_rank_change_is_reconciled_from_cached_rank() -> None:

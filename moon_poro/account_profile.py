@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -13,6 +12,10 @@ import discord
 from moon_poro.riot import RANK_TO_ROLE
 
 REFRESH_BUTTON_LABEL: Final = "Odśwież rangę"
+REFRESH_QUEUED_BUTTON_LABEL: Final = "W kolejce…"
+REFRESH_RUNNING_BUTTON_LABEL: Final = "Odświeżanie…"
+PROFILE_REFRESH_STATUS_FIELD_NAME: Final = "Stan odświeżania"
+PROFILE_ACCOUNT_STATUS_FIELD_NAME: Final = "Stan konta"
 
 _REGION_LABELS: Final = {
     "EUN1": "EUNE",
@@ -93,33 +96,30 @@ def build_account_profile(
         riot_authorization_unavailable=riot_authorization_unavailable,
     )
 
-    awaiting_first_refresh = (
-        state is AccountProfileState.SUCCESS
-        and link is not None
-        and link.rank_last_checked_at is None
-    )
     embed = discord.Embed(
         title="Moje konto",
-        description=(
-            "Oczekiwanie na pierwszą aktualizację."
-            if awaiting_first_refresh
-            else _status_text(state, cooldown_remaining)
-        ),
         colour=_state_colour(state),
     )
     if state is not AccountProfileState.UNVERIFIED and link is not None:
         _add_profile_fields(embed, link, riot_id=riot_id)
+    else:
+        embed.add_field(name="Konto Riot", value="Niepołączone", inline=False)
 
+    _add_state_field(embed, state)
     refresh_enabled = state in {
+        AccountProfileState.REFRESH_COOLDOWN,
         AccountProfileState.SUCCESS,
-        AccountProfileState.REFRESH_QUEUED,
-        AccountProfileState.REFRESH_RUNNING,
-        AccountProfileState.TEMPORARY_UNAVAILABLE,
     }
+    if state is AccountProfileState.REFRESH_QUEUED:
+        refresh_button_label = REFRESH_QUEUED_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_RUNNING:
+        refresh_button_label = REFRESH_RUNNING_BUTTON_LABEL
+    else:
+        refresh_button_label = REFRESH_BUTTON_LABEL
     return AccountProfilePresentation(
         state=state,
         embed=embed,
-        refresh_button_label=REFRESH_BUTTON_LABEL,
+        refresh_button_label=refresh_button_label,
         refresh_enabled=refresh_enabled,
     )
 
@@ -183,7 +183,7 @@ def _add_profile_fields(
     embed.add_field(name="Solo/Duo", value=rank, inline=True)
     embed.add_field(name="LP", value=_lp_label(link), inline=True)
     embed.add_field(name="Bilans", value=_record_label(wins, losses), inline=True)
-    embed.add_field(name="Win rate", value=_win_rate_label(wins, losses), inline=True)
+    embed.add_field(name="Wygrane", value=_win_rate_label(wins, losses), inline=True)
     embed.add_field(
         name="Ostatnia udana aktualizacja",
         value=_last_update_label(link.rank_last_checked_at),
@@ -191,34 +191,51 @@ def _add_profile_fields(
     )
 
 
-def _status_text(state: AccountProfileState, cooldown_remaining: timedelta) -> str:
-    if state is AccountProfileState.UNVERIFIED:
-        return "Nie masz jeszcze połączonego konta Riot."
+def _add_state_field(embed: discord.Embed, state: AccountProfileState) -> None:
     if state is AccountProfileState.DELETING:
-        return "Usuwanie powiązania trwa."
-    if state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
-        return "Odświeżanie jest teraz niedostępne. Problem wymaga działania administratora."
-    if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
-        return "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
-    if state is AccountProfileState.REFRESH_RUNNING:
-        return "Odświeżanie rangi trwa."
-    if state is AccountProfileState.REFRESH_QUEUED:
-        return "Odświeżenie czeka w kolejce."
-    if state is AccountProfileState.REFRESH_COOLDOWN:
-        minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
-        return f"Kolejne odświeżenie będzie dostępne za około {minutes} min."
-    return "Dane z ostatniego sprawdzenia są gotowe."
+        set_account_profile_status(
+            embed,
+            "Trwa usuwanie powiązania.",
+            field_name=PROFILE_ACCOUNT_STATUS_FIELD_NAME,
+        )
+    elif state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
+        set_account_profile_status(
+            embed,
+            "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera.",
+        )
+    elif state is AccountProfileState.TEMPORARY_UNAVAILABLE:
+        set_account_profile_status(
+            embed,
+            "Riot jest chwilowo niedostępny.\nSpróbujemy ponownie automatycznie.",
+        )
+
+
+def set_account_profile_status(
+    embed: discord.Embed,
+    message: str,
+    *,
+    field_name: str = PROFILE_REFRESH_STATUS_FIELD_NAME,
+) -> None:
+    """Add or replace the profile's single user-facing status field."""
+
+    for index, field in enumerate(embed.fields):
+        if field.name == field_name:
+            embed.set_field_at(
+                index,
+                name=field_name,
+                value=message,
+                inline=False,
+            )
+            return
+    embed.add_field(name=field_name, value=message, inline=False)
 
 
 def _state_colour(state: AccountProfileState) -> discord.Colour:
-    if state is AccountProfileState.SUCCESS:
+    if state in {AccountProfileState.SUCCESS, AccountProfileState.REFRESH_COOLDOWN}:
         return discord.Colour.green()
     if state in {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}:
         return discord.Colour.blurple()
-    if state in {
-        AccountProfileState.REFRESH_COOLDOWN,
-        AccountProfileState.TEMPORARY_UNAVAILABLE,
-    }:
+    if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
         return discord.Colour.orange()
     if state in {AccountProfileState.DELETING, AccountProfileState.AUTHORIZATION_UNAVAILABLE}:
         return discord.Colour.red()
@@ -227,14 +244,14 @@ def _state_colour(state: AccountProfileState) -> discord.Colour:
 
 def _riot_id_label(riot_id: str | None) -> str:
     if riot_id is None or not riot_id.strip():
-        return "Niedostępny"
+        return "Brak danych"
     return discord.utils.escape_markdown(riot_id.strip())
 
 
 def _region_label(platform: str) -> str:
     normalized = platform.strip().upper()
     if not normalized:
-        return "Nieznany"
+        return "Brak danych"
     return _REGION_LABELS.get(normalized, discord.utils.escape_markdown(normalized))
 
 
@@ -292,9 +309,14 @@ def _as_utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "PROFILE_ACCOUNT_STATUS_FIELD_NAME",
+    "PROFILE_REFRESH_STATUS_FIELD_NAME",
     "REFRESH_BUTTON_LABEL",
+    "REFRESH_QUEUED_BUTTON_LABEL",
+    "REFRESH_RUNNING_BUTTON_LABEL",
     "AccountProfilePresentation",
     "AccountProfileState",
     "VerificationLinkLike",
     "build_account_profile",
+    "set_account_profile_status",
 ]

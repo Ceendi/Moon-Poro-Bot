@@ -211,7 +211,10 @@ async def test_complete_browser_flow_from_landing_to_result(
     landing = await rso_test_client.get(path, headers=headers)
     untouched = await repository.get_by_start_token(created.token)
     assert landing.status == 200
-    assert "Przejdź do logowania Riot" in await landing.text()
+    landing_html = await landing.text()
+    assert "Połącz konto przez Riot" in landing_html
+    assert "Potwierdź dostęp do Riot ID i regionu" in landing_html
+    assert "Przejdź do logowania Riot" in landing_html
     assert untouched is not None and untouched.status == VerificationSessionStatus.CREATED.value
 
     start = await rso_test_client.post(
@@ -304,6 +307,9 @@ async def test_invalid_tokens_and_origin_are_rejected(rso_test_client: TestClien
     missing_cookie = await rso_test_client.get("/verify/result", headers=headers)
 
     assert "Nieprawidłowy link" in await invalid_link.text()
-    assert "Nieprawidłowa odpowiedź" in await invalid_state.text()
+    invalid_state_html = await invalid_state.text()
+    assert "Nieprawidłowa odpowiedź" in invalid_state_html
+    assert "Nie udało się potwierdzić logowania" in invalid_state_html
+    assert "Stan logowania" not in invalid_state_html
     assert "Nie udało się rozpocząć" in await bad_origin.text()
     assert "Sprawdź Discorda" in await missing_cookie.text()

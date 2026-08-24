@@ -316,11 +316,11 @@ async def show_start(request: web.Request) -> web.Response:
     minutes = max(1, int((as_utc(record.expires_at) - now).total_seconds() // 60))
     body = f"""
         <p class="eyebrow">Jednorazowe połączenie</p>
-        <h1>Potwierdź konto u źródła.</h1>
+        <h1>Połącz konto przez Riot.</h1>
         <p class="lead">Za chwilę przejdziesz do oficjalnej strony Riot Games. Moon Poro nie zobaczy Twojego hasła. Link wygaśnie za około {minutes} min.</p>
         <ol class="steps">
           <li><span>1</span>Zaloguj się na stronie Riot.</li>
-          <li><span>2</span>Zezwól na identyfikację konta i regionu.</li>
+          <li><span>2</span>Potwierdź dostęp do Riot ID i regionu.</li>
           <li><span>3</span>Wróć do Discorda — role pojawią się automatycznie.</li>
         </ol>
         <form method="post" action="/verify/start/{html.escape(token)}">
@@ -356,7 +356,7 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
     if not STATE_PATTERN.fullmatch(state):
         return _status_page(
             "Nieprawidłowa odpowiedź",
-            "Stan logowania nie pasuje. Zacznij ponownie w Discordzie.",
+            "Nie udało się potwierdzić logowania. Rozpocznij ponownie w Discordzie.",
             "error",
         )
     try:
@@ -449,9 +449,11 @@ def _result_for_record(record: VerificationSession) -> web.Response:
     error_copy = {
         "DISCORD_ALREADY_LINKED": "To konto Discord ma już połączone konto Riot.",
         "RIOT_ALREADY_LINKED": "To konto Riot jest już połączone z innym kontem Discord.",
-        "LINK_CONFLICT": "Konto zostało połączone przez inną równoczesną operację.",
+        "LINK_CONFLICT": "Konto zostało już połączone w innej rozpoczętej weryfikacji.",
         "UNSUPPORTED_PLATFORM": "Ten region League of Legends nie jest obecnie obsługiwany.",
-        "MISSING_PLATFORM": "Riot nie zwrócił regionu League of Legends dla tego konta.",
+        "MISSING_PLATFORM": (
+            "Nie udało się ustalić obsługiwanego regionu League of Legends dla tego konta."
+        ),
         "MEMBER_LEFT_GUILD": "Nie ma Cię już na serwerze Discord, więc powiązanie zostało cofnięte.",
         "USER_REMOVED_LINK": "Powiązanie zostało usunięte w Discordzie.",
     }
@@ -477,7 +479,7 @@ def _status_page(
         action = f'<a class="button" href="{html.escape(url, quote=True)}">{html.escape(label)} <span aria-hidden="true">→</span></a>'
     body = f"""
         <div class="status-icon {kind}" aria-hidden="true">{icon}</div>
-        <p class="eyebrow">Riot Sign On + Discord</p>
+        <p class="eyebrow">Weryfikacja konta Riot</p>
         <h1>{html.escape(title)}</h1>
         <p class="lead">{message}</p>
         {action}
