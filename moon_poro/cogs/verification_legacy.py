@@ -845,8 +845,8 @@ class LegacyVerificationCog(VerificationCog):
         embed.add_field(
             name="Role",
             value=(
-                "Bot nada rolę „Zweryfikowany” oraz będzie aktualizował role regionu "
-                "i rangi Solo/Duo."
+                "Bot nada Ci rolę „Zweryfikowany” oraz role regionu i rangi Solo/Duo. "
+                "Rangę będzie odświeżać automatycznie."
             ),
             inline=False,
         )
