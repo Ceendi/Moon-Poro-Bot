@@ -238,6 +238,8 @@ async def _record_leagues(
     bot: MoonPoroBot,
     link: VerificationLink,
     leagues: LeagueEntries,
+    *,
+    expected_claimed_at: datetime | None,
 ) -> tuple[LeagueEntries, datetime] | None:
     decision = decide_rank_refresh(
         _snapshot_from_link(link),
@@ -258,6 +260,8 @@ async def _record_leagues(
         expected_puuid=link.puuid or "",
         expected_platform=link.platform,
         expected_created_at=link.created_at,
+        expected_claimed_at=expected_claimed_at,
+        expected_rank_last_checked_at=link.rank_last_checked_at,
         decision=decision,
         next_interval_seconds=interval,
     )
@@ -605,6 +609,17 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
 
     link = links[0]
     if link.puuid is None:
+        logger.error(
+            "Claimed rank refresh has no PUUID for Discord user %s",
+            link.discord_user_id,
+        )
+        return
+    claimed_at = link.rank_refresh_claimed_at
+    if claimed_at is None:
+        logger.error(
+            "Claimed rank refresh has no ownership token for Discord user %s",
+            link.discord_user_id,
+        )
         return
     member = guild.get_member(link.discord_user_id)
     if member is None:
@@ -615,6 +630,7 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
             expected_puuid=link.puuid,
             expected_platform=link.platform,
             expected_created_at=link.created_at,
+            expected_claimed_at=claimed_at,
         )
         return
 
@@ -628,6 +644,7 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
             expected_puuid=link.puuid,
             expected_platform=link.platform,
             expected_created_at=link.created_at,
+            expected_claimed_at=claimed_at,
         )
         logger.warning(
             "Riot League-v4 returned 404 for Discord user %s; retrying in %s seconds",
@@ -643,6 +660,7 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
                 expected_puuid=link.puuid,
                 expected_platform=link.platform,
                 expected_created_at=link.created_at,
+                expected_claimed_at=claimed_at,
             )
             logger.error(
                 "Paused automatic Riot rank refreshes after authentication failure HTTP %s",
@@ -656,6 +674,7 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
             expected_puuid=link.puuid,
             expected_platform=link.platform,
             expected_created_at=link.created_at,
+            expected_claimed_at=claimed_at,
         )
         logger.warning(
             "Could not refresh Riot rank for Discord user %s; retrying in %s seconds",
@@ -664,7 +683,12 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         )
         return
 
-    recorded = await _record_leagues(bot, link, leagues)
+    recorded = await _record_leagues(
+        bot,
+        link,
+        leagues,
+        expected_claimed_at=claimed_at,
+    )
     if recorded is None:
         return
     cached_leagues, checked_at = recorded
@@ -1965,9 +1989,14 @@ class VerificationCog(commands.Cog):
                 checked_at = cached_checked_at
             else:
                 leagues = await _get_leagues(self.bot, platform, puuid)
-                recorded = await _record_leagues(self.bot, link, leagues)
+                recorded = await _record_leagues(
+                    self.bot,
+                    link,
+                    leagues,
+                    expected_claimed_at=None,
+                )
                 if recorded is None:
-                    await self._retry_rso_completion(record, "VERIFICATION_LINK_MISSING")
+                    await self._retry_rso_completion(record, "RANK_SNAPSHOT_CONFLICT")
                     return
                 role_leagues, checked_at = recorded
             applied = await _run_active_link_role_update(
