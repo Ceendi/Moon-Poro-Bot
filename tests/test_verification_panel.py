@@ -96,7 +96,7 @@ def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
         "Zweryfikuj konto",
         "Moje konto",
         "Odśwież rangę",
-        "Usuń weryfikację",
+        "Usuń powiązanie",
     ]
 
 
@@ -158,7 +158,7 @@ async def test_rso_persistent_start_rejects_another_guild() -> None:
     await VerificationStartView(bot).children[0].callback(interaction)
 
     response.send_message.assert_awaited_once_with(
-        "Weryfikację rozpocznij na skonfigurowanym serwerze.", ephemeral=True
+        "Weryfikację możesz rozpocząć tylko na serwerze Moon Poro.", ephemeral=True
     )
 
 
@@ -185,7 +185,9 @@ async def test_rso_start_blocks_reverification_while_delete_is_pending(
 
     await VerificationStartView(bot).children[0].callback(interaction)
 
-    assert "już zapisane powiązanie" in response.send_message.await_args.args[0]
+    assert response.send_message.await_args.args[0] == (
+        "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę."
+    )
     sessions.create.assert_not_awaited()
 
 
@@ -219,8 +221,8 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
 
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["embed"].title == "Weryfikacja konta League of Legends"
-    assert "ikoną profilu" in kwargs["embed"].description
-    assert "tier Solo/Duo" in kwargs["embed"].fields[0].value
+    assert "ikonę profilu" in kwargs["embed"].description
+    assert "rangi Solo/Duo" in kwargs["embed"].fields[0].value
     assert isinstance(kwargs["view"], LegacyVerificationStartView)
 
 
@@ -266,7 +268,7 @@ async def test_profile_is_ephemeral_and_owner_bound(
     )
     assert await view.interaction_check(foreign_interaction) is False
     foreign_interaction.response.send_message.assert_awaited_once_with(
-        "Ten profil należy do innego użytkownika.", ephemeral=True
+        "Nie możesz użyć przycisków w profilu innej osoby.", ephemeral=True
     )
 
 
@@ -363,7 +365,7 @@ async def test_profile_refresh_shows_queued_running_and_completed_states(
 
     queued_kwargs = interaction.edit_original_response.await_args_list[0].kwargs
     assert queued_kwargs["embed"].description == (
-        "Odświeżenie czeka w kolejce. Pokazujemy dane z poprzedniej udanej aktualizacji."
+        "Odświeżenie rangi czeka w kolejce.\nNa razie pokazujemy poprzednie dane."
     )
     assert isinstance(queued_kwargs["view"], AccountProfileView)
     assert queued_kwargs["view"].children[0].label == "Odświeżanie…"
@@ -372,13 +374,15 @@ async def test_profile_refresh_shows_queued_running_and_completed_states(
 
     running_kwargs = interaction.edit_original_response.await_args_list[1].kwargs
     assert running_kwargs["embed"].description == (
-        "Odświeżanie rangi trwa. Pokazujemy dane z poprzedniej udanej aktualizacji."
+        "Trwa odświeżanie rangi.\nNa razie pokazujemy poprzednie dane."
     )
     assert running_kwargs["view"].children[0].label == "Odświeżanie…"
     assert running_kwargs["view"].children[0].disabled is True
 
     completed_kwargs = interaction.edit_original_response.await_args_list[2].kwargs
-    assert completed_kwargs["embed"].description.startswith("Ranga została odświeżona.")
+    assert completed_kwargs["embed"].description == (
+        "Ranga została odświeżona.\nRangę możesz odświeżyć ponownie za około 30 min."
+    )
     fields = {field.name: field.value for field in completed_kwargs["embed"].fields}
     assert fields["Solo/Duo"] == "Diamond IV"
     assert fields["LP"] == "73 LP"
@@ -424,7 +428,7 @@ async def test_profile_refresh_detects_completion_before_first_poll() -> None:
     bot.verifications.get_by_user.assert_awaited_once_with(123, 101)
     interaction.edit_original_response.assert_awaited_once()
     assert interaction.edit_original_response.await_args.kwargs["embed"].description.startswith(
-        "Ranga została odświeżona."
+        "Ranga została odświeżona.\n"
     )
 
 
@@ -471,7 +475,8 @@ async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
     assert bot.verifications.get_by_user.await_count == 2
     timeout_kwargs = interaction.edit_original_response.await_args.kwargs
     assert timeout_kwargs["embed"].description == (
-        "Odświeżanie potrwa dłużej. Pokazujemy dane z poprzedniej udanej aktualizacji. "
+        "Odświeżanie trwa dłużej niż zwykle.\n"
+        "Na razie pokazujemy poprzednie dane.\n"
         "Otwórz `/profil` ponownie za chwilę."
     )
     assert timeout_kwargs["view"].children[0].disabled is True
@@ -532,10 +537,10 @@ async def test_profile_refresh_timeout_final_read_prefers_terminal_state(
     assert bot.verifications.get_by_user.await_count == 2
     final_description = interaction.edit_original_response.await_args.kwargs["embed"].description
     if final_state == "completed":
-        assert final_description.startswith("Ranga została odświeżona.")
+        assert final_description.startswith("Ranga została odświeżona.\n")
     else:
         assert final_description == (
-            "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
+            "Riot jest chwilowo niedostępny.\nBot spróbuje ponownie automatycznie."
         )
     assert "potrwa dłużej" not in final_description
 
@@ -590,7 +595,7 @@ async def test_profile_refresh_stops_watching_after_temporary_riot_failure(
     assert bot.verifications.get_by_user.await_count == 2
     failure_kwargs = interaction.edit_original_response.await_args.kwargs
     assert failure_kwargs["embed"].description == (
-        "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
+        "Riot jest chwilowo niedostępny.\nBot spróbuje ponownie automatycznie."
     )
     assert failure_kwargs["view"].children[0].label == "Odśwież rangę"
     assert failure_kwargs["view"].children[0].disabled is True
@@ -629,7 +634,7 @@ async def test_stale_profile_refresh_does_not_render_the_new_link(
 
     bot.verifications.get_by_user.assert_not_awaited()
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        content="Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
         embed=None,
         view=None,
     )
@@ -685,7 +690,7 @@ async def test_profile_refresh_stops_if_link_changes_while_watching(
     await refresh.callback(interaction)
 
     assert interaction.edit_original_response.await_args.kwargs == {
-        "content": "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        "content": "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
         "embed": None,
         "view": None,
     }
@@ -745,7 +750,7 @@ async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
     await refresh.callback(interaction)
 
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Nie udało się odświeżyć widoku. Spróbuj ponownie.",
+        content="Nie udało się rozpocząć odświeżania rangi. Spróbuj ponownie.",
         view=view,
     )
     assert "internal" not in interaction.edit_original_response.await_args.kwargs["content"]
@@ -787,8 +792,9 @@ async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> N
     kwargs = interaction.edit_original_response.await_args.kwargs
     assert kwargs["content"] is None
     assert kwargs["embed"].description == (
-        "Nie udało się automatycznie zaktualizować tego widoku. "
-        "Odświeżenie może nadal trwać. Otwórz `/profil` ponownie za chwilę."
+        "Nie udało się pokazać wyniku odświeżania.\n"
+        "Odświeżanie może nadal trwać.\n"
+        "Otwórz `/profil` ponownie za chwilę."
     )
     assert "database" not in kwargs["embed"].description
     assert kwargs["view"] is view
@@ -828,12 +834,12 @@ async def test_profile_delete_passes_captured_identity_to_confirmation(
 @pytest.mark.parametrize(
     ("status", "fragment"),
     [
-        (RankRefreshRequestStatus.ENQUEUED, "do kolejki"),
-        (RankRefreshRequestStatus.ALREADY_DUE, "już w kolejce"),
-        (RankRefreshRequestStatus.ALREADY_CLAIMED, "już trwa"),
+        (RankRefreshRequestStatus.ENQUEUED, "czeka w kolejce"),
+        (RankRefreshRequestStatus.ALREADY_DUE, "jest już w kolejce"),
+        (RankRefreshRequestStatus.ALREADY_CLAIMED, "Trwa już odświeżanie"),
         (RankRefreshRequestStatus.BACKOFF_ACTIVE, "automatycznie"),
-        (RankRefreshRequestStatus.LINK_CHANGED, "zmieniło się"),
-        (RankRefreshRequestStatus.NOT_LINKED, "Najpierw zweryfikuj"),
+        (RankRefreshRequestStatus.LINK_CHANGED, "Dane konta zmieniły się"),
+        (RankRefreshRequestStatus.NOT_LINKED, "Najpierw kliknij „Zweryfikuj konto”"),
     ],
 )
 async def test_refresh_button_returns_private_queue_status(
@@ -905,10 +911,9 @@ async def test_delete_button_requires_ephemeral_confirmation(
 
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["ephemeral"] is True
-    assert (
-        "Role regionu, rangi i użytkownika pozostaną bez zmian."
-        in (interaction.response.send_message.await_args.args[0])
-    )
+    confirmation = interaction.response.send_message.await_args.args[0]
+    assert "Rola „Zweryfikowany” zostanie usunięta." in confirmation
+    assert "Role regionu, rangi i użytkownika pozostaną bez zmian." in confirmation
     view = kwargs["view"]
     assert isinstance(view, DeleteVerificationConfirmationView)
     assert view.expected_puuid == link.puuid
@@ -939,7 +944,7 @@ async def test_delete_rejects_a_profile_for_an_old_link(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+        "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
         ephemeral=True,
     )
 
@@ -983,7 +988,7 @@ async def test_delete_confirmation_calls_the_shared_removal_once(
     await confirm.callback(interaction)
 
     interaction.response.edit_message.assert_awaited_once_with(
-        content="Usuwam powiązanie…", view=None
+        content="Usuwanie powiązania…", view=None
     )
     remove.assert_awaited_once_with(
         bot,
@@ -1021,10 +1026,10 @@ async def test_delete_confirmation_hides_unexpected_internal_failure(
     await confirm.callback(interaction)
 
     interaction.response.edit_message.assert_awaited_once_with(
-        content="Usuwam powiązanie…", view=None
+        content="Usuwanie powiązania…", view=None
     )
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Nie udało się zakończyć usuwania. Spróbuj ponownie.",
+        content=("Nie udało się usunąć powiązania. Otwórz `/profil`, aby sprawdzić aktualny stan."),
         view=None,
     )
 
@@ -1128,7 +1133,9 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
 
     message = await _remove_user_verification(bot, interaction)
 
-    assert "w kolejce" in message
+    assert message == (
+        "Usuwanie powiązania czeka na dokończenie. Bot spróbuje ponownie automatycznie."
+    )
     repository.retry_verification_deletion.assert_awaited_once_with(
         123,
         101,
@@ -1182,6 +1189,8 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
         bot, SimpleNamespace(guild_id=123, user=member, guild=guild)
     )
 
-    assert "w kolejce" in message
+    assert message == (
+        "Usuwanie powiązania czeka na dokończenie. Bot spróbuje ponownie automatycznie."
+    )
     repository.retry_verification_deletion.assert_awaited_once()
     repository.finalize_verification_deletion.assert_not_awaited()

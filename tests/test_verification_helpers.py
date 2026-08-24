@@ -142,6 +142,14 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
     response.send_message.assert_awaited_once()
     sent_view = response.send_message.await_args.kwargs["view"]
     assert sent_view.children[0].url == "https://bot.example.com/verify/start/" + "a" * 43
+    assert sent_view.children[0].label == "Zaloguj się przez Riot"
+    sent_embed = response.send_message.await_args.kwargs["embed"]
+    assert sent_embed.title == "Połącz konto Riot"
+    assert sent_embed.description == (
+        "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
+        "Moon Poro nie zobaczy Twojego hasła. Jednorazowy link wygaśnie za 10 min."
+    )
+    assert "token" not in sent_embed.description.lower()
     assert response.send_message.await_args.kwargs["ephemeral"] is True
 
 
@@ -882,6 +890,10 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
         1,
         message_id=None,
         channel_id=None,
+    )
+    member.send.assert_awaited_once_with(
+        "Twoje konto Riot zostało zweryfikowane. "
+        "Na serwerze **Test** zaktualizowano role regionu i rangi."
     )
 
 

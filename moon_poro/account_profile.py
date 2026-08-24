@@ -99,12 +99,17 @@ def build_account_profile(
         and link is not None
         and link.rank_last_checked_at is None
     )
+    has_previous_data = link is not None and link.rank_last_checked_at is not None
     embed = discord.Embed(
         title="Moje konto",
         description=(
-            "Oczekiwanie na pierwszą aktualizację."
+            "Ranga nie została jeszcze sprawdzona."
             if awaiting_first_refresh
-            else _status_text(state, cooldown_remaining)
+            else _status_text(
+                state,
+                cooldown_remaining,
+                has_previous_data=has_previous_data,
+            )
         ),
         colour=_state_colour(state),
     )
@@ -184,7 +189,7 @@ def _add_profile_fields(
     embed.add_field(name="Solo/Duo", value=rank, inline=True)
     embed.add_field(name="LP", value=_lp_label(link), inline=True)
     embed.add_field(name="Bilans", value=_record_label(wins, losses), inline=True)
-    embed.add_field(name="Win rate", value=_win_rate_label(wins, losses), inline=True)
+    embed.add_field(name="Wygrane", value=_win_rate_label(wins, losses), inline=True)
     embed.add_field(
         name="Ostatnia udana aktualizacja",
         value=_last_update_label(link.rank_last_checked_at),
@@ -192,23 +197,38 @@ def _add_profile_fields(
     )
 
 
-def _status_text(state: AccountProfileState, cooldown_remaining: timedelta) -> str:
+def _status_text(
+    state: AccountProfileState,
+    cooldown_remaining: timedelta,
+    *,
+    has_previous_data: bool,
+) -> str:
     if state is AccountProfileState.UNVERIFIED:
         return "Nie masz jeszcze połączonego konta Riot."
     if state is AccountProfileState.DELETING:
-        return "Usuwanie powiązania trwa."
+        return "Trwa usuwanie powiązania."
     if state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
-        return "Odświeżanie jest teraz niedostępne. Problem wymaga działania administratora."
+        return "Odświeżanie rangi jest teraz niedostępne.\nProblem musi rozwiązać administrator."
     if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
-        return "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
+        return "Riot jest chwilowo niedostępny.\nBot spróbuje ponownie automatycznie."
     if state is AccountProfileState.REFRESH_RUNNING:
-        return "Odświeżanie rangi trwa. Pokazujemy dane z poprzedniej udanej aktualizacji."
+        details = (
+            "Na razie pokazujemy poprzednie dane."
+            if has_previous_data
+            else "Dane pojawią się po zakończeniu odświeżania."
+        )
+        return f"Trwa odświeżanie rangi.\n{details}"
     if state is AccountProfileState.REFRESH_QUEUED:
-        return "Odświeżenie czeka w kolejce. Pokazujemy dane z poprzedniej udanej aktualizacji."
+        details = (
+            "Na razie pokazujemy poprzednie dane."
+            if has_previous_data
+            else "Dane pojawią się po zakończeniu odświeżania."
+        )
+        return f"Odświeżenie rangi czeka w kolejce.\n{details}"
     if state is AccountProfileState.REFRESH_COOLDOWN:
         minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
-        return f"Kolejne odświeżenie będzie dostępne za około {minutes} min."
-    return "Dane z ostatniego sprawdzenia są gotowe."
+        return f"Rangę możesz odświeżyć ponownie za około {minutes} min."
+    return "Pokazujemy dane z ostatniej udanej aktualizacji."
 
 
 def _state_colour(state: AccountProfileState) -> discord.Colour:
@@ -228,14 +248,14 @@ def _state_colour(state: AccountProfileState) -> discord.Colour:
 
 def _riot_id_label(riot_id: str | None) -> str:
     if riot_id is None or not riot_id.strip():
-        return "Niedostępny"
+        return "Brak danych"
     return discord.utils.escape_markdown(riot_id.strip())
 
 
 def _region_label(platform: str) -> str:
     normalized = platform.strip().upper()
     if not normalized:
-        return "Nieznany"
+        return "Brak danych"
     return _REGION_LABELS.get(normalized, discord.utils.escape_markdown(normalized))
 
 

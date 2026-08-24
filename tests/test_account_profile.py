@@ -135,7 +135,7 @@ def test_authorization_message_does_not_claim_an_alert_was_sent() -> None:
     )
 
     assert profile.embed.description == (
-        "Odświeżanie jest teraz niedostępne. Problem wymaga działania administratora."
+        "Odświeżanie rangi jest teraz niedostępne.\nProblem musi rozwiązać administrator."
     )
 
 
@@ -146,15 +146,17 @@ def test_rendered_profile_uses_cached_rank_data() -> None:
 
     assert profile.state is AccountProfileState.SUCCESS
     assert profile.embed.title == "Moje konto"
+    assert profile.embed.description == "Pokazujemy dane z ostatniej udanej aktualizacji."
     assert fields == {
         "Riot ID": "Moon Poro#EUNE",
         "Region": "EUNE",
         "Solo/Duo": "Emerald IV",
         "LP": "20 LP",
         "Bilans": "120 W / 100 P",
-        "Win rate": "54,5%",
+        "Wygrane": "54,5%",
         "Ostatnia udana aktualizacja": (f"<t:{expected_timestamp}:f> • <t:{expected_timestamp}:R>"),
     }
+    assert [field.inline for field in profile.embed.fields] == [True] * 6 + [False]
 
 
 def test_unranked_profile_does_not_invent_lp_or_results() -> None:
@@ -174,7 +176,7 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     assert fields["Solo/Duo"] == "Brak rangi"
     assert fields["LP"] == "—"
     assert fields["Bilans"] == "—"
-    assert fields["Win rate"] == "—"
+    assert fields["Wygrane"] == "—"
 
 
 def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
@@ -204,11 +206,11 @@ def test_missing_cache_is_described_without_a_riot_call() -> None:
     )
     fields = {field.name: field.value for field in profile.embed.fields}
 
-    assert fields["Riot ID"] == "Niedostępny"
-    assert fields["Region"] == "Nieznany"
+    assert fields["Riot ID"] == "Brak danych"
+    assert fields["Region"] == "Brak danych"
     assert fields["Solo/Duo"] == "Brak danych"
     assert fields["Ostatnia udana aktualizacja"] == "Jeszcze nie sprawdzono"
-    assert profile.embed.description == "Oczekiwanie na pierwszą aktualizację."
+    assert profile.embed.description == "Ranga nie została jeszcze sprawdzona."
 
 
 def test_cooldown_text_rounds_remaining_time_up() -> None:
@@ -219,7 +221,7 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
     )
 
     assert profile.state is AccountProfileState.REFRESH_COOLDOWN
-    assert profile.embed.description == ("Kolejne odświeżenie będzie dostępne za około 11 min.")
+    assert profile.embed.description == "Rangę możesz odświeżyć ponownie za około 11 min."
 
 
 @pytest.mark.parametrize(
@@ -272,8 +274,8 @@ def test_refresh_button_availability(
 @pytest.mark.parametrize(
     ("link", "expected_prefix"),
     [
-        (_link(rank_refresh_claimed_at=NOW), "Odświeżanie rangi trwa."),
-        (_link(rank_next_refresh_at=NOW), "Odświeżenie czeka w kolejce."),
+        (_link(rank_refresh_claimed_at=NOW), "Trwa odświeżanie rangi."),
+        (_link(rank_next_refresh_at=NOW), "Odświeżenie rangi czeka w kolejce."),
     ],
 )
 def test_pending_refresh_explains_that_cached_data_remains_visible(
@@ -282,10 +284,23 @@ def test_pending_refresh_explains_that_cached_data_remains_visible(
 ) -> None:
     profile = build_account_profile(link, now=NOW)
 
-    assert profile.embed.description == (
-        f"{expected_prefix} Pokazujemy dane z poprzedniej udanej aktualizacji."
-    )
+    assert profile.embed.description == (f"{expected_prefix}\nNa razie pokazujemy poprzednie dane.")
     assert profile.refresh_button_label == REFRESH_PENDING_BUTTON_LABEL == "Odświeżanie…"
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        _link(rank_last_checked_at=None, rank_refresh_claimed_at=NOW),
+        _link(rank_last_checked_at=None, rank_next_refresh_at=NOW),
+    ],
+)
+def test_first_refresh_does_not_claim_that_previous_data_exists(link: SimpleNamespace) -> None:
+    profile = build_account_profile(link, now=NOW)
+
+    assert profile.embed.description is not None
+    assert profile.embed.description.endswith("Dane pojawią się po zakończeniu odświeżania.")
+    assert "poprzednie dane" not in profile.embed.description
 
 
 def test_presentation_never_offers_check_status_or_technical_errors() -> None:
@@ -299,6 +314,7 @@ def test_presentation_never_offers_check_status_or_technical_errors() -> None:
         assert "Sprawdź stan" not in rendered
         assert "401" not in rendered
         assert "403" not in rendered
+        assert "API" not in rendered
         assert "token" not in rendered.lower()
         assert "exception" not in rendered.lower()
 

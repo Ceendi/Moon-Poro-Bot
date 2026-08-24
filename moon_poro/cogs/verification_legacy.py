@@ -98,7 +98,7 @@ class LegacyVerificationRateLimiter:
 
 
 def _rate_limit_message(retry_after: float) -> str:
-    return f"Zbyt wiele prób. Spróbuj ponownie za {math.ceil(retry_after)} s."
+    return f"Za dużo prób. Spróbuj ponownie za {math.ceil(retry_after)} s."
 
 
 def _normalize_riot_id_parts(game_name: str, tag_line: str) -> tuple[str, str]:
@@ -111,11 +111,11 @@ def _riot_id_validation_error(game_name: str, tag_line: str) -> str | None:
     if not RIOT_GAME_NAME_MIN_LENGTH <= len(game_name) <= RIOT_GAME_NAME_MAX_LENGTH:
         return "Nazwa w Riot ID musi mieć od 3 do 16 znaków."
     if "#" in game_name:
-        return "W polu nazwy wpisz tylko część Riot ID przed znakiem `#`."
+        return "W polu „Nazwa” wpisz tylko część Riot ID przed znakiem #."
     if not RIOT_TAG_LINE_MIN_LENGTH <= len(tag_line) <= RIOT_TAG_LINE_MAX_LENGTH:
-        return "Tag w Riot ID musi mieć od 3 do 5 znaków."
+        return "Tag musi mieć od 3 do 5 znaków."
     if not tag_line.isalnum():
-        return "Tag w Riot ID może zawierać wyłącznie litery i cyfry."
+        return "Tag może zawierać tylko litery i cyfry."
     return None
 
 
@@ -168,7 +168,7 @@ class LegacyVerificationStartView(discord.ui.View):
     async def begin_verification(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
-                "Ten panel nie należy do skonfigurowanego serwera.", ephemeral=True
+                "Weryfikację możesz rozpocząć tylko na serwerze Moon Poro.", ephemeral=True
             )
             return
         retry_after = self.cooldowns.update_rate_limit(interaction)
@@ -182,14 +182,29 @@ class LegacyVerificationStartView(discord.ui.View):
                 "Weryfikację rozpocznij na serwerze Discord.", ephemeral=True
             )
             return
-        if member_has_role(
-            interaction.user,
-            self.bot.settings.verified_role_name,
-            self.bot.settings,
-        ) or await self.bot.verifications.get_by_user(interaction.guild_id, interaction.user.id):
+        existing_link = await self.bot.verifications.get_by_user(
+            interaction.guild_id, interaction.user.id
+        )
+        if (
+            existing_link is not None
+            and getattr(existing_link, "deletion_requested_at", None) is not None
+        ):
             await interaction.response.send_message(
-                "To konto Discord jest już zweryfikowane. Użyj `/usun_weryfikacje`, "
-                "aby usunąć powiązanie.",
+                "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+                ephemeral=True,
+            )
+            return
+        if (
+            member_has_role(
+                interaction.user,
+                self.bot.settings.verified_role_name,
+                self.bot.settings,
+            )
+            or existing_link is not None
+        ):
+            await interaction.response.send_message(
+                "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
+                "obecne powiązanie w `/profil`.",
                 ephemeral=True,
             )
             return
@@ -226,7 +241,7 @@ class LegacyVerificationStartView(discord.ui.View):
         await _request_rank_refresh_from_panel(self.bot, interaction)
 
     @discord.ui.button(
-        label="Usuń weryfikację",
+        label="Usuń powiązanie",
         emoji="🗑️",
         style=discord.ButtonStyle.red,
         custom_id="verification:delete:v1",
@@ -264,7 +279,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         )
         self.tag_line: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
             custom_id="verification:riot-tag-line:v2",
-            placeholder="Część po #",
+            placeholder="np. EUNE",
             default=tag_line or None,
             min_length=RIOT_TAG_LINE_MIN_LENGTH,
             # Six characters let us tolerate an accidentally pasted leading '#'.
@@ -272,7 +287,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         )
         self.platform: discord.ui.Select[LegacyVerificationModal] = discord.ui.Select(
             custom_id="verification:platform:v2",
-            placeholder="Wybierz serwer",
+            placeholder="Wybierz region",
             min_values=1,
             max_values=1,
             required=True,
@@ -299,21 +314,21 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         )
         self.add_item(
             discord.ui.Label(
-                text="Nazwa Riot ID",
-                description="Część przed #",
+                text="Nazwa",
+                description="Część Riot ID przed #",
                 component=self.game_name,
             )
         )
         self.add_item(
             discord.ui.Label(
-                text="Tag Riot ID",
-                description="Część po #, od 3 do 5 liter lub cyfr",
+                text="Tag",
+                description="Część Riot ID po # (3-5 liter lub cyfr)",
                 component=self.tag_line,
             )
         )
         self.add_item(
             discord.ui.Label(
-                text="Serwer LoL",
+                text="Region",
                 component=self.platform,
             )
         )
@@ -333,13 +348,13 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
-                "Weryfikacja jest dostępna wyłącznie na skonfigurowanym serwerze.",
+                "Weryfikację możesz rozpocząć tylko na serwerze Moon Poro.",
                 ephemeral=True,
             )
             return
         if len(self.platform.values) != 1 or self.platform.values[0] not in SERVER_TRANSLATION:
             await interaction.response.send_message(
-                "Wybierz jeden z dostępnych serwerów League of Legends.", ephemeral=True
+                "Wybierz jeden z dostępnych regionów League of Legends.", ephemeral=True
             )
             return
 
@@ -351,7 +366,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         validation_error = _riot_id_validation_error(game_name, tag_line)
         if validation_error is not None:
             await interaction.response.send_message(
-                f"❌ {validation_error}",
+                validation_error,
                 view=self._retry_view(interaction, game_name, tag_line, platform),
                 ephemeral=True,
             )
@@ -382,8 +397,8 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
                 await interaction.followup.send(
                     f"Nie znaleziono Riot ID **{discord.utils.escape_markdown(game_name)}#"
                     f"{discord.utils.escape_markdown(tag_line)}** w regionie "
-                    f"**{SERVER_TRANSLATION[platform]}**. Sprawdź dane z profilu Riot "
-                    "(nie nazwę logowania) oraz wybrany serwer LoL.",
+                    f"**{SERVER_TRANSLATION[platform]}**.\nSprawdź Riot ID z profilu Riot "
+                    "(nie nazwę logowania) oraz wybrany region.",
                     view=self._retry_view(interaction, game_name, tag_line, platform),
                     ephemeral=True,
                 )
@@ -397,14 +412,14 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             summoner = await _get_summoner(self.bot, platform, puuid)
         except RiotAPIUnavailable:
             await interaction.followup.send(
-                "Riot API jest chwilowo niedostępne. Spróbuj ponownie później.",
+                "Riot jest chwilowo niedostępny. Spróbuj ponownie później.",
                 ephemeral=True,
             )
             return
         if summoner is None:
             await interaction.followup.send(
                 "Riot ID istnieje, ale nie ma profilu League of Legends w wybranym regionie. "
-                "Sprawdź wybrany serwer.",
+                "Sprawdź wybrany region.",
                 view=self._retry_view(interaction, game_name, tag_line, platform),
                 ephemeral=True,
             )
@@ -412,10 +427,10 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
 
         icon_id = secrets.choice(range(29))
         embed = discord.Embed(
-            title="Potwierdź konto przez ikonę profilu",
+            title="Potwierdź konto ikoną profilu",
             description=(
-                "Ustaw w kliencie League of Legends ikonę pokazaną poniżej, "
-                "a następnie kliknij **Sprawdź ikonę**."
+                "Ustaw w kliencie League of Legends ikonę widoczną poniżej. "
+                "Następnie kliknij **Sprawdź ikonę**."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
@@ -526,7 +541,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             or not isinstance(interaction.user, discord.Member)
         ):
             await interaction.response.send_message(
-                "Weryfikację dokończ na skonfigurowanym serwerze.", ephemeral=True
+                "Weryfikację możesz dokończyć tylko na serwerze Moon Poro.", ephemeral=True
             )
             return
         retry_after = self.rate_limiter.update_rate_limit(
@@ -541,14 +556,24 @@ class LegacyIconConfirmationView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            if await self.bot.verifications.get_by_user(interaction.guild_id, self.owner_id):
+            existing_link = await self.bot.verifications.get_by_user(
+                interaction.guild_id, self.owner_id
+            )
+            if (
+                existing_link is not None
+                and getattr(existing_link, "deletion_requested_at", None) is not None
+            ):
                 await interaction.followup.send(
-                    "To konto Discord zostało już zweryfikowane.", ephemeral=True
+                    "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+                    ephemeral=True,
                 )
+                return
+            if existing_link is not None:
+                await interaction.followup.send("Masz już połączone konto Riot.", ephemeral=True)
                 return
             if await self.bot.verifications.get_by_puuid(interaction.guild_id, self.puuid):
                 await interaction.followup.send(
-                    "To konto Riot zostało już przypisane do innego użytkownika.",
+                    "To konto Riot jest już połączone z innym kontem Discord.",
                     ephemeral=True,
                 )
                 return
@@ -563,7 +588,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             leagues = await _get_leagues(self.bot, self.platform, self.puuid)
         except RiotAPIUnavailable:
             await interaction.followup.send(
-                "Riot API jest chwilowo niedostępne. Spróbuj ponownie później.",
+                "Riot jest chwilowo niedostępny. Spróbuj ponownie później.",
                 ephemeral=True,
             )
             return
@@ -573,7 +598,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if not isinstance(channel, discord.abc.Messageable):
             await interaction.followup.send(
-                "Kanał audytowy weryfikacji jest niedostępny. Zgłoś to administratorowi.",
+                "Nie można teraz dokończyć weryfikacji. Zgłoś problem administratorowi.",
                 ephemeral=True,
             )
             return
@@ -597,7 +622,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             )
         except discord.HTTPException:
             await interaction.followup.send(
-                "Nie udało się zapisać audytu weryfikacji. Spróbuj ponownie.", ephemeral=True
+                "Nie udało się dokończyć weryfikacji. Spróbuj ponownie.", ephemeral=True
             )
             return
 
@@ -620,7 +645,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             with suppress(discord.NotFound, discord.HTTPException):
                 await audit_message.delete()
             await interaction.followup.send(
-                "Nie udało się zapisać weryfikacji. Konto mogło zostać już powiązane.",
+                "Nie udało się dokończyć weryfikacji. To konto mogło zostać już połączone.",
                 ephemeral=True,
             )
             return
@@ -649,7 +674,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             with suppress(discord.HTTPException):
                 await interaction.edit_original_response(view=self)
             await interaction.followup.send(
-                "✅ Konto zostało zweryfikowane. Bot ponowi nadanie ról automatycznie.",
+                "✅ Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
                 ephemeral=True,
             )
             return
@@ -684,7 +709,9 @@ class LegacyIconConfirmationView(discord.ui.View):
                     )
         if not current:
             await interaction.followup.send(
-                "Stan powiązania zmienił się podczas weryfikacji.", ephemeral=True
+                "Powiązanie konta zmieniło się podczas weryfikacji. "
+                "Otwórz `/profil`, aby zobaczyć aktualny stan.",
+                ephemeral=True,
             )
             return
         await self.bot.verifications.acknowledge_rank_role_sync(
@@ -699,7 +726,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         button.disabled = True
         with suppress(discord.HTTPException):
             await interaction.edit_original_response(view=self)
-        await interaction.followup.send("✅ Weryfikacja zakończona.", ephemeral=True)
+        await interaction.followup.send("✅ Konto Riot zostało zweryfikowane.", ephemeral=True)
 
 
 class LegacyVerificationCog(VerificationCog):
@@ -756,24 +783,27 @@ class LegacyVerificationCog(VerificationCog):
         embed = discord.Embed(
             title="Weryfikacja konta League of Legends",
             description=(
-                "Podaj Riot ID i region. Następnie potwierdź konto wskazaną ikoną "
+                "Podaj Riot ID i region. Następnie potwierdź konto, zmieniając ikonę "
                 "profilu w kliencie League of Legends."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
         embed.add_field(
             name="Role",
-            value="Bot zapisze powiązanie i będzie aktualizował region oraz tier Solo/Duo.",
+            value=(
+                "Bot nada rolę „Zweryfikowany” oraz będzie aktualizował role regionu "
+                "i rangi Solo/Duo."
+            ),
             inline=False,
         )
-        embed.set_footer(text="Kliknij Zweryfikuj konto, aby rozpocząć.")
+        embed.set_footer(text="Kliknij „Zweryfikuj konto”, aby rozpocząć.")
         await interaction.response.send_message(
             embed=embed,
             view=self.legacy_start_view,
         )
 
     @app_commands.command(
-        name="usun_weryfikacje", description="Usuwa Twoje powiązanie z kontem Riot"
+        name="usun_weryfikacje", description="Usuwa powiązanie z Twoim kontem Riot"
     )
     async def remove_own_verification(  # type: ignore[override]
         self, interaction: discord.Interaction

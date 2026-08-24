@@ -58,14 +58,16 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
         RankRefreshRequestStatus.COOLDOWN,
     }
 )
-_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."
+_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie."
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie potrwa dłużej. Pokazujemy dane z poprzedniej udanej aktualizacji. "
+    "Odświeżanie trwa dłużej niż zwykle.\n"
+    "Na razie pokazujemy poprzednie dane.\n"
     "Otwórz `/profil` ponownie za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
-    "Nie udało się automatycznie zaktualizować tego widoku. "
-    "Odświeżenie może nadal trwać. Otwórz `/profil` ponownie za chwilę."
+    "Nie udało się pokazać wyniku odświeżania.\n"
+    "Odświeżanie może nadal trwać.\n"
+    "Otwórz `/profil` ponownie za chwilę."
 )
 
 
@@ -852,8 +854,8 @@ async def _remove_user_verification(
         if any(
             value is not None for value in (expected_puuid, expected_platform, expected_created_at)
         ):
-            return "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie."
-        return "Nie masz zapisanego powiązania z kontem Riot."
+            return _ACCOUNT_PROFILE_STALE_MESSAGE
+        return "Nie masz połączonego konta Riot."
     member = interaction.user if isinstance(interaction.user, discord.Member) else None
     completed = await _process_requested_verification_deletion(
         bot,
@@ -862,8 +864,11 @@ async def _remove_user_verification(
         link=link,
     )
     if not completed:
-        return "Usuwanie powiązania jest w kolejce. Bot ponowi usunięcie roli automatycznie."
-    return "Usunięto powiązanie konta Riot. Role regionu, rangi i użytkownika pozostają bez zmian."
+        return "Usuwanie powiązania czeka na dokończenie. Bot spróbuje ponownie automatycznie."
+    return (
+        "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
+        "Role regionu, rangi i użytkownika pozostają bez zmian."
+    )
 
 
 async def _process_requested_verification_deletion(
@@ -972,7 +977,7 @@ async def _request_rank_refresh_from_panel(
         interaction.user, discord.Member
     ):
         await interaction.response.send_message(
-            "Odświeżanie uruchomisz na skonfigurowanym serwerze.", ephemeral=True
+            "Rangę możesz odświeżyć tylko na serwerze Moon Poro.", ephemeral=True
         )
         return
     result = await bot.verifications.request_rank_refresh(
@@ -982,20 +987,22 @@ async def _request_rank_refresh_from_panel(
         source="user",
     )
     messages = {
-        RankRefreshRequestStatus.ENQUEUED: "Dodano odświeżenie rangi do kolejki.",
-        RankRefreshRequestStatus.ALREADY_DUE: "Odświeżenie jest już w kolejce.",
-        RankRefreshRequestStatus.ALREADY_CLAIMED: "Odświeżenie już trwa.",
+        RankRefreshRequestStatus.ENQUEUED: "Odświeżenie rangi czeka w kolejce.",
+        RankRefreshRequestStatus.ALREADY_DUE: "Odświeżenie rangi jest już w kolejce.",
+        RankRefreshRequestStatus.ALREADY_CLAIMED: "Trwa już odświeżanie rangi.",
         RankRefreshRequestStatus.BACKOFF_ACTIVE: (
-            "Riot API jest chwilowo niedostępne. Odświeżenie wykona się automatycznie."
+            "Riot jest chwilowo niedostępny. Bot spróbuje ponownie automatycznie."
         ),
         RankRefreshRequestStatus.LINK_CHANGED: (
-            "Powiązanie konta zmieniło się. Otwórz profil ponownie."
+            "Dane konta zmieniły się. Otwórz `/profil`, aby zobaczyć aktualny stan."
         ),
-        RankRefreshRequestStatus.NOT_LINKED: ("Najpierw zweryfikuj konto Riot na tym serwerze."),
+        RankRefreshRequestStatus.NOT_LINKED: (
+            "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
+        ),
     }
     if result.status == RankRefreshRequestStatus.COOLDOWN:
         minutes = max(1, ((result.retry_after_seconds or 0) + 59) // 60)
-        message = f"Ponowne odświeżenie będzie dostępne za około {minutes} min."
+        message = f"Rangę możesz odświeżyć ponownie za około {minutes} min."
     else:
         message = messages[result.status]
     await interaction.response.send_message(message, ephemeral=True)
@@ -1102,7 +1109,7 @@ class AccountProfileView(discord.ui.View):
             presentation.embed.description = description
         elif description_prefix is not None:
             current_description = presentation.embed.description or ""
-            presentation.embed.description = f"{description_prefix} {current_description}".strip()
+            presentation.embed.description = f"{description_prefix}\n{current_description}".strip()
         await self._edit_presentation(interaction, presentation, link)
         return presentation
 
@@ -1189,7 +1196,7 @@ class AccountProfileView(discord.ui.View):
         if interaction.user.id == self.owner_id:
             return True
         await interaction.response.send_message(
-            "Ten profil należy do innego użytkownika.", ephemeral=True
+            "Nie możesz użyć przycisków w profilu innej osoby.", ephemeral=True
         )
         return False
 
@@ -1297,7 +1304,7 @@ class AccountProfileView(discord.ui.View):
             button.disabled = not self.presentation.refresh_enabled
             button.style = discord.ButtonStyle.blurple
             await interaction.edit_original_response(
-                content="Nie udało się odświeżyć widoku. Spróbuj ponownie.",
+                content="Nie udało się rozpocząć odświeżania rangi. Spróbuj ponownie.",
                 view=self,
             )
 
@@ -1331,7 +1338,7 @@ async def _show_account_profile(
         interaction.user, discord.Member
     ):
         await interaction.response.send_message(
-            "Profil otworzysz na skonfigurowanym serwerze.", ephemeral=True
+            "Profil możesz otworzyć tylko na serwerze Moon Poro.", ephemeral=True
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1374,7 +1381,7 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         if interaction.user.id == self.owner_id:
             return True
         await interaction.response.send_message(
-            "To potwierdzenie należy do innego użytkownika.", ephemeral=True
+            "Nie możesz potwierdzić usunięcia powiązania innej osoby.", ephemeral=True
         )
         return False
 
@@ -1388,7 +1395,7 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[DeleteVerificationConfirmationView],
     ) -> None:
-        await interaction.response.edit_message(content="Usuwam powiązanie…", view=None)
+        await interaction.response.edit_message(content="Usuwanie powiązania…", view=None)
         try:
             message = await _remove_user_verification(
                 self.bot,
@@ -1399,7 +1406,9 @@ class DeleteVerificationConfirmationView(discord.ui.View):
             )
         except Exception:
             logger.exception("Could not remove verification for %s", self.owner_id)
-            message = "Nie udało się zakończyć usuwania. Spróbuj ponownie."
+            message = (
+                "Nie udało się usunąć powiązania. Otwórz `/profil`, aby sprawdzić aktualny stan."
+            )
         await interaction.edit_original_response(content=message, view=None)
 
     @discord.ui.button(
@@ -1412,7 +1421,9 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[DeleteVerificationConfirmationView],
     ) -> None:
-        await interaction.response.edit_message(content="Anulowano.", view=None)
+        await interaction.response.edit_message(
+            content="Powiązanie nie zostało usunięte.", view=None
+        )
 
 
 async def _show_delete_confirmation(
@@ -1427,14 +1438,12 @@ async def _show_delete_confirmation(
         interaction.user, discord.Member
     ):
         await interaction.response.send_message(
-            "Powiązanie możesz usunąć na skonfigurowanym serwerze.", ephemeral=True
+            "Powiązanie możesz usunąć tylko na serwerze Moon Poro.", ephemeral=True
         )
         return
     link = await bot.verifications.get_by_user(interaction.guild_id, interaction.user.id)
     if link is None:
-        await interaction.response.send_message(
-            "Nie masz zapisanego powiązania z kontem Riot.", ephemeral=True
-        )
+        await interaction.response.send_message("Nie masz połączonego konta Riot.", ephemeral=True)
         return
     if (
         (expected_puuid is not None and link.puuid != expected_puuid)
@@ -1442,18 +1451,17 @@ async def _show_delete_confirmation(
         or (expected_created_at is not None and link.created_at != expected_created_at)
     ):
         await interaction.response.send_message(
-            "Ten panel jest już nieaktualny. Otwórz `/profil` ponownie.",
+            _ACCOUNT_PROFILE_STALE_MESSAGE,
             ephemeral=True,
         )
         return
     if link.puuid is None:
-        await interaction.response.send_message(
-            "Nie masz zapisanego powiązania z kontem Riot.", ephemeral=True
-        )
+        await interaction.response.send_message("Nie masz połączonego konta Riot.", ephemeral=True)
         return
     await interaction.response.send_message(
         (
-            "Czy na pewno chcesz usunąć powiązanie z kontem Riot? "
+            "Czy na pewno chcesz usunąć powiązanie z kontem Riot?\n\n"
+            "Rola „Zweryfikowany” zostanie usunięta. "
             "Role regionu, rangi i użytkownika pozostaną bez zmian."
         ),
         view=DeleteVerificationConfirmationView(
@@ -1495,7 +1503,7 @@ class VerificationStartView(discord.ui.View):
     async def begin_verification(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id != self.bot.settings.guild_id:
             await interaction.response.send_message(
-                "Weryfikację rozpocznij na skonfigurowanym serwerze.", ephemeral=True
+                "Weryfikację możesz rozpocząć tylko na serwerze Moon Poro.", ephemeral=True
             )
             return
         retry_after = self.cooldowns.update_rate_limit(interaction)
@@ -1504,23 +1512,32 @@ class VerificationStartView(discord.ui.View):
                 f"Spróbuj ponownie za {int(retry_after)} s.", ephemeral=True
             )
             return
-        if isinstance(interaction.user, discord.Member) and member_has_role(
-            interaction.user, self.bot.settings.verified_role_name, self.bot.settings
-        ):
-            await interaction.response.send_message(
-                "Jesteś już zweryfikowany. Użyj `/usun_weryfikacje`, aby usunąć powiązanie.",
-                ephemeral=True,
-            )
-            return
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
                 "Weryfikację rozpocznij na serwerze Discord.", ephemeral=True
             )
             return
-        if await self.bot.verifications.get_by_user(interaction.guild.id, interaction.user.id):
+        existing_link = await self.bot.verifications.get_by_user(
+            interaction.guild.id, interaction.user.id
+        )
+        if (
+            existing_link is not None
+            and getattr(existing_link, "deletion_requested_at", None) is not None
+        ):
             await interaction.response.send_message(
-                "To konto Discord ma już zapisane powiązanie. Użyj `/usun_weryfikacje`, "
-                "jeśli chcesz połączyć inne konto Riot.",
+                "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+                ephemeral=True,
+            )
+            return
+        if (
+            member_has_role(
+                interaction.user, self.bot.settings.verified_role_name, self.bot.settings
+            )
+            or existing_link is not None
+        ):
+            await interaction.response.send_message(
+                "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
+                "obecne powiązanie w `/profil`.",
                 ephemeral=True,
             )
             return
@@ -1534,22 +1551,22 @@ class VerificationStartView(discord.ui.View):
         link_view = discord.ui.View(timeout=self.bot.settings.rso_session_ttl_seconds)
         link_view.add_item(
             discord.ui.Button(
-                label="Przejdź do bezpiecznego logowania Riot",
+                label="Zaloguj się przez Riot",
                 style=discord.ButtonStyle.link,
                 url=verification_url,
             )
         )
         minutes = self.bot.settings.rso_session_ttl_seconds // 60
         embed = discord.Embed(
-            title="Połącz konto przez Riot Sign On",
+            title="Połącz konto Riot",
             description=(
-                "Kliknij przycisk poniżej i zaloguj się bezpośrednio na stronie Riot. "
-                "Moon Poro nie widzi Twojego hasła i nie zapisuje tokenów logowania. "
+                "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
+                "Moon Poro nie zobaczy Twojego hasła. "
                 f"Jednorazowy link wygaśnie za {minutes} min."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
-        embed.set_footer(text="Po zakończeniu wróć do Discorda. Role zostaną nadane automatycznie.")
+        embed.set_footer(text="Po zalogowaniu wróć do Discorda. Role zostaną nadane automatycznie.")
         await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
     @discord.ui.button(
@@ -1583,7 +1600,7 @@ class VerificationStartView(discord.ui.View):
         await _request_rank_refresh_from_panel(self.bot, interaction)
 
     @discord.ui.button(
-        label="Usuń weryfikację",
+        label="Usuń powiązanie",
         emoji="🗑️",
         style=discord.ButtonStyle.red,
         custom_id="verification:delete:v1",
@@ -1725,7 +1742,7 @@ class VerificationCog(commands.Cog):
         channel_id = self.bot.settings.zweryfikowani_channel_id
         channel = guild.get_channel(channel_id) if channel_id else None
         if isinstance(channel, discord.abc.Messageable):
-            embed = discord.Embed(title="Zweryfikowane konto RSO", colour=discord.Colour.green())
+            embed = discord.Embed(title="Zweryfikowane konto Riot", colour=discord.Colour.green())
             embed.add_field(name="Discord", value=f"<@{member.id}> (`{member.id}`)")
             embed.add_field(name="Region", value=SERVER_TRANSLATION[record.platform])
             if record.riot_game_name and record.riot_tag_line:
@@ -1764,7 +1781,7 @@ class VerificationCog(commands.Cog):
             return
         with suppress(discord.Forbidden, discord.HTTPException):
             await member.send(
-                "Twoje konto Riot zostało zweryfikowane przez Riot Sign On. "
+                "Twoje konto Riot zostało zweryfikowane. "
                 f"Na serwerze **{guild.name}** zaktualizowano role regionu i rangi."
             )
 
@@ -1860,8 +1877,8 @@ class VerificationCog(commands.Cog):
         embed = discord.Embed(
             title="Weryfikacja konta League of Legends",
             description=(
-                "Połącz konto przez oficjalne logowanie Riot. Bot zapisze powiązanie, "
-                "region i tier Solo/Duo, aby aktualizować role."
+                "Połącz konto przez oficjalne logowanie Riot. Bot zapisze Riot ID i region "
+                "oraz będzie aktualizował rangę Solo/Duo i role."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
@@ -1874,7 +1891,7 @@ class VerificationCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=self.rso_start_view)
 
     @app_commands.command(
-        name="usun_weryfikacje", description="Usuwa Twoje powiązanie z kontem Riot"
+        name="usun_weryfikacje", description="Usuwa powiązanie z Twoim kontem Riot"
     )
     async def remove_own_verification(self, interaction: discord.Interaction) -> None:
         await _show_delete_confirmation(self.bot, interaction)
@@ -1914,7 +1931,7 @@ class VerificationCog(commands.Cog):
         try:
             account = await self._account_by_riot_id(nick, tag, server)
         except RiotAPIUnavailable:
-            await interaction.followup.send("Riot API jest chwilowo niedostępne.", ephemeral=True)
+            await interaction.followup.send("Riot jest chwilowo niedostępny.", ephemeral=True)
             return
         link = (
             await self.bot.verifications.get_by_puuid(interaction.guild_id or 0, account["puuid"])
@@ -1973,7 +1990,7 @@ class VerificationCog(commands.Cog):
                 )
             )
         except RiotAPIUnavailable:
-            await interaction.followup.send("Riot API jest chwilowo niedostępne.", ephemeral=True)
+            await interaction.followup.send("Riot jest chwilowo niedostępny.", ephemeral=True)
             return
         if account is None:
             await interaction.followup.send("Nie udało się pobrać Riot ID.", ephemeral=True)
@@ -2002,7 +2019,7 @@ class VerificationCog(commands.Cog):
         try:
             account = await self._account_by_riot_id(nick, tag, server)
         except RiotAPIUnavailable:
-            await interaction.followup.send("Riot API jest chwilowo niedostępne.", ephemeral=True)
+            await interaction.followup.send("Riot jest chwilowo niedostępny.", ephemeral=True)
             return
         if account is None:
             await interaction.followup.send("Nie znaleziono Riot ID.", ephemeral=True)
