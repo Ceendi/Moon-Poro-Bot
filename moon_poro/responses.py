@@ -31,13 +31,13 @@ async def handle_known_error(
 ) -> bool:
     original = getattr(error, "original", error)
     if isinstance(error, app_commands.CommandOnCooldown):
-        await safe_send(interaction, f"⏳ Spróbuj ponownie za {math.ceil(error.retry_after)} s.")
+        await safe_send(interaction, f"Spróbuj ponownie za {math.ceil(error.retry_after)} s.")
         return True
     if isinstance(error, app_commands.CheckFailure):
-        await safe_send(interaction, "❌ Nie masz uprawnień do użycia tej komendy.")
+        await safe_send(interaction, "Nie masz uprawnień do użycia tej komendy.")
         return True
     if isinstance(original, discord.Forbidden):
-        await safe_send(interaction, "❌ Bot nie ma wymaganych uprawnień Discorda.")
+        await safe_send(interaction, "Bot nie ma wymaganych uprawnień Discorda.")
         return True
     return False
 
@@ -50,4 +50,4 @@ def install_error_handler(bot: commands.Bot) -> None:
         if await handle_known_error(interaction, error):
             return
         logger.error("Unhandled command error: %s\n%s", error, traceback.format_exc())
-        await safe_send(interaction, "❌ Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.")
+        await safe_send(interaction, "Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.")

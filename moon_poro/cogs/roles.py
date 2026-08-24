@@ -56,7 +56,7 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
         self.bot = bot
         options = [discord.SelectOption(label=rank) for rank in bot.settings.lol_ranks]
         super().__init__(
-            placeholder="Aktualna dywizja Solo/Duo",
+            placeholder="Wybierz rangę Solo/Duo",
             max_values=1,
             options=options,
             custom_id="roles:rank:v2",
@@ -80,7 +80,8 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
         new_role = find_role(interaction.guild, self.values[0], settings)
         if new_role is None:
             await interaction.response.send_message(
-                "Skonfigurowana rola nie istnieje.", ephemeral=True
+                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                ephemeral=True,
             )
             return
         old_roles = member_roles_named(interaction.user, settings.lol_ranks, settings)
@@ -145,7 +146,8 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
         role = find_role(interaction.guild, self.role_name, settings)
         if role is None:
             await interaction.response.send_message(
-                "Skonfigurowana rola nie istnieje.", ephemeral=True
+                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
@@ -177,7 +179,7 @@ class MiscRolesView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="Nie posiadam konta w LoL",
+        label="Nie mam konta w LoL",
         style=discord.ButtonStyle.gray,
         custom_id="roles:no-lol:v2",
     )
@@ -203,7 +205,8 @@ class MiscRolesView(discord.ui.View):
         role = find_role(interaction.guild, settings.no_lol_role_name, settings)
         if role is None:
             await interaction.response.send_message(
-                "Skonfigurowana rola nie istnieje.", ephemeral=True
+                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
@@ -217,7 +220,7 @@ class MiscRolesView(discord.ui.View):
         await interaction.followup.send(f"{action} rolę **{role.name}**.", ephemeral=True)
 
     @discord.ui.button(
-        label="Usuń wszystkie role konfigurowalne",
+        label="Usuń wszystkie wybrane role",
         style=discord.ButtonStyle.gray,
         custom_id="roles:remove-all:v2",
     )

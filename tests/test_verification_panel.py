@@ -278,7 +278,7 @@ async def test_rso_start_explains_incomplete_previous_link(
     await VerificationStartView(bot).children[0].callback(interaction)
 
     response.send_message.assert_awaited_once_with(
-        "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+        "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
         ephemeral=True,
     )
     sessions.create.assert_not_awaited()
@@ -571,6 +571,7 @@ async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
     interaction = SimpleNamespace(
         guild_id=123,
         response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         edit_original_response=AsyncMock(),
     )
 
@@ -584,9 +585,10 @@ async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
     timeout_kwargs = interaction.edit_original_response.await_args.kwargs
     timeout_embed = timeout_kwargs["embed"]
     assert timeout_embed.description is None
-    assert timeout_embed.fields[-1].name == "Stan odświeżania"
-    assert timeout_embed.fields[-1].value == (
-        "Odświeżanie trwa dłużej niż zwykle.\nSprawdź profil ponownie za chwilę."
+    assert all(field.name != "Stan odświeżania" for field in timeout_embed.fields)
+    interaction.followup.send.assert_awaited_once_with(
+        "Odświeżanie trwa dłużej niż zwykle. Wyświetl „Moje konto” ponownie za chwilę.",
+        ephemeral=True,
     )
     assert timeout_kwargs["view"].children[0].disabled is True
     assert timeout_kwargs["view"].children[0].label == "W kolejce…"
@@ -749,7 +751,7 @@ async def test_stale_profile_refresh_does_not_render_the_new_link(
 
     bot.verifications.get_by_user.assert_not_awaited()
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Ten widok jest już nieaktualny. Otwórz profil ponownie.",
+        content="Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
         embed=None,
         view=None,
     )
@@ -805,7 +807,7 @@ async def test_profile_refresh_stops_if_link_changes_while_watching(
     await refresh.callback(interaction)
 
     assert interaction.edit_original_response.await_args.kwargs == {
-        "content": "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
+        "content": "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
         "embed": None,
         "view": None,
     }
@@ -835,7 +837,7 @@ async def test_same_profile_view_rejects_a_second_refresh_callback() -> None:
     bot.verifications.request_rank_refresh.assert_not_awaited()
     interaction.response.defer.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once_with(
-        "Sprawdzamy możliwość odświeżenia. Poczekaj chwilę.",
+        "Odświeżanie już się rozpoczęło. Poczekaj chwilę.",
         ephemeral=True,
     )
 
@@ -1116,6 +1118,7 @@ async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> N
     interaction = SimpleNamespace(
         guild_id=123,
         response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         edit_original_response=AsyncMock(),
     )
 
@@ -1124,18 +1127,13 @@ async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> N
     )
     await refresh.callback(interaction)
 
-    kwargs = interaction.edit_original_response.await_args.kwargs
-    assert kwargs["content"] is None
-    observer_embed = kwargs["embed"]
-    assert observer_embed.description is None
-    assert observer_embed.fields[-1].name == "Stan odświeżania"
-    assert observer_embed.fields[-1].value == (
-        "Nie udało się pokazać wyniku odświeżania.\n"
-        "Odświeżanie może nadal trwać.\n"
-        "Sprawdź profil ponownie za chwilę."
+    interaction.edit_original_response.assert_awaited_once_with(view=view)
+    interaction.followup.send.assert_awaited_once_with(
+        "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać.",
+        ephemeral=True,
     )
-    assert "database" not in observer_embed.fields[-1].value
-    assert kwargs["view"] is view
+    assert "database" not in interaction.followup.send.await_args.args[0]
+    assert all(field.name != "Stan odświeżania" for field in view.presentation.embed.fields)
     assert refresh.label == "Odświeżanie…"
     assert refresh.disabled is True
     assert view._refresh_in_progress is True
@@ -1174,7 +1172,7 @@ async def test_profile_delete_passes_captured_identity_to_confirmation(
         (RankRefreshRequestStatus.ALREADY_DUE, "jest już w kolejce"),
         (RankRefreshRequestStatus.ALREADY_CLAIMED, "Trwa już odświeżanie"),
         (RankRefreshRequestStatus.BACKOFF_ACTIVE, "automatycznie"),
-        (RankRefreshRequestStatus.LINK_CHANGED, "Dane konta zmieniły się"),
+        (RankRefreshRequestStatus.LINK_CHANGED, "Powiązanie konta zmieniło się"),
         (RankRefreshRequestStatus.NOT_LINKED, "Najpierw kliknij „Zweryfikuj konto”"),
     ],
 )
@@ -1406,7 +1404,7 @@ async def test_delete_rejects_a_profile_for_an_old_link(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
+        "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
         ephemeral=True,
     )
 
@@ -1435,7 +1433,7 @@ async def test_delete_rejects_stale_null_puuid_identity(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
+        "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
         ephemeral=True,
     )
 

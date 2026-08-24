@@ -16,6 +16,6 @@ export const siteConfig = {
   discordInviteUrl: required("PUBLIC_DISCORD_INVITE_URL", "https://discord.com/app"),
   repositoryUrl: "https://github.com/Ceendi/Moon-Poro-Bot",
   appId: "524635",
-  lastUpdated: "10 sierpnia 2026",
-  lastUpdatedEn: "10 August 2026",
+  lastUpdated: "24 sierpnia 2026",
+  lastUpdatedEn: "24 August 2026",
 } as const;
