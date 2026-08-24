@@ -299,6 +299,43 @@ class VerificationRepository:
             pending_role_sync_count=pending_role_sync,
         )
 
+    async def sync_riot_id_if_current(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        game_name: str,
+        tag_line: str,
+        expected_puuid: str,
+        expected_platform: str,
+        expected_created_at: datetime,
+        expected_claimed_at: datetime,
+    ) -> bool:
+        """Update Riot ID only while the caller still owns the rank-refresh claim."""
+
+        normalized_game_name = game_name.strip()[:100]
+        normalized_tag_line = tag_line.strip()[:20]
+        if not normalized_game_name or not normalized_tag_line:
+            return False
+        async with self._sessions.begin() as session:
+            link = await session.get(
+                VerificationLink,
+                (guild_id, user_id),
+                with_for_update=True,
+            )
+            if (
+                link is None
+                or link.deletion_requested_at is not None
+                or link.puuid != expected_puuid
+                or link.platform != expected_platform
+                or link.created_at != expected_created_at
+                or not timestamps_match(link.rank_refresh_claimed_at, expected_claimed_at)
+            ):
+                return False
+            link.riot_game_name = normalized_game_name
+            link.riot_tag_line = normalized_tag_line
+            return True
+
     async def record_rank_snapshot(
         self,
         guild_id: int,

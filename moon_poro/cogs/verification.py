@@ -126,6 +126,52 @@ async def _get_leagues(bot: MoonPoroBot, platform: str, puuid: str) -> LeagueEnt
     )
 
 
+async def _sync_riot_id(
+    bot: MoonPoroBot,
+    link: VerificationLink,
+    *,
+    expected_claimed_at: datetime,
+) -> bool:
+    puuid = link.puuid
+    if not puuid:
+        return False
+    try:
+        account = await riot_api_call(
+            lambda: bot.riot_client.get_account_v1_by_puuid(
+                puuid=puuid,
+                region=API_SERVERS[link.platform],
+            ),
+            not_found=None,
+        )
+    except RiotAPIUnavailable:
+        return False
+    if not isinstance(account, dict):
+        return False
+    game_name = account.get("gameName")
+    tag_line = account.get("tagLine")
+    if (
+        not isinstance(game_name, str)
+        or not game_name.strip()
+        or not isinstance(tag_line, str)
+        or not tag_line.strip()
+    ):
+        return False
+    stored = await bot.verifications.sync_riot_id_if_current(
+        link.guild_id,
+        link.discord_user_id,
+        game_name=game_name,
+        tag_line=tag_line,
+        expected_puuid=puuid,
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=expected_claimed_at,
+    )
+    if stored:
+        link.riot_game_name = game_name.strip()[:100]
+        link.riot_tag_line = tag_line.strip()[:20]
+    return stored
+
+
 async def _apply_verified_roles(
     bot: MoonPoroBot,
     member: discord.Member,
@@ -691,6 +737,11 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         )
         return
 
+    await _sync_riot_id(
+        bot,
+        link,
+        expected_claimed_at=claimed_at,
+    )
     recorded = await _record_leagues(
         bot,
         link,

@@ -95,6 +95,111 @@ async def test_create_caches_optional_riot_id_without_breaking_legacy_callers(
     assert (legacy.riot_game_name, legacy.riot_tag_line) == (None, None)
 
 
+async def test_riot_id_sync_updates_changed_identity_and_is_claim_fenced(
+    verification_repository: VerificationRepository,
+) -> None:
+    link = await verification_repository.create(
+        guild_id=123,
+        user_id=103,
+        message_id=203,
+        audit_channel_id=401,
+        platform="EUN1",
+        puuid="sync-puuid",
+    )
+    claims = await verification_repository.claim_due_rank_refreshes(
+        123,
+        limit=1,
+        claim_timeout_seconds=300,
+    )
+    claimed_at = claims[0].rank_refresh_claimed_at
+    assert claimed_at is not None
+
+    assert not await verification_repository.sync_riot_id_if_current(
+        123,
+        103,
+        game_name="Stale",
+        tag_line="EUNE",
+        expected_puuid=link.puuid or "",
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=claimed_at - timedelta(seconds=1),
+    )
+    assert await verification_repository.sync_riot_id_if_current(
+        123,
+        103,
+        game_name=" Moon Poro ",
+        tag_line=" EUNE ",
+        expected_puuid=link.puuid or "",
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=claimed_at,
+    )
+    assert await verification_repository.sync_riot_id_if_current(
+        123,
+        103,
+        game_name=" Renamed ",
+        tag_line=" EUW ",
+        expected_puuid=link.puuid or "",
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=claimed_at,
+    )
+
+    stored = await verification_repository.get_by_user(123, 103)
+    assert stored is not None
+    assert (stored.riot_game_name, stored.riot_tag_line) == ("Renamed", "EUW")
+
+
+async def test_riot_id_sync_cannot_overwrite_a_reverified_link(
+    verification_repository: VerificationRepository,
+) -> None:
+    old = await verification_repository.create(
+        guild_id=123,
+        user_id=104,
+        message_id=204,
+        audit_channel_id=401,
+        platform="EUN1",
+        puuid="reverified-puuid",
+        riot_game_name="Old account",
+        riot_tag_line="OLD",
+    )
+    await _delete_verification_link(verification_repository, 123, 104)
+    await asyncio.sleep(0.05)
+    replacement = await verification_repository.create(
+        guild_id=123,
+        user_id=104,
+        message_id=205,
+        audit_channel_id=401,
+        platform="EUN1",
+        puuid="reverified-puuid",
+        riot_game_name="Current account",
+        riot_tag_line="NEW",
+    )
+    stale_created_at = old.created_at
+    if stale_created_at == replacement.created_at:
+        stale_created_at -= timedelta(microseconds=1)
+    claimed_at = datetime.now(UTC)
+    async with verification_repository._sessions.begin() as session:
+        current = await session.get(VerificationLink, (123, 104), with_for_update=True)
+        assert current is not None
+        current.rank_refresh_claimed_at = claimed_at
+
+    assert not await verification_repository.sync_riot_id_if_current(
+        123,
+        104,
+        game_name="Stale worker",
+        tag_line="STALE",
+        expected_puuid=old.puuid or "",
+        expected_platform=old.platform,
+        expected_created_at=stale_created_at,
+        expected_claimed_at=claimed_at,
+    )
+
+    current = await verification_repository.get_by_user(123, 104)
+    assert current is not None
+    assert (current.riot_game_name, current.riot_tag_line) == ("Current account", "NEW")
+
+
 async def test_stale_link_identity_cannot_refresh_or_delete_reverified_account(
     verification_repository: VerificationRepository,
 ) -> None:
