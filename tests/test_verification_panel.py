@@ -335,7 +335,10 @@ async def test_legacy_publishes_icon_verification_embed() -> None:
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["embed"].title == "Weryfikacja konta League of Legends"
     assert "ikonę profilu" in kwargs["embed"].description
-    assert "rangi Solo/Duo" in kwargs["embed"].fields[0].value
+    assert kwargs["embed"].fields[0].value == (
+        "Bot nada Ci rolę „Zweryfikowany” oraz role regionu i rangi Solo/Duo. "
+        "Rangę będzie odświeżać automatycznie."
+    )
     assert kwargs["embed"].fields[1].name == "Zasady"
     assert kwargs["embed"].fields[1].value == (
         "[Polityka prywatności](https://moonporo.pl/privacy/) · "
