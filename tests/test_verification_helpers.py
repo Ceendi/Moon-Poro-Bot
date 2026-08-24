@@ -82,6 +82,140 @@ async def test_get_leagues_keeps_successful_empty_response_distinct(
     assert "not_found" not in riot_call.await_args.kwargs
 
 
+@pytest.mark.parametrize(
+    ("platform", "expected_region"),
+    [("EUN1", "europe"), ("NA1", "americas")],
+)
+async def test_riot_id_is_synced_through_the_claim_fenced_repository(
+    platform: str,
+    expected_region: str,
+) -> None:
+    claimed_at = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform=platform,
+        puuid="player-puuid",
+        riot_game_name=None,
+        riot_tag_line=None,
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    account_lookup = AsyncMock(return_value={"gameName": " Moon ", "tagLine": " EUNE "})
+    sync = AsyncMock(return_value=True)
+    bot = SimpleNamespace(
+        riot_client=SimpleNamespace(get_account_v1_by_puuid=account_lookup),
+        verifications=SimpleNamespace(sync_riot_id_if_current=sync),
+    )
+
+    assert await verification._sync_riot_id(
+        bot,
+        link,
+        expected_claimed_at=claimed_at,
+    )
+
+    account_lookup.assert_awaited_once_with(puuid="player-puuid", region=expected_region)
+    sync.assert_awaited_once_with(
+        123,
+        101,
+        game_name=" Moon ",
+        tag_line=" EUNE ",
+        expected_puuid="player-puuid",
+        expected_platform=platform,
+        expected_created_at=link.created_at,
+        expected_claimed_at=claimed_at,
+    )
+    assert (link.riot_game_name, link.riot_tag_line) == ("Moon", "EUNE")
+
+
+async def test_riot_id_sync_failure_does_not_raise_or_overwrite_last_known_id() -> None:
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="player-puuid",
+        riot_game_name="Previous name",
+        riot_tag_line="OLD",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    sync = AsyncMock()
+    bot = SimpleNamespace(
+        riot_client=SimpleNamespace(
+            get_account_v1_by_puuid=AsyncMock(
+                side_effect=verification.RiotAPIUnavailable(status=503)
+            )
+        ),
+        verifications=SimpleNamespace(sync_riot_id_if_current=sync),
+    )
+
+    assert not await verification._sync_riot_id(
+        bot,
+        link,
+        expected_claimed_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+    )
+    sync.assert_not_awaited()
+    assert (link.riot_game_name, link.riot_tag_line) == ("Previous name", "OLD")
+
+
+@pytest.mark.parametrize(
+    "account",
+    [None, {}, {"gameName": "", "tagLine": "EUNE"}, {"gameName": "Moon"}],
+)
+async def test_malformed_riot_id_response_does_not_overwrite_last_known_id(
+    account: object,
+) -> None:
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="player-puuid",
+        riot_game_name="Previous name",
+        riot_tag_line="OLD",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    sync = AsyncMock()
+    bot = SimpleNamespace(
+        riot_client=SimpleNamespace(get_account_v1_by_puuid=AsyncMock(return_value=account)),
+        verifications=SimpleNamespace(sync_riot_id_if_current=sync),
+    )
+
+    assert not await verification._sync_riot_id(
+        bot,
+        link,
+        expected_claimed_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+    )
+
+    sync.assert_not_awaited()
+    assert (link.riot_game_name, link.riot_tag_line) == ("Previous name", "OLD")
+
+
+async def test_missing_riot_id_response_does_not_overwrite_last_known_id() -> None:
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="player-puuid",
+        riot_game_name="Previous name",
+        riot_tag_line="OLD",
+        created_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    sync = AsyncMock()
+    bot = SimpleNamespace(
+        riot_client=SimpleNamespace(
+            get_account_v1_by_puuid=AsyncMock(side_effect=RiotAPINotFound(status=404))
+        ),
+        verifications=SimpleNamespace(sync_riot_id_if_current=sync),
+    )
+
+    assert not await verification._sync_riot_id(
+        bot,
+        link,
+        expected_claimed_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+    )
+
+    sync.assert_not_awaited()
+    assert (link.riot_game_name, link.riot_tag_line) == ("Previous name", "OLD")
+
+
 async def test_apply_verified_roles_replaces_managed_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -259,6 +393,8 @@ async def test_rank_refresh_worker_updates_one_due_link(
         discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        riot_game_name="Moon",
+        riot_tag_line="EUNE",
         last_known_rank=None,
         rank_last_checked_at=None,
         rank_unranked_confirmations=0,
@@ -269,9 +405,12 @@ async def test_rank_refresh_worker_updates_one_due_link(
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
     member.guild = guild
     checked_at = datetime(2026, 8, 15, tzinfo=UTC)
+    account_lookup = AsyncMock(return_value={"gameName": "Renamed Moon", "tagLine": "EUW"})
+    sync_riot_id = AsyncMock(return_value=True)
     verifications = _guarded_verifications(
         link,
         claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        sync_riot_id_if_current=sync_riot_id,
         record_rank_snapshot=AsyncMock(return_value=checked_at),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
         retry_rank_role_sync=AsyncMock(),
@@ -282,6 +421,7 @@ async def test_rank_refresh_worker_updates_one_due_link(
     bot = SimpleNamespace(
         settings=_rank_refresh_settings(),
         verifications=verifications,
+        riot_client=SimpleNamespace(get_account_v1_by_puuid=account_lookup),
         get_guild=Mock(return_value=guild),
         riot_auth_breaker=RiotAuthBreaker(),
     )
@@ -307,6 +447,18 @@ async def test_rank_refresh_worker_updates_one_due_link(
         verifications.record_rank_snapshot.await_args.kwargs["expected_rank_last_checked_at"]
         is None
     )
+    account_lookup.assert_awaited_once_with(puuid="puuid", region="europe")
+    sync_riot_id.assert_awaited_once_with(
+        123,
+        101,
+        game_name="Renamed Moon",
+        tag_line="EUW",
+        expected_puuid="puuid",
+        expected_platform="EUN1",
+        expected_created_at=link.created_at,
+        expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    assert (link.riot_game_name, link.riot_tag_line) == ("Renamed Moon", "EUW")
     verifications.acknowledge_rank_role_sync.assert_awaited_once_with(
         123,
         101,
@@ -318,6 +470,63 @@ async def test_rank_refresh_worker_updates_one_due_link(
     verifications.retry_rank_refresh.assert_not_awaited()
 
 
+async def test_rank_refresh_worker_records_and_syncs_roles_when_riot_id_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        riot_game_name="Previous name",
+        riot_tag_line="OLD",
+        last_known_rank=None,
+        rank_last_checked_at=None,
+        rank_unranked_confirmations=0,
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=None,
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    member.guild = guild
+    checked_at = datetime(2026, 8, 15, tzinfo=UTC)
+    sync_riot_id = AsyncMock()
+    verifications = _guarded_verifications(
+        link,
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        sync_riot_id_if_current=sync_riot_id,
+        record_rank_snapshot=AsyncMock(return_value=checked_at),
+        acknowledge_rank_role_sync=AsyncMock(return_value=True),
+        retry_rank_role_sync=AsyncMock(),
+        retry_rank_refresh=AsyncMock(),
+        defer_rank_refresh=AsyncMock(),
+        get_by_user=AsyncMock(return_value=link),
+    )
+    account_lookup = AsyncMock(side_effect=verification.RiotAPIUnavailable(status=503))
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        riot_client=SimpleNamespace(get_account_v1_by_puuid=account_lookup),
+        get_guild=Mock(return_value=guild),
+        riot_auth_breaker=RiotAuthBreaker(),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(return_value=[{"queueType": "RANKED_SOLO_5x5", "tier": "EMERALD"}]),
+    )
+
+    await _refresh_next_verified(cog)
+
+    account_lookup.assert_awaited_once_with(puuid="puuid", region="europe")
+    sync_riot_id.assert_not_awaited()
+    assert (link.riot_game_name, link.riot_tag_line) == ("Previous name", "OLD")
+    verifications.record_rank_snapshot.assert_awaited_once()
+    cog.apply_verified_roles.assert_awaited_once()
+
+
 async def test_rank_refresh_worker_does_not_apply_roles_after_losing_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -327,6 +536,8 @@ async def test_rank_refresh_worker_does_not_apply_roles_after_losing_claim(
         discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        riot_game_name="Moon",
+        riot_tag_line="EUNE",
         last_known_rank=None,
         rank_last_checked_at=None,
         rank_unranked_confirmations=0,
@@ -528,6 +739,8 @@ async def test_rank_refresh_worker_requires_two_empty_200_responses_for_unranked
         discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        riot_game_name="Moon",
+        riot_tag_line="EUNE",
         created_at=created_at,
         deletion_requested_at=None,
         last_known_rank="EMERALD",

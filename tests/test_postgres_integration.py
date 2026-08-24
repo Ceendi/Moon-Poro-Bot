@@ -183,6 +183,19 @@ async def test_migrations_and_repositories_against_postgres(
         assert [link.discord_user_id for link in reclaimed] == [101]
         reclaimed_at = reclaimed[0].rank_refresh_claimed_at
         assert reclaimed_at is not None
+        assert await verifications.sync_riot_id_if_current(
+            guild_id,
+            101,
+            game_name="Renamed Moon",
+            tag_line="EUW",
+            expected_puuid=created.puuid or "",
+            expected_platform=created.platform,
+            expected_created_at=created.created_at,
+            expected_claimed_at=reclaimed_at,
+        )
+        synced = await verifications.get_by_user(guild_id, 101)
+        assert synced is not None
+        assert (synced.riot_game_name, synced.riot_tag_line) == ("Renamed Moon", "EUW")
         assert (await verifications.rank_refresh_queue_stats(guild_id)).due_count == 1
         retry_delay = await verifications.retry_rank_refresh(
             guild_id,
