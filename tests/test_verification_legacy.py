@@ -284,7 +284,7 @@ async def test_legacy_start_explains_incomplete_previous_link(
     await view.begin_verification(interaction)
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+        "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
         ephemeral=True,
     )
     interaction.response.send_modal.assert_not_awaited()

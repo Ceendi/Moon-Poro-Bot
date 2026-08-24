@@ -3,25 +3,25 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import { siteConfig } from "../../config";
 ---
 
-<BaseLayout lang="en" canonicalPath="/en/" title="Riot account verification" description="Moon Poro links Discord and League of Legends accounts through Riot Sign On, then synchronises region and Solo/Duo rank roles.">
+<BaseLayout lang="en" canonicalPath="/en/" title="Riot account verification" description="Moon Poro currently verifies League of Legends accounts through a profile-icon challenge. Riot Sign On is being prepared for a later launch.">
   <section class="hero">
     <div>
-      <p class="eyebrow">Moon Poro · Riot Sign On verification</p>
+      <p class="eyebrow">Moon Poro · Riot account verification</p>
       <h1>Verify a League of Legends account on Discord</h1>
-      <p class="lead">Link a Riot account to Discord through Riot Sign On. Moon Poro confirms the region and assigns roles matching the current Solo/Duo rank. The password is entered only on Riot's website.</p>
-      <div class="actions"><a class="button" href={siteConfig.discordInviteUrl}>Open the Discord server <span aria-hidden="true">→</span></a><a class="button secondary" href="/en/rso/">Review the complete flow</a></div>
-      <p class="trust-note">Free service · no advertising · Riot tokens are not stored</p>
+      <p class="lead">Moon Poro currently verifies a Riot account by asking the user to change their League of Legends profile icon. Riot Sign On is in preparation and will launch after Riot grants access.</p>
+      <div class="actions"><a class="button" href={siteConfig.discordInviteUrl}>Open the Discord server <span aria-hidden="true">→</span></a><a class="button secondary" href="/en/rso/">Review the planned RSO flow</a></div>
+      <p class="trust-note">Free service · no advertising · Moon Poro never asks for your Riot password</p>
     </div>
-    <div class="orbit" role="img" aria-label="Flow between Discord, Riot Sign On, verified account and roles">
-      <div class="orbit-core"><img src="/moon-poro.png" alt="" width="128" height="128" /></div><div class="orbit-node node-discord">Discord</div><div class="orbit-node node-riot">Riot Sign On</div><div class="orbit-node node-role">Role + rank</div><div class="orbit-node node-account">PUUID</div><p class="orbit-caption">Discord → Riot Sign On → roles</p>
+    <div class="orbit" role="img" aria-label="Planned flow between Discord, Riot Sign On, a verified account and roles">
+      <div class="orbit-core"><img src="/moon-poro.png" alt="" width="128" height="128" /></div><div class="orbit-node node-discord">Discord</div><div class="orbit-node node-riot">Riot Sign On</div><div class="orbit-node node-role">Role + rank</div><div class="orbit-node node-account">Riot account</div><p class="orbit-caption">Planned RSO flow</p>
     </div>
   </section>
   <section class="section">
-    <div class="section-heading"><div><p class="eyebrow">Four-step verification</p><h2>How verification works</h2></div><p>The bot sends a private one-time link. Authentication happens only on Riot Games' domain. The callback confirms PUUID and platform, then the bot updates roles.</p></div>
-    <ol class="process"><li><h3>Click in Discord</h3><p>A private verification link remains valid for 10 minutes.</p></li><li><h3>Sign in with Riot</h3><p>Your password goes only to Riot Sign On, never to Moon Poro.</p></li><li><h3>Riot confirms the account</h3><p>We receive the PUUID, Riot ID and League platform needed for the link.</p></li><li><h3>The bot assigns roles</h3><p>Discord receives verified, region and current Solo/Duo rank roles.</p></li></ol>
+    <div class="section-heading"><div><p class="eyebrow">Planned four-step verification</p><h2>How Riot Sign On will work</h2></div><p>After RSO launches, the bot will send a private one-time link. Authentication will happen only on Riot Games' website, then the bot will update roles after confirming the account.</p></div>
+    <ol class="process"><li><h3>Click “Verify account”</h3><p>The bot creates a private verification link valid for 10 minutes.</p></li><li><h3>Sign in with Riot</h3><p>Your password goes only to Riot Sign On, never to Moon Poro.</p></li><li><h3>Riot confirms the account</h3><p>Moon Poro receives the Riot ID and League platform needed for the link.</p></li><li><h3>The bot assigns roles</h3><p>Discord receives verified, region and current Solo/Duo rank roles.</p></li></ol>
   </section>
   <section class="section">
-    <div class="section-heading"><div><p class="eyebrow">Privacy</p><h2>Data stored by Moon Poro</h2></div><p>The access token exists in memory for only the requests needed to identify the account. Passwords, access tokens, ID tokens and refresh tokens are never stored.</p></div>
+    <div class="section-heading"><div><p class="eyebrow">Privacy</p><h2>Data stored by Moon Poro</h2></div><p>Moon Poro never receives a Riot password. After RSO launches, its access token will exist only in memory and will not be written to the database.</p></div>
     <div class="data-strip"><div><h3>We retain</h3><ul><li>Discord user and guild IDs</li><li>Riot PUUID and platform</li><li>verification method and time</li><li>limited, audited administrator lookups</li></ul></div><div><h3>We do not retain</h3><ul><li>Riot passwords</li><li>RSO tokens</li><li>Riot account email addresses</li><li>advertising or browsing profiles</li></ul></div></div>
     <div class="actions"><a class="button secondary" href="/en/privacy/">Read the privacy policy</a></div>
   </section>

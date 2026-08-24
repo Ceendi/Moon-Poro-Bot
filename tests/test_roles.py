@@ -1,7 +1,22 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from moon_poro.cogs.roles import MiscRolesView, RankDropdown
 from moon_poro.roles import find_role, member_has_role, member_roles_named, role_is_configured
+
+
+async def test_role_controls_use_short_user_facing_labels() -> None:
+    bot = SimpleNamespace(settings=SimpleNamespace(lol_ranks=["Iron IV"]))
+
+    dropdown = RankDropdown(bot)
+    misc = MiscRolesView(bot)
+    labels = {item.custom_id: item.label for item in misc.children}
+
+    assert dropdown.placeholder == "Wybierz rangę Solo/Duo"
+    assert labels == {
+        "roles:no-lol:v2": "Nie mam konta w LoL",
+        "roles:remove-all:v2": "Usuń wszystkie wybrane role",
+    }
 
 
 def test_find_role_prefers_stable_configured_id() -> None:

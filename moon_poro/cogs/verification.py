@@ -18,7 +18,6 @@ from moon_poro.account_profile import (
     AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
-    set_account_profile_status,
 )
 from moon_poro.bot import MoonPoroBot
 from moon_poro.models import VerificationLink, VerificationSession
@@ -68,14 +67,14 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
         RankRefreshRequestStatus.ALREADY_CLAIMED,
     }
 )
-_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz profil ponownie."
+_ACCOUNT_PROFILE_STALE_MESSAGE = (
+    "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz."
+)
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie trwa dłużej niż zwykle.\nSprawdź profil ponownie za chwilę."
+    "Odświeżanie trwa dłużej niż zwykle. Wyświetl „Moje konto” ponownie za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
-    "Nie udało się pokazać wyniku odświeżania.\n"
-    "Odświeżanie może nadal trwać.\n"
-    "Sprawdź profil ponownie za chwilę."
+    "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać."
 )
 
 
@@ -1137,7 +1136,7 @@ async def _request_rank_refresh_from_panel(
             "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
         ),
         RankRefreshRequestStatus.LINK_CHANGED: (
-            "Dane konta zmieniły się. Otwórz profil ponownie, aby zobaczyć aktualny stan."
+            "Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”."
         ),
         RankRefreshRequestStatus.NOT_LINKED: (
             "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
@@ -1299,12 +1298,13 @@ class AccountProfileView(discord.ui.View):
                     await self._edit_profile(interaction, link)
                     return
                 presentation = _build_account_profile(self.bot, link)
-                if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
-                    set_account_profile_status(
-                        presentation.embed,
-                        _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE,
-                    )
                 await self._edit_presentation(interaction, presentation, link)
+                if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+                    with suppress(discord.HTTPException):
+                        await interaction.followup.send(
+                            _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE,
+                            ephemeral=True,
+                        )
                 return
 
             await asyncio.sleep(min(_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS, remaining))
@@ -1360,7 +1360,7 @@ class AccountProfileView(discord.ui.View):
     ) -> None:
         if self._refresh_in_progress:
             await interaction.response.send_message(
-                "Sprawdzamy możliwość odświeżenia. Poczekaj chwilę.",
+                "Odświeżanie już się rozpoczęło. Poczekaj chwilę.",
                 ephemeral=True,
             )
             return
@@ -1442,15 +1442,13 @@ class AccountProfileView(discord.ui.View):
         except Exception:
             logger.exception("Could not refresh account profile for %s", self.owner_id)
             if request_recorded:
-                set_account_profile_status(
-                    self.presentation.embed,
-                    _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
-                )
-                await interaction.edit_original_response(
-                    content=None,
-                    embed=self.presentation.embed,
-                    view=self,
-                )
+                with suppress(discord.HTTPException):
+                    await interaction.edit_original_response(view=self)
+                with suppress(discord.HTTPException):
+                    await interaction.followup.send(
+                        _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
+                        ephemeral=True,
+                    )
                 return
             self._restore_refresh_button(button)
             await interaction.followup.send(
@@ -1790,7 +1788,7 @@ class VerificationStartView(discord.ui.View):
             return
         if existing_link is not None and not getattr(existing_link, "puuid", None):
             await interaction.response.send_message(
-                "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+                "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -1802,7 +1800,7 @@ class VerificationStartView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
-                "obecne powiązanie w `/profil`.",
+                "obecne powiązanie w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -2169,7 +2167,7 @@ class VerificationCog(commands.Cog):
     async def remove_own_verification(self, interaction: discord.Interaction) -> None:
         await _show_delete_confirmation(self.bot, interaction)
 
-    @app_commands.command(name="profil", description="Pokazuje Twoje konto Riot")
+    @app_commands.command(name="profil", description="Pokazuje dane połączonego konta Riot")
     @app_commands.guild_only()
     async def profile(self, interaction: discord.Interaction) -> None:
         await _show_account_profile(
@@ -2221,13 +2219,14 @@ class VerificationCog(commands.Cog):
         if link:
             await interaction.followup.send(
                 f"Powiązane konto Discord: <@{link.discord_user_id}> (`{link.discord_user_id}`). "
-                "Lookup zapisano w dzienniku audytowym.",
+                "Sprawdzenie zapisano w dzienniku audytowym.",
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Lookup zapisano.", ephemeral=True
+                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                ephemeral=True,
             )
 
     @administrator_only()
@@ -2253,7 +2252,8 @@ class VerificationCog(commands.Cog):
         )
         if link is None or not link.puuid:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Lookup zapisano.", ephemeral=True
+                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                ephemeral=True,
             )
             return
         try:
@@ -2270,7 +2270,8 @@ class VerificationCog(commands.Cog):
             return
         await interaction.followup.send(
             f"Konto Riot: **{account['gameName']}#{account['tagLine']}**, region "
-            f"**{SERVER_TRANSLATION[link.platform]}**. Lookup zapisano.",
+            f"**{SERVER_TRANSLATION[link.platform]}**. "
+            "Sprawdzenie zapisano w dzienniku audytowym.",
             ephemeral=True,
         )
 

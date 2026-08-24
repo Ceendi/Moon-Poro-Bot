@@ -72,7 +72,7 @@ async def test_handle_known_error_rounds_cooldown_up_to_one_second(
     assert handled
     safe_send.assert_awaited_once_with(
         interaction,
-        "⏳ Spróbuj ponownie za 1 s.",
+        "Spróbuj ponownie za 1 s.",
     )
 
 

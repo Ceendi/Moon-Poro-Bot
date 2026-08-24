@@ -217,7 +217,7 @@ class LegacyVerificationStartView(discord.ui.View):
             return
         if existing_link is not None and not getattr(existing_link, "puuid", None):
             await interaction.response.send_message(
-                "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+                "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -231,7 +231,7 @@ class LegacyVerificationStartView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
-                "obecne powiązanie w `/profil`.",
+                "obecne powiązanie w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -509,7 +509,7 @@ class LegacyVerificationRetryView(discord.ui.View):
         if interaction.user.id == self.owner_id:
             return True
         await interaction.response.send_message(
-            "Ten przycisk należy do innego użytkownika.", ephemeral=True
+            "Nie możesz użyć przycisku innej osoby.", ephemeral=True
         )
         return False
 
@@ -557,7 +557,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         if interaction.user.id == self.owner_id:
             return True
         await interaction.response.send_message(
-            "Ten przycisk należy do innego użytkownika.", ephemeral=True
+            "Nie możesz użyć przycisku innej osoby.", ephemeral=True
         )
         return False
 
@@ -726,8 +726,8 @@ class LegacyIconConfirmationView(discord.ui.View):
 
         if not applied:
             await interaction.followup.send(
-                "Powiązanie konta zmieniło się podczas weryfikacji. "
-                "Otwórz „Moje konto”, aby zobaczyć aktualny stan.",
+                "Powiązanie konta zmieniło się podczas weryfikacji. Sprawdź aktualne "
+                "dane w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -762,8 +762,8 @@ class LegacyIconConfirmationView(discord.ui.View):
                     )
         if not current:
             await interaction.followup.send(
-                "Powiązanie konta zmieniło się podczas weryfikacji. "
-                "Otwórz „Moje konto”, aby zobaczyć aktualny stan.",
+                "Powiązanie konta zmieniło się podczas weryfikacji. Sprawdź aktualne "
+                "dane w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -863,7 +863,7 @@ class LegacyVerificationCog(VerificationCog):
     ) -> None:
         await _show_delete_confirmation(self.bot, interaction)
 
-    @app_commands.command(name="profil", description="Pokazuje Twoje konto Riot")
+    @app_commands.command(name="profil", description="Pokazuje dane połączonego konta Riot")
     @app_commands.guild_only()
     async def profile(  # type: ignore[override]
         self, interaction: discord.Interaction

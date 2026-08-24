@@ -3,63 +3,63 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import { siteConfig } from "../config";
 ---
 
-<BaseLayout title="Weryfikacja konta Riot" description="Moon Poro łączy konto Discord z kontem League of Legends przez Riot Sign On i synchronizuje region oraz rangę Solo/Duo.">
+<BaseLayout title="Weryfikacja konta Riot" description="Moon Poro obecnie weryfikuje konta League of Legends ikoną profilu. Logowanie przez Riot Sign On jest w przygotowaniu.">
   <section class="hero">
     <div>
-      <p class="eyebrow">Moon Poro · weryfikacja przez Riot Sign On</p>
+      <p class="eyebrow">Moon Poro · weryfikacja konta Riot</p>
       <h1>Weryfikacja konta League of Legends na Discordzie</h1>
-      <p class="lead">Połącz konto Riot z kontem Discord przez Riot Sign On. Moon Poro potwierdzi region i nada role odpowiadające aktualnej randze Solo/Duo. Hasło wpisujesz wyłącznie na stronie Riot.</p>
+      <p class="lead">Moon Poro obecnie weryfikuje konto Riot przez zmianę ikony profilu w kliencie League of Legends. Logowanie przez Riot Sign On jest w przygotowaniu i zostanie uruchomione po otrzymaniu dostępu od Riot.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Otwórz serwer Discord <span aria-hidden="true">→</span></a>
-        <a class="button secondary" href="/rso/">Zobacz cały przepływ</a>
+        <a class="button secondary" href="/rso/">Zobacz planowany przepływ RSO</a>
       </div>
-      <p class="trust-note">Usługa bezpłatna · bez reklam · tokeny Riot nie są zapisywane</p>
+      <p class="trust-note">Usługa bezpłatna · bez reklam · bot nigdy nie prosi o hasło Riot</p>
     </div>
-    <div class="orbit" role="img" aria-label="Przepływ: Discord, logowanie Riot, potwierdzone konto i role">
+    <div class="orbit" role="img" aria-label="Planowany przepływ: Discord, logowanie Riot, potwierdzone konto i role">
       <div class="orbit-core"><img src="/moon-poro.png" alt="" width="128" height="128" /></div>
       <div class="orbit-node node-discord">Discord</div>
       <div class="orbit-node node-riot">Riot Sign On</div>
       <div class="orbit-node node-role">Role i ranga</div>
-      <div class="orbit-node node-account">PUUID</div>
-      <p class="orbit-caption">Discord → Riot Sign On → role</p>
+      <div class="orbit-node node-account">Konto Riot</div>
+      <p class="orbit-caption">Planowany przepływ RSO</p>
     </div>
   </section>
 
   <section class="section" id="flow">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">Weryfikacja w czterech krokach</p>
-        <h2>Jak przebiega weryfikacja</h2>
+        <p class="eyebrow">Planowana weryfikacja w czterech krokach</p>
+        <h2>Jak będzie działać Riot Sign On</h2>
       </div>
-      <p>Bot wysyła prywatny, jednorazowy link. Logowanie odbywa się wyłącznie na domenie Riot Games. Po powrocie callback potwierdza PUUID i region, a bot aktualizuje role.</p>
+      <p>Po uruchomieniu RSO bot wyśle prywatny, jednorazowy link. Logowanie odbędzie się wyłącznie na stronie Riot Games, a po potwierdzeniu konta bot zaktualizuje role.</p>
     </div>
     <ol class="process">
-      <li><h3>Klikasz w Discordzie</h3><p>Przycisk tworzy prywatny link ważny przez 10 minut.</p></li>
+      <li><h3>Klikasz „Zweryfikuj konto”</h3><p>Bot tworzy prywatny link ważny przez 10 minut.</p></li>
       <li><h3>Logujesz się u Riot</h3><p>Hasło trafia wyłącznie do Riot Sign On — nigdy do Moon Poro.</p></li>
-      <li><h3>Riot potwierdza konto</h3><p>Odczytujemy PUUID, Riot ID i platformę potrzebne do powiązania.</p></li>
-      <li><h3>Bot nadaje role</h3><p>Discord otrzymuje region, status weryfikacji i aktualną rangę Solo/Duo.</p></li>
+      <li><h3>Riot potwierdza konto</h3><p>Moon Poro otrzymuje Riot ID i region potrzebne do powiązania.</p></li>
+      <li><h3>Bot nadaje role</h3><p>Na Discordzie pojawiają się role weryfikacji, regionu i aktualnej rangi Solo/Duo.</p></li>
     </ol>
   </section>
 
   <section class="section">
     <div class="section-heading">
-      <div><p class="eyebrow">Zastosowanie</p><h2>Dlaczego używamy Riot Sign On</h2></div>
-      <p>Moon Poro pomaga polskiej społeczności League of Legends organizować gry i wydarzenia bez deklarowanych „na słowo” rang oraz bez ręcznej zmiany ikony profilu.</p>
+      <div><p class="eyebrow">Zastosowanie</p><h2>Dlaczego przygotowujemy Riot Sign On</h2></div>
+      <p>Docelowe logowanie Riot zastąpi zmianę ikony profilu, zachowując automatyczną aktualizację regionu i rangi Solo/Duo.</p>
     </div>
     <div class="cards">
       <article class="card"><span class="symbol">ID</span><h3>Jedno powiązanie kont</h3><p>Jedno konto Riot może być aktywnie połączone z jednym kontem Discord na serwerze.</p></article>
       <article class="card"><span class="symbol">↻</span><h3>Odświeżana ranga</h3><p>Ranga Solo/Duo jest okresowo pobierana z oficjalnego Riot API i synchronizowana z rolą.</p></article>
-      <article class="card"><span class="symbol">×</span><h3>Usuwanie na żądanie</h3><p>Komenda <span class="mono">/usun_weryfikacje</span> usuwa powiązanie i zarządzane role.</p></article>
+      <article class="card"><span class="symbol">×</span><h3>Usuwanie na żądanie</h3><p>Komenda <span class="mono">/usun_weryfikacje</span> usuwa powiązanie i rolę „Zweryfikowany”. Role regionu i rangi pozostają bez zmian.</p></article>
     </div>
   </section>
 
   <section class="section">
     <div class="section-heading">
       <div><p class="eyebrow">Prywatność</p><h2>Jakie dane zapisujemy</h2></div>
-      <p>Token dostępu istnieje tylko w pamięci na czas jednego żądania do Riot. Nie zapisujemy hasła, access tokenu, ID tokenu ani refresh tokenu.</p>
+      <p>Moon Poro nie otrzymuje hasła Riot. Po uruchomieniu RSO token dostępu będzie używany tylko w pamięci i nie trafi do bazy.</p>
     </div>
     <div class="data-strip">
-      <div><h3>Przechowujemy</h3><ul><li>Discord user ID i server ID</li><li>Riot PUUID oraz platformę</li><li>metodę i czas weryfikacji</li><li>ograniczony dziennik administracyjnych odczytów</li></ul></div>
+      <div><h3>Przechowujemy</h3><ul><li>identyfikatory użytkownika i serwera Discord</li><li>Riot PUUID oraz platformę</li><li>metodę i czas weryfikacji</li><li>ograniczony dziennik administracyjnych odczytów</li></ul></div>
       <div><h3>Nie przechowujemy</h3><ul><li>hasła Riot</li><li>tokenów RSO</li><li>adresu e-mail konta Riot</li><li>historii przeglądania ani danych reklamowych</li></ul></div>
     </div>
     <div class="actions"><a class="button secondary" href="/privacy/">Przeczytaj politykę prywatności</a></div>

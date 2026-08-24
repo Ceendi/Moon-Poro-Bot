@@ -225,9 +225,15 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
             f"localhost:{settings.rso_port}",
         }
         if request.host.casefold() not in allowed_hosts:
-            response: web.StreamResponse = web.Response(status=400, text="Invalid host")
+            response: web.StreamResponse = web.Response(
+                status=400,
+                text="Nieprawidłowy adres.",
+            )
         elif not limiter.allowed(_client_ip(request)):
-            response = web.Response(status=429, text="Too many requests")
+            response = web.Response(
+                status=429,
+                text="Za dużo żądań. Spróbuj ponownie za minutę.",
+            )
         else:
             try:
                 response = await handler(request)
@@ -419,7 +425,7 @@ def _result_for_record(record: VerificationSession) -> web.Response:
         if record.riot_game_name and record.riot_tag_line:
             riot_id = f" Konto <strong>{html.escape(record.riot_game_name)}#{html.escape(record.riot_tag_line)}</strong> jest połączone."
         return _status_page(
-            "Gotowe — jesteś zweryfikowany",
+            "Gotowe — konto zostało zweryfikowane",
             f"{riot_id} Role regionu i rangi zostały zaktualizowane. Możesz wrócić do Discorda.",
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),

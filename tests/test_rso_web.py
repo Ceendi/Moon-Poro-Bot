@@ -196,6 +196,20 @@ async def test_health_readiness_and_security_headers(rso_test_client: TestClient
     assert health.headers["X-Frame-Options"] == "DENY"
     assert health.headers["Cache-Control"] == "no-store, max-age=0"
     assert invalid_host.status == 400
+    assert await invalid_host.text() == "Nieprawidłowy adres."
+
+
+async def test_request_limit_returns_a_clear_polish_message(
+    rso_test_client: TestClient,
+) -> None:
+    headers = {"Host": "localhost:8080"}
+
+    responses = [
+        await rso_test_client.get("/healthz", headers=headers) for _request_number in range(61)
+    ]
+
+    assert responses[-1].status == 429
+    assert await responses[-1].text() == "Za dużo żądań. Spróbuj ponownie za minutę."
 
 
 async def test_complete_browser_flow_from_landing_to_result(
@@ -263,7 +277,7 @@ async def test_complete_browser_flow_from_landing_to_result(
         headers={**headers, "Cookie": f"moon_poro_rso={created.token}"},
     )
     completed_html = await completed_page.text()
-    assert "Gotowe — jesteś zweryfikowany" in completed_html
+    assert "Gotowe — konto zostało zweryfikowane" in completed_html
     assert "Moon#EUNE" in completed_html
 
 

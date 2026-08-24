@@ -14,13 +14,13 @@ const isEnglish = lang === "en";
 const nav = isEnglish
   ? [
       ["Start", "/en/"],
-      ["How RSO works", "/en/rso/"],
+      ["Planned RSO", "/en/rso/"],
       ["Privacy", "/en/privacy/"],
       ["Terms", "/en/terms/"],
     ]
   : [
       ["Start", "/"],
-      ["Jak działa RSO", "/rso/"],
+      ["Planowane RSO", "/rso/"],
       ["Prywatność", "/privacy/"],
       ["Warunki", "/terms/"],
     ];
@@ -45,7 +45,7 @@ const canonical = new URL(canonicalPath, siteConfig.siteUrl);
     <header class="site-header">
       <a class="brand" href={isEnglish ? "/en/" : "/"} aria-label="Moon Poro Bot — start">
         <img src="/moon-poro.png" alt="" width="46" height="46" />
-        <span>Moon Poro <small>Discord utility</small></span>
+        <span>Moon Poro <small>{isEnglish ? "Discord utility" : "Bot Discord"}</small></span>
       </a>
       <nav aria-label={isEnglish ? "Main navigation" : "Główna nawigacja"}>
         {nav.map(([label, href]) => (
@@ -61,7 +61,7 @@ const canonical = new URL(canonicalPath, siteConfig.siteUrl);
           <img src="/moon-poro.png" alt="" width="40" height="40" />
           <span>Moon Poro Bot</span>
         </a>
-        <p>{isEnglish ? "A free Discord utility for the League of Legends PL community." : "Darmowe narzędzie Discord dla społeczności League of Legends PL."}</p>
+        <p>{isEnglish ? "A free Discord utility for the League of Legends PL community." : "Darmowy bot Discord dla społeczności League of Legends PL."}</p>
       </div>
       <div class="footer-links">
         <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>

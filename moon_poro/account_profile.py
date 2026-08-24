@@ -192,7 +192,11 @@ def _add_profile_fields(
     embed.add_field(name="Solo/Duo", value=rank, inline=True)
     embed.add_field(name="LP", value=_lp_label(link), inline=True)
     embed.add_field(name="Bilans", value=_record_label(wins, losses), inline=True)
-    embed.add_field(name="Wygrane", value=_win_rate_label(wins, losses), inline=True)
+    embed.add_field(
+        name="Procent wygranych",
+        value=_win_rate_label(wins, losses),
+        inline=True,
+    )
     embed.add_field(
         name="Ostatnia udana aktualizacja",
         value=_last_update_label(link.rank_last_checked_at),

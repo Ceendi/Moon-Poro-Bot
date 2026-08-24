@@ -165,7 +165,7 @@ def test_rendered_profile_uses_cached_rank_data() -> None:
         "Solo/Duo": "Emerald IV",
         "LP": "20 LP",
         "Bilans": "120 W / 100 P",
-        "Wygrane": "54,5%",
+        "Procent wygranych": "54,5%",
         "Ostatnia udana aktualizacja": (f"<t:{expected_timestamp}:f> • <t:{expected_timestamp}:R>"),
     }
     assert [field.inline for field in profile.embed.fields] == [True] * 6 + [False]
@@ -188,7 +188,7 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     assert fields["Solo/Duo"] == "Brak rangi"
     assert fields["LP"] == "—"
     assert fields["Bilans"] == "—"
-    assert fields["Wygrane"] == "—"
+    assert fields["Procent wygranych"] == "—"
 
 
 def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
