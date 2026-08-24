@@ -67,8 +67,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT USAGE, SELECT ON SEQUENCE verification_sessions_id_seq TO moon_poro_rso;
 ```
 
-Bot nadal wykonuje migracje Alembic przy starcie, więc jego login musi być właścicielem schematu
-albo deployment musi uruchomić `alembic upgrade head` oddzielnym kontem przed restartem.
+Bot nadal wykonuje migracje przy starcie, więc jego login musi być właścicielem schematu. Migracje
+można też uruchomić bez połączenia z Discordem, korzystając z konfiguracji bota:
+
+```bash
+sudo -u moon-poro-bot /opt/moon-poro/.venv/bin/python -m moon_poro.migrate \
+  --env-file /etc/moon-poro/bot.env \
+  --legacy-audit-channel-id ID_HISTORYCZNEGO_KANALU
+```
+
+Nie używaj tutaj bezpośrednio `alembic upgrade head`: migracje projektu potrzebują dodatkowych
+wartości z konfiguracji bota. Przed pierwszym uruchomieniem migracji `20260824_0007` sprawdź,
+czy wszystkie istniejące wiadomości weryfikacyjne wskazane przez `verification_links.message_id`
+powstały w jednym kanale. Jego potwierdzony identyfikator podaj w
+`--legacy-audit-channel-id`; nie zakładaj, że jest to obecna wartość
+`ZWERYFIKOWANI_CHANNEL_ID`. Gdy kanał nigdy nie był zmieniany, obie wartości będą takie same.
+W produkcyjnej konfiguracji tę samą, potwierdzoną wartość można zapisać jako
+`LEGACY_AUDIT_CHANNEL_ID`; bot odczyta ją podczas migracji wykonywanej przy starcie.
+
+Jeśli historyczne wiadomości znajdują się w kilku kanałach, nie uruchamiaj tej migracji z jednym
+identyfikatorem. Najpierw przygotuj osobny, zweryfikowany backfill przypisujący właściwy kanał do
+każdego wpisu. Dla nowej, pustej bazy parametr `--legacy-audit-channel-id` można pominąć. Bot
+uruchomiony przed bezpiecznym backfillem celowo przerwie migrację zamiast przypisać błędny kanał.
 
 ## 5. Python i usługi
 
@@ -99,8 +119,10 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 2. Ustaw `VERIFICATION_MODE=legacy_icon` i potwierdź działanie weryfikacji ikoną. Nie uruchamiaj
    jeszcze usługi RSO.
 3. Po otrzymaniu danych klienta wdróż kod RSO oraz zbudowany poza VM katalog `site/dist`.
-4. Zatrzymaj legacy bota na czas finalnego przełączenia i uruchom migracje Alembic kontem
-   właściciela schematu.
+4. Zatrzymaj legacy bota na czas finalnego przełączenia i uruchom migracje kontem właściciela
+   schematu. Przy pierwszym przejściu przez migrację `20260824_0007` użyj pełnego polecenia z
+   sekcji 4 wraz z potwierdzonym `--legacy-audit-channel-id`. Po zastosowaniu tej migracji parametr
+   nie jest już potrzebny.
 5. Uruchom nowego bota i nadaj minimalne granty loginowi `moon_poro_rso`.
 6. Wpisz client assertion albo client secret wyłącznie do `/etc/moon-poro/rso.env`.
 7. Sprawdź Caddy, uruchom callback i testuj pełny przepływ na prywatnym kanale.

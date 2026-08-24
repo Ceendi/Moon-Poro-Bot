@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     guild_id: int = Field(gt=0)
     warn_channel_id: int | None = None
     zweryfikowani_channel_id: int | None = None
+    legacy_audit_channel_id: int | None = Field(default=None, gt=0)
     szukanie_gry_channel_id: int | None = None
     komendy_botowe_channel_id: int | None = None
     mod_alert_channel_id: int | None = None
@@ -132,6 +133,7 @@ class Settings(BaseSettings):
     @field_validator(
         "warn_channel_id",
         "zweryfikowani_channel_id",
+        "legacy_audit_channel_id",
         "szukanie_gry_channel_id",
         "komendy_botowe_channel_id",
         "mod_alert_channel_id",

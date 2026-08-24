@@ -53,7 +53,7 @@ async def test_upgrade_database_runs_blocking_migration_in_thread(
 
     await database.upgrade_database(settings)
 
-    to_thread.assert_awaited_once_with(database._upgrade_database, settings)
+    to_thread.assert_awaited_once_with(database._upgrade_database, settings, None)
 
 
 def test_upgrade_database_configures_project_migration(
@@ -66,7 +66,10 @@ def test_upgrade_database_configures_project_migration(
     upgrade = Mock()
     monkeypatch.setattr(database, "Config", config_class)
     monkeypatch.setattr(database.command, "upgrade", upgrade)
-    settings = settings_factory(postgres_password="percent%password")  # pragma: allowlist secret
+    settings = settings_factory(
+        postgres_password="percent%password",  # pragma: allowlist secret
+        legacy_audit_channel_id=987,
+    )
 
     database._upgrade_database(settings)
 
@@ -75,6 +78,7 @@ def test_upgrade_database_configures_project_migration(
     assert options["script_location"].endswith("alembic")
     assert "%%25" in options["sqlalchemy.url"]
     assert config.attributes["guild_id"] == settings.guild_id
+    assert config.attributes["legacy_audit_channel_id"] == 987
     upgrade.assert_called_once_with(config, "head")
 
 

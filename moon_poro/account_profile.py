@@ -46,6 +46,7 @@ class AccountProfileState(StrEnum):
     """User-facing state selected from cached data and runtime Riot signals."""
 
     UNVERIFIED = "unverified"
+    INCOMPLETE_LEGACY = "incomplete_legacy"
     DELETING = "deleting"
     AUTHORIZATION_UNAVAILABLE = "auth"
     TEMPORARY_UNAVAILABLE = "temporary"
@@ -100,10 +101,16 @@ def build_account_profile(
         title="Moje konto",
         colour=_state_colour(state),
     )
-    if state is not AccountProfileState.UNVERIFIED and link is not None:
-        _add_profile_fields(embed, link, riot_id=riot_id)
-    else:
+    if link is None:
         embed.add_field(name="Konto Riot", value="Niepołączone", inline=False)
+    elif not link.puuid:
+        embed.add_field(
+            name="Konto Riot",
+            value="Wymaga ponownego połączenia",
+            inline=False,
+        )
+    else:
+        _add_profile_fields(embed, link, riot_id=riot_id)
 
     _add_state_field(embed, state)
     refresh_enabled = state in {
@@ -133,10 +140,12 @@ def _classify(
     riot_temporary_unavailable: bool,
     riot_authorization_unavailable: bool,
 ) -> AccountProfileState:
-    if link is None or not link.puuid:
+    if link is None:
         return AccountProfileState.UNVERIFIED
     if link.deletion_requested_at is not None:
         return AccountProfileState.DELETING
+    if not link.puuid:
+        return AccountProfileState.INCOMPLETE_LEGACY
     if riot_authorization_unavailable:
         return AccountProfileState.AUTHORIZATION_UNAVAILABLE
     if link.rank_refresh_claimed_at is not None:
@@ -192,7 +201,13 @@ def _add_profile_fields(
 
 
 def _add_state_field(embed: discord.Embed, state: AccountProfileState) -> None:
-    if state is AccountProfileState.DELETING:
+    if state is AccountProfileState.INCOMPLETE_LEGACY:
+        set_account_profile_status(
+            embed,
+            "Poprzednie powiązanie jest nieaktualne. Usuń je, aby ponownie połączyć konto Riot.",
+            field_name=PROFILE_ACCOUNT_STATUS_FIELD_NAME,
+        )
+    elif state is AccountProfileState.DELETING:
         set_account_profile_status(
             embed,
             "Trwa usuwanie powiązania.",
@@ -235,7 +250,10 @@ def _state_colour(state: AccountProfileState) -> discord.Colour:
         return discord.Colour.green()
     if state in {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}:
         return discord.Colour.blurple()
-    if state is AccountProfileState.TEMPORARY_UNAVAILABLE:
+    if state in {
+        AccountProfileState.INCOMPLETE_LEGACY,
+        AccountProfileState.TEMPORARY_UNAVAILABLE,
+    }:
         return discord.Colour.orange()
     if state in {AccountProfileState.DELETING, AccountProfileState.AUTHORIZATION_UNAVAILABLE}:
         return discord.Colour.red()

@@ -6,6 +6,7 @@ readonly SERVICE="moon-poro-prod.service"
 readonly BACKUP_SERVICE="moon-poro-prod-pre-deploy-backup.service"
 readonly UV="/opt/moon-poro-deploy-tools/bin/uv"
 readonly UV_RUNTIME="/opt/moon-poro-prod-runtime"
+readonly DEPLOYED_COMMIT_FILE="$UV_RUNTIME/deployed-commit"
 readonly EXPECTED_REMOTE="https://github.com/Ceendi/Moon-Poro-Bot.git"
 
 if ((EUID != 0)); then
@@ -47,12 +48,18 @@ fi
 git -C "$REPOSITORY" fetch --prune origin master
 current_commit="$(git -C "$REPOSITORY" rev-parse HEAD)"
 target_commit="$(git -C "$REPOSITORY" rev-parse refs/remotes/origin/master)"
+deployed_commit=""
+if [[ -f "$DEPLOYED_COMMIT_FILE" ]]; then
+    deployed_commit="$(<"$DEPLOYED_COMMIT_FILE")"
+fi
 
 if [[ "$current_commit" == "$target_commit" ]]; then
-    echo "Moon Poro is already at origin/master ($current_commit)."
-    exit 0
-fi
-if ! git -C "$REPOSITORY" merge-base --is-ancestor "$current_commit" "$target_commit"; then
+    if [[ "$deployed_commit" == "$target_commit" ]] && systemctl is-active --quiet "$SERVICE"; then
+        echo "Moon Poro is already at origin/master ($current_commit) and the service is active."
+        exit 0
+    fi
+    echo "Moon Poro is already at origin/master, but deployment is incomplete; resuming."
+elif ! git -C "$REPOSITORY" merge-base --is-ancestor "$current_commit" "$target_commit"; then
     echo "Refusing non-fast-forward deployment: $current_commit -> $target_commit" >&2
     exit 1
 fi
@@ -78,7 +85,20 @@ export UV_PYTHON_INSTALL_DIR="$UV_RUNTIME/python"
 )
 "$REPOSITORY/.venv/bin/python" -m compileall -q "$REPOSITORY/moon_poro"
 
-systemctl restart "$SERVICE"
+# Stop the old code before adding constraints that require fields it does not
+# write. Migration 20260824_0007 reads LEGACY_AUDIT_CHANNEL_ID from the
+# validated production environment.
+systemctl stop "$SERVICE"
+if ! (
+    cd -- "$REPOSITORY"
+    PYTHONDONTWRITEBYTECODE=1 "$REPOSITORY/.venv/bin/python" -m moon_poro.migrate \
+        --env-file /etc/moon-poro/prod-bot.env
+); then
+    echo "Database migration failed; $SERVICE remains stopped to protect data." >&2
+    exit 1
+fi
+
+systemctl start "$SERVICE"
 sleep 8
 if ! systemctl is-active --quiet "$SERVICE"; then
     echo "Production service failed after deployment to $target_commit." >&2
@@ -86,6 +106,10 @@ if ! systemctl is-active --quiet "$SERVICE"; then
     systemctl --no-pager --full status "$SERVICE" || true
     exit 1
 fi
+
+deployed_commit_tmp="$DEPLOYED_COMMIT_FILE.tmp.$$"
+printf '%s\n' "$target_commit" >"$deployed_commit_tmp"
+mv -f -- "$deployed_commit_tmp" "$DEPLOYED_COMMIT_FILE"
 
 echo "Moon Poro deployed successfully: $current_commit -> $target_commit"
 systemctl --no-pager --full status "$SERVICE"

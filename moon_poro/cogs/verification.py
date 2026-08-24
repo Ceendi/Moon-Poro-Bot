@@ -22,14 +22,21 @@ from moon_poro.account_profile import (
 )
 from moon_poro.bot import MoonPoroBot
 from moon_poro.models import VerificationLink, VerificationSession
-from moon_poro.permissions import administrator_only
+from moon_poro.permissions import administrator_only, is_administrator
 from moon_poro.rank_refresh import (
     RankSnapshot,
     decide_rank_refresh,
     effective_refresh_interval,
     solo_rank_snapshot,
 )
-from moon_poro.repositories import RankRefreshRequestStatus
+from moon_poro.repositories import (
+    RankRefreshRequestStatus,
+    VerificationDeletionAccessLog,
+    VerificationDeletionPolicy,
+    VerificationDeletionProcessStatus,
+    VerificationDeletionRequestStatus,
+    VerificationLinkIdentity,
+)
 from moon_poro.riot import (
     API_SERVERS,
     SERVER_TRANSLATION,
@@ -40,6 +47,7 @@ from moon_poro.riot import (
     riot_api_call,
 )
 from moon_poro.roles import find_role, member_has_role, member_roles_named
+from moon_poro.time_utils import timestamps_match
 
 logger = logging.getLogger("moon_poro.verification")
 
@@ -140,6 +148,37 @@ async def _apply_verified_roles(
         await member.add_roles(*to_add, reason="Synchronizacja weryfikacji Riot")
 
 
+async def _run_active_link_role_update(
+    bot: MoonPoroBot,
+    link: VerificationLink,
+    operation: Callable[[], Awaitable[None]],
+) -> bool:
+    return await bot.verifications.run_verification_role_update_with_identity(
+        link.guild_id,
+        link.discord_user_id,
+        identity=VerificationLinkIdentity.from_link(link),
+        operation=operation,
+    )
+
+
+async def _run_pending_deletion_role_cleanup(
+    bot: MoonPoroBot,
+    link: VerificationLink,
+    operation: Callable[[], Awaitable[None]],
+) -> bool:
+    requested_at = link.deletion_requested_at
+    if requested_at is None:
+        return False
+    return await bot.verifications.run_verification_deletion_role_cleanup_with_identity(
+        link.guild_id,
+        link.discord_user_id,
+        identity=VerificationLinkIdentity.from_link(link),
+        expected_requested_at=requested_at,
+        expected_remove_rank_region_roles=link.deletion_remove_rank_region_roles,
+        operation=operation,
+    )
+
+
 async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
     settings = bot.settings
     managed_names = set(settings.lol_ranks + settings.lol_servers + [settings.verified_role_name])
@@ -152,6 +191,19 @@ async def _remove_verified_marker(bot: MoonPoroBot, member: discord.Member, *, r
     verified_role = find_role(member.guild, bot.settings.verified_role_name, bot.settings)
     if verified_role is not None and verified_role in member.roles:
         await member.remove_roles(verified_role, reason=reason)
+
+
+async def _remove_roles_for_pending_deletion(
+    bot: MoonPoroBot,
+    member: discord.Member,
+    link: VerificationLink,
+    *,
+    reason: str,
+) -> None:
+    if link.deletion_remove_rank_region_roles:
+        await _remove_verified_roles(bot, member, reason=reason)
+    else:
+        await _remove_verified_marker(bot, member, reason=reason)
 
 
 def _cached_rank_leagues(link: VerificationLink) -> LeagueEntries | None:
@@ -269,7 +321,11 @@ async def _ensure_active_link_roles(
         await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
     else:
         try:
-            await cog.apply_verified_roles(member, link.platform, cached)
+            applied = await _run_active_link_role_update(
+                cog.bot,
+                link,
+                lambda: cog.apply_verified_roles(member, link.platform, cached),
+            )
         except discord.HTTPException:
             await cog.bot.verifications.retry_rank_role_sync(
                 member.guild.id,
@@ -284,6 +340,8 @@ async def _ensure_active_link_roles(
                 "Could not restore roles after obsolete marker cleanup for %s", member.id
             )
         else:
+            if not applied:
+                return False
             current = await cog.bot.verifications.get_by_user(member.guild.id, member.id)
             identity_matches = (
                 current is not None
@@ -454,7 +512,11 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
             await bot.verifications.schedule_rank_refresh_now(guild.id, link.discord_user_id)
         return
     try:
-        await cog.apply_verified_roles(member, link.platform, leagues)
+        applied = await _run_active_link_role_update(
+            bot,
+            link,
+            lambda: cog.apply_verified_roles(member, link.platform, leagues),
+        )
     except discord.HTTPException:
         delay = await bot.verifications.retry_rank_role_sync(
             guild.id,
@@ -470,6 +532,8 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
             member.id,
             delay,
         )
+        return
+    if not applied:
         return
     if not await _reconcile_applied_roles(cog, member, link):
         return
@@ -606,7 +670,11 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         return
     cached_leagues, checked_at = recorded
     try:
-        await cog.apply_verified_roles(member, link.platform, cached_leagues)
+        applied = await _run_active_link_role_update(
+            bot,
+            link,
+            lambda: cog.apply_verified_roles(member, link.platform, cached_leagues),
+        )
     except discord.HTTPException:
         await bot.verifications.retry_rank_role_sync(
             guild.id,
@@ -618,6 +686,8 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
             expected_created_at=link.created_at,
         )
         logger.exception("Riot snapshot stored but Discord role sync failed for user %s", member.id)
+        return
+    if not applied:
         return
     if not await _reconcile_applied_roles(cog, member, link):
         return
@@ -713,17 +783,24 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
     if member.guild.id != cog.bot.settings.guild_id:
         return
     link = await cog.bot.verifications.get_by_user(member.guild.id, member.id)
-    if link is None or not link.puuid:
+    if link is None:
         return
     if getattr(link, "deletion_requested_at", None) is not None:
         try:
-            await _remove_verified_marker(
+            await _run_pending_deletion_role_cleanup(
                 cog.bot,
-                member,
-                reason="Dokończenie usuwania weryfikacji Riot",
+                link,
+                lambda: _remove_roles_for_pending_deletion(
+                    cog.bot,
+                    member,
+                    link,
+                    reason="Dokończenie usuwania weryfikacji Riot",
+                ),
             )
         except discord.HTTPException:
             logger.exception("Could not enforce pending verification deletion for %s", member.id)
+        return
+    if not link.puuid:
         return
     leagues = _cached_rank_leagues(link)
     if leagues is None:
@@ -735,10 +812,16 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
         )
         return
     try:
-        await cog.apply_verified_roles(member, link.platform, leagues)
+        applied = await _run_active_link_role_update(
+            cog.bot,
+            link,
+            lambda: cog.apply_verified_roles(member, link.platform, leagues),
+        )
     except discord.HTTPException:
         logger.exception("Could not restore cached verification roles for %s", member.id)
     else:
+        if not applied:
+            return
         if not await _reconcile_applied_roles(cog, member, link):
             return
         if getattr(link, "rank_role_sync_pending", False):
@@ -774,25 +857,38 @@ async def _reconcile_cached_role_change(
         return
 
     link = await cog.bot.verifications.get_by_user(after.guild.id, after.id)
-    if link is None or not link.puuid:
+    if link is None:
         return
     if getattr(link, "deletion_requested_at", None) is not None:
         try:
-            await _remove_verified_marker(
+            await _run_pending_deletion_role_cleanup(
                 cog.bot,
-                after,
-                reason="Dokończenie usuwania weryfikacji Riot",
+                link,
+                lambda: _remove_roles_for_pending_deletion(
+                    cog.bot,
+                    after,
+                    link,
+                    reason="Dokończenie usuwania weryfikacji Riot",
+                ),
             )
         except discord.HTTPException:
             logger.exception("Could not enforce pending verification deletion for %s", after.id)
         return
+    if not link.puuid:
+        return
     leagues = _cached_rank_leagues(link)
     if leagues is not None:
         try:
-            await cog.apply_verified_roles(after, link.platform, leagues)
+            applied = await _run_active_link_role_update(
+                cog.bot,
+                link,
+                lambda: cog.apply_verified_roles(after, link.platform, leagues),
+            )
         except discord.HTTPException:
             logger.exception("Could not restore cached verification roles for %s", after.id)
         else:
+            if not applied:
+                return
             if not await _reconcile_applied_roles(cog, after, link):
                 return
             if getattr(link, "rank_role_sync_pending", False):
@@ -814,18 +910,29 @@ async def _reconcile_cached_role_change(
             )
         return
 
-    cog._managed_role_updates.add(after.id)
-    try:
+    async def restore_previous_roles() -> None:
+        cog._managed_role_updates.add(after.id)
         to_remove = after_roles - before_roles
         to_add = before_roles - after_roles
-        if to_remove:
-            await after.remove_roles(*to_remove, reason="Ochrona ról weryfikacji Riot")
-        if to_add:
-            await after.add_roles(*to_add, reason="Ochrona ról weryfikacji Riot")
+        try:
+            if to_remove:
+                await after.remove_roles(*to_remove, reason="Ochrona ról weryfikacji Riot")
+            if to_add:
+                await after.add_roles(*to_add, reason="Ochrona ról weryfikacji Riot")
+        finally:
+            cog._managed_role_updates.discard(after.id)
+
+    try:
+        applied = await _run_active_link_role_update(
+            cog.bot,
+            link,
+            restore_previous_roles,
+        )
     except discord.HTTPException:
         logger.exception("Could not restore previous verification roles for %s", after.id)
-    finally:
-        cog._managed_role_updates.discard(after.id)
+        return
+    if not applied:
+        return
     if not await _reconcile_applied_roles(cog, after, link):
         return
     await cog.bot.verifications.request_rank_refresh(
@@ -848,24 +955,28 @@ async def _remove_user_verification(
     bot: MoonPoroBot,
     interaction: discord.Interaction,
     *,
-    expected_puuid: str | None = None,
-    expected_platform: str | None = None,
-    expected_created_at: datetime | None = None,
+    identity: VerificationLinkIdentity,
 ) -> str:
     guild_id = interaction.guild_id or 0
-    link = await bot.verifications.request_verification_deletion(
+    result = await bot.verifications.request_verification_deletion_with_identity(
         guild_id,
         interaction.user.id,
-        expected_puuid=expected_puuid,
-        expected_platform=expected_platform,
-        expected_created_at=expected_created_at,
+        identity=identity,
+        policy=VerificationDeletionPolicy.USER,
     )
-    if link is None:
-        if any(
-            value is not None for value in (expected_puuid, expected_platform, expected_created_at)
-        ):
-            return _ACCOUNT_PROFILE_STALE_MESSAGE
-        return "Nie masz połączonego konta Riot."
+    if result.status in {
+        VerificationDeletionRequestStatus.LINK_CHANGED,
+        VerificationDeletionRequestStatus.NOT_LINKED,
+    }:
+        return _ACCOUNT_PROFILE_STALE_MESSAGE
+    if result.status in {
+        VerificationDeletionRequestStatus.ALREADY_REQUESTED,
+        VerificationDeletionRequestStatus.POLICY_CONFLICT,
+    }:
+        return "Usuwanie tego powiązania już trwa."
+    link = result.link
+    if result.status is not VerificationDeletionRequestStatus.REQUESTED or link is None:
+        return "Nie udało się rozpocząć usuwania. Spróbuj ponownie."
     member = interaction.user if isinstance(interaction.user, discord.Member) else None
     completed = await _process_requested_verification_deletion(
         bot,
@@ -875,6 +986,8 @@ async def _remove_user_verification(
     )
     if not completed:
         return "Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie."
+    if identity.puuid is None:
+        return "Usunięto poprzednie powiązanie. Możesz teraz ponownie połączyć konto Riot."
     return (
         "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
         "Role regionu, rangi i użytkownika pozostają bez zmian."
@@ -888,55 +1001,93 @@ async def _process_requested_verification_deletion(
     member: discord.Member | None,
     link: VerificationLink,
 ) -> bool:
-    await bot.verification_sessions.cancel_for_user(link.guild_id, link.discord_user_id)
-    if member is not None:
-        try:
-            await _remove_verified_marker(
-                bot,
-                member,
-                reason="Usunięcie weryfikacji przez użytkownika",
-            )
-        except discord.HTTPException:
-            delay = await bot.verifications.retry_verification_deletion(
-                link.guild_id,
-                link.discord_user_id,
-                expected_created_at=link.created_at,
-                base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
-            )
-            logger.exception(
-                "Could not remove Verified marker for user %s; deletion retry in %s seconds",
-                link.discord_user_id,
-                delay,
-            )
+    claimed_at = link.deletion_claimed_at
+    deletion_requested_at = link.deletion_requested_at
+    if claimed_at is None or deletion_requested_at is None:
+        return False
+    identity = VerificationLinkIdentity.from_link(link)
+    await bot.verification_sessions.cancel_for_user(
+        link.guild_id,
+        link.discord_user_id,
+        created_at_or_before=deletion_requested_at,
+    )
+
+    async def cleanup_discord() -> bool:
+        if guild is None:
+            logger.warning("Verification deletion cannot resolve its guild")
             return False
-    if guild is not None:
-        channel_id = bot.settings.zweryfikowani_channel_id
-        channel = guild.get_channel(channel_id) if channel_id else None
-        if link.message_id and isinstance(channel, discord.abc.Messageable):
+        resolved_member = member
+        if resolved_member is None:
+            try:
+                resolved_member = await guild.fetch_member(link.discord_user_id)
+            except discord.NotFound:
+                resolved_member = None
+            except discord.HTTPException:
+                return False
+        if resolved_member is not None:
+            try:
+                await _remove_roles_for_pending_deletion(
+                    bot,
+                    resolved_member,
+                    link,
+                    reason=(
+                        "Administracyjne usunięcie powiązania Riot"
+                        if link.deletion_remove_rank_region_roles
+                        else "Usunięcie weryfikacji przez użytkownika"
+                    ),
+                )
+            except discord.HTTPException:
+                return False
+
+        if link.message_id:
+            channel_id = link.audit_channel_id
+            if not channel_id:
+                logger.warning("Verification deletion is missing its audit channel id")
+                return False
+            channel: discord.abc.GuildChannel | discord.Thread | None = guild.get_channel(
+                channel_id
+            )
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except discord.NotFound:
+                    channel = None
+                except discord.HTTPException:
+                    return False
+            if channel is None:
+                return True
+            if not isinstance(channel, discord.abc.Messageable):
+                logger.warning("Verification deletion audit target is not messageable")
+                return False
             try:
                 await channel.get_partial_message(link.message_id).delete()
             except discord.NotFound:
                 pass
             except discord.HTTPException:
-                delay = await bot.verifications.retry_verification_deletion(
-                    link.guild_id,
-                    link.discord_user_id,
-                    expected_created_at=link.created_at,
-                    base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
-                )
-                logger.exception(
-                    "Could not remove verification audit for user %s; retrying in %s seconds",
-                    link.discord_user_id,
-                    delay,
-                )
                 return False
-    return await bot.verifications.finalize_verification_deletion(
+        return True
+
+    result = await bot.verifications.process_verification_deletion_with_identity(
         link.guild_id,
         link.discord_user_id,
-        expected_puuid=link.puuid or "",
-        expected_platform=link.platform,
-        expected_created_at=link.created_at,
+        identity=identity,
+        expected_claimed_at=claimed_at,
+        base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
+        operation=cleanup_discord,
     )
+    if result.status in {
+        VerificationDeletionProcessStatus.DELETED,
+        VerificationDeletionProcessStatus.ALREADY_DELETED,
+    }:
+        return True
+    if result.status is VerificationDeletionProcessStatus.RETRY_SCHEDULED:
+        logger.warning(
+            "Verification deletion retry scheduled in %s seconds",
+            result.retry_after_seconds,
+        )
+    else:
+        logger.info("Verification deletion stopped before side effects: %s", result.status)
+    return False
 
 
 async def _retry_next_verification_deletion(cog: VerificationCog) -> None:
@@ -953,24 +1104,6 @@ async def _retry_next_verification_deletion(cog: VerificationCog) -> None:
         return
     link = links[0]
     member = guild.get_member(link.discord_user_id)
-    if member is None:
-        try:
-            member = await guild.fetch_member(link.discord_user_id)
-        except discord.NotFound:
-            member = None
-        except discord.HTTPException:
-            delay = await bot.verifications.retry_verification_deletion(
-                link.guild_id,
-                link.discord_user_id,
-                expected_created_at=link.created_at,
-                base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
-            )
-            logger.exception(
-                "Could not resolve member %s for verification deletion; retrying in %s seconds",
-                link.discord_user_id,
-                delay,
-            )
-            return
     await _process_requested_verification_deletion(
         bot,
         guild=guild,
@@ -1040,14 +1173,6 @@ def _build_account_profile(
     )
 
 
-def _same_timestamp(left: datetime | None, right: datetime | None) -> bool:
-    if left is None or right is None:
-        return left is right
-    normalized_left = left.replace(tzinfo=UTC) if left.tzinfo is None else left.astimezone(UTC)
-    normalized_right = right.replace(tzinfo=UTC) if right.tzinfo is None else right.astimezone(UTC)
-    return normalized_left == normalized_right
-
-
 class AccountProfileView(discord.ui.View):
     def __init__(
         self,
@@ -1068,14 +1193,16 @@ class AccountProfileView(discord.ui.View):
         self.owner_id = owner_id
         self.presentation = presentation
         self.start_verification = start_verification
-        self.expected_puuid = link.puuid if link is not None else None
-        self.expected_platform = link.platform if link is not None else None
-        self.expected_created_at = link.created_at if link is not None else None
+        self.link_identity = VerificationLinkIdentity.from_link(link) if link is not None else None
         self._refresh_in_progress = False
 
         if presentation.state is AccountProfileState.UNVERIFIED:
             self.remove_item(self.refresh_rank)
             self.remove_item(self.remove_verification)
+        elif presentation.state is AccountProfileState.INCOMPLETE_LEGACY:
+            self.remove_item(self.verify_account)
+            self.remove_item(self.refresh_rank)
+            self.remove_verification.label = "Usuń poprzednie powiązanie"
         elif presentation.state is AccountProfileState.DELETING:
             self.clear_items()
         else:
@@ -1095,15 +1222,14 @@ class AccountProfileView(discord.ui.View):
         button.style = discord.ButtonStyle.blurple
 
     def _matches_current_link(self, link: VerificationLink | None) -> bool:
+        identity = self.link_identity
         return bool(
             link is not None
             and link.deletion_requested_at is None
-            and self.expected_puuid is not None
-            and link.puuid == self.expected_puuid
-            and self.expected_platform is not None
-            and link.platform == self.expected_platform
-            and self.expected_created_at is not None
-            and _same_timestamp(link.created_at, self.expected_created_at)
+            and identity is not None
+            and link.puuid == identity.puuid
+            and link.platform == identity.platform
+            and timestamps_match(link.created_at, identity.created_at)
         )
 
     def _new_view(
@@ -1166,7 +1292,7 @@ class AccountProfileView(discord.ui.View):
                 if link is None or not self._matches_current_link(link):
                     await self._edit_stale_profile(interaction)
                     return
-                if not _same_timestamp(
+                if not timestamps_match(
                     link.rank_last_checked_at,
                     baseline_rank_last_checked_at,
                 ):
@@ -1187,7 +1313,7 @@ class AccountProfileView(discord.ui.View):
                 await self._edit_stale_profile(interaction)
                 return
 
-            if not _same_timestamp(
+            if not timestamps_match(
                 link.rank_last_checked_at,
                 baseline_rank_last_checked_at,
             ):
@@ -1246,11 +1372,8 @@ class AccountProfileView(discord.ui.View):
         checking_cooldown = False
         try:
             await interaction.response.defer()
-            if (
-                self.expected_puuid is None
-                or self.expected_platform is None
-                or self.expected_created_at is None
-            ):
+            identity = self.link_identity
+            if identity is None or identity.puuid is None:
                 await self._edit_stale_profile(interaction)
                 return
             result = await self.bot.verifications.request_rank_refresh(
@@ -1258,9 +1381,9 @@ class AccountProfileView(discord.ui.View):
                 self.owner_id,
                 cooldown_seconds=(self.bot.settings.rank_refresh_button_cooldown_seconds),
                 source="user",
-                expected_puuid=self.expected_puuid,
-                expected_platform=self.expected_platform,
-                expected_created_at=self.expected_created_at,
+                expected_puuid=identity.puuid,
+                expected_platform=identity.platform,
+                expected_created_at=identity.created_at,
             )
             if result.status in {
                 RankRefreshRequestStatus.LINK_CHANGED,
@@ -1277,7 +1400,7 @@ class AccountProfileView(discord.ui.View):
             if link is None or not self._matches_current_link(link):
                 await self._edit_stale_profile(interaction)
                 return
-            if not _same_timestamp(
+            if not timestamps_match(
                 link.rank_last_checked_at,
                 result.baseline_rank_last_checked_at,
             ):
@@ -1352,9 +1475,7 @@ class AccountProfileView(discord.ui.View):
         await _show_delete_confirmation(
             self.bot,
             interaction,
-            expected_puuid=self.expected_puuid,
-            expected_platform=self.expected_platform,
-            expected_created_at=self.expected_created_at,
+            expected_identity=self.link_identity,
         )
 
 
@@ -1396,16 +1517,12 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         bot: MoonPoroBot,
         *,
         owner_id: int,
-        expected_puuid: str,
-        expected_platform: str,
-        expected_created_at: datetime,
+        identity: VerificationLinkIdentity,
     ) -> None:
         super().__init__(timeout=60)
         self.bot = bot
         self.owner_id = owner_id
-        self.expected_puuid = expected_puuid
-        self.expected_platform = expected_platform
-        self.expected_created_at = expected_created_at
+        self.identity = identity
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -1430,15 +1547,12 @@ class DeleteVerificationConfirmationView(discord.ui.View):
             message = await _remove_user_verification(
                 self.bot,
                 interaction,
-                expected_puuid=self.expected_puuid,
-                expected_platform=self.expected_platform,
-                expected_created_at=self.expected_created_at,
+                identity=self.identity,
             )
         except Exception:
             logger.exception("Could not remove verification for %s", self.owner_id)
             message = (
-                "Nie udało się usunąć powiązania. "
-                "Otwórz profil ponownie, aby sprawdzić aktualny stan."
+                "Nie udało się dokończyć usuwania. Sprawdź aktualny stan w sekcji „Moje konto”."
             )
         await interaction.edit_original_response(content=message, view=None)
 
@@ -1461,9 +1575,7 @@ async def _show_delete_confirmation(
     bot: MoonPoroBot,
     interaction: discord.Interaction,
     *,
-    expected_puuid: str | None = None,
-    expected_platform: str | None = None,
-    expected_created_at: datetime | None = None,
+    expected_identity: VerificationLinkIdentity | None = None,
 ) -> None:
     if interaction.guild_id != bot.settings.guild_id or not isinstance(
         interaction.user, discord.Member
@@ -1476,34 +1588,151 @@ async def _show_delete_confirmation(
     if link is None:
         await interaction.response.send_message("Nie masz połączonego konta Riot.", ephemeral=True)
         return
-    if (
-        (expected_puuid is not None and link.puuid != expected_puuid)
-        or (expected_platform is not None and link.platform != expected_platform)
-        or (expected_created_at is not None and link.created_at != expected_created_at)
+    current_identity = VerificationLinkIdentity.from_link(link)
+    if expected_identity is not None and (
+        current_identity.puuid != expected_identity.puuid
+        or current_identity.platform != expected_identity.platform
+        or not timestamps_match(current_identity.created_at, expected_identity.created_at)
     ):
         await interaction.response.send_message(
             _ACCOUNT_PROFILE_STALE_MESSAGE,
             ephemeral=True,
         )
         return
-    if link.puuid is None:
-        await interaction.response.send_message("Nie masz połączonego konta Riot.", ephemeral=True)
+    if link.deletion_requested_at is not None:
+        await interaction.response.send_message(
+            "Usuwanie tego powiązania już trwa.", ephemeral=True
+        )
         return
-    await interaction.response.send_message(
-        (
+    if link.puuid is None:
+        confirmation = (
+            "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
+            "Rola „Zweryfikowany” zostanie usunięta. "
+            "Role regionu, rangi i użytkownika pozostaną bez zmian.\n"
+            "Po usunięciu możesz ponownie połączyć konto Riot."
+        )
+    else:
+        confirmation = (
             "Czy na pewno chcesz usunąć powiązanie z kontem Riot?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
             "Role regionu, rangi i użytkownika pozostaną bez zmian."
-        ),
+        )
+    await interaction.response.send_message(
+        confirmation,
         view=DeleteVerificationConfirmationView(
             bot,
             owner_id=interaction.user.id,
-            expected_puuid=link.puuid,
-            expected_platform=link.platform,
-            expected_created_at=link.created_at,
+            identity=current_identity,
         ),
         ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
     )
+
+
+class AdminDeleteVerificationConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MoonPoroBot,
+        *,
+        owner_id: int,
+        guild_id: int,
+        target_user_id: int,
+        identity: VerificationLinkIdentity,
+        reason: str,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.target_user_id = target_user_id
+        self.identity = identity
+        self.reason = reason
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Nie możesz potwierdzić operacji rozpoczętej przez inną osobę.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id or not is_administrator(interaction):
+            await interaction.response.send_message(
+                "Nie masz już uprawnień do wykonania tej operacji.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Tak, usuń powiązanie",
+        style=discord.ButtonStyle.red,
+        custom_id="verification:admin-delete:confirm:v1",
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[AdminDeleteVerificationConfirmationView],
+    ) -> None:
+        await interaction.response.edit_message(content="Usuwanie powiązania…", view=None)
+        try:
+            result = await self.bot.verifications.request_verification_deletion_with_identity(
+                self.guild_id,
+                self.target_user_id,
+                identity=self.identity,
+                policy=VerificationDeletionPolicy.ADMIN,
+                access_log=VerificationDeletionAccessLog(
+                    actor_id=self.owner_id,
+                    reason=f"Usunięcie powiązania: {self.reason}",
+                ),
+            )
+            if result.status in {
+                VerificationDeletionRequestStatus.LINK_CHANGED,
+                VerificationDeletionRequestStatus.NOT_LINKED,
+            }:
+                message = "Powiązanie zmieniło się. Uruchom komendę ponownie."
+            elif result.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED:
+                message = "Usuwanie tego powiązania już trwa."
+            elif result.status is VerificationDeletionRequestStatus.POLICY_CONFLICT:
+                message = (
+                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
+                )
+            elif result.link is None:
+                message = "Nie udało się rozpocząć usuwania. Spróbuj ponownie."
+            else:
+                guild = interaction.guild
+                if guild is None:
+                    guild = self.bot.get_guild(self.guild_id)
+                member = guild.get_member(self.target_user_id) if guild is not None else None
+                completed = await _process_requested_verification_deletion(
+                    self.bot,
+                    guild=guild,
+                    member=member,
+                    link=result.link,
+                )
+                message = (
+                    "Usunięto powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi. "
+                    "Rola „Użytkownik” pozostała bez zmian."
+                    if completed
+                    else "Usuwanie powiązania jeszcze trwa. Bot dokończy je automatycznie."
+                )
+        except Exception:
+            logger.exception("Could not complete administrative verification deletion")
+            message = "Nie udało się dokończyć usuwania. Spróbuj ponownie później."
+        await interaction.edit_original_response(content=message, view=None)
+
+    @discord.ui.button(
+        label="Anuluj",
+        style=discord.ButtonStyle.secondary,
+        custom_id="verification:admin-delete:cancel:v1",
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button[AdminDeleteVerificationConfirmationView],
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Powiązanie nie zostało usunięte.", view=None
+        )
 
 
 class VerificationStartView(discord.ui.View):
@@ -1556,6 +1785,12 @@ class VerificationStartView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+                ephemeral=True,
+            )
+            return
+        if existing_link is not None and not getattr(existing_link, "puuid", None):
+            await interaction.response.send_message(
+                "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
                 ephemeral=True,
             )
             return
@@ -1689,7 +1924,9 @@ class VerificationCog(commands.Cog):
                 await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
 
     async def _complete_rso_verification(self, record: VerificationSession) -> None:
-        if record.platform is None or record.puuid is None:
+        platform = record.platform
+        puuid = record.puuid
+        if platform is None or puuid is None:
             await self.bot.verification_sessions.fail_discord(record.id, "INCOMPLETE_RSO_DATA")
             return
         guild = self.bot.get_guild(record.guild_id)
@@ -1729,13 +1966,17 @@ class VerificationCog(commands.Cog):
                 role_leagues = cached
                 checked_at = cached_checked_at
             else:
-                leagues = await _get_leagues(self.bot, record.platform, record.puuid)
+                leagues = await _get_leagues(self.bot, platform, puuid)
                 recorded = await _record_leagues(self.bot, link, leagues)
                 if recorded is None:
                     await self._retry_rso_completion(record, "VERIFICATION_LINK_MISSING")
                     return
                 role_leagues, checked_at = recorded
-            await self.apply_verified_roles(member, record.platform, role_leagues)
+            applied = await _run_active_link_role_update(
+                self.bot,
+                link,
+                lambda: self.apply_verified_roles(member, platform, role_leagues),
+            )
         except RiotAPIUnavailable:
             await self._retry_rso_completion(record, "RIOT_API_UNAVAILABLE")
             return
@@ -1750,6 +1991,11 @@ class VerificationCog(commands.Cog):
                 expected_created_at=link.created_at,
             )
             await self._retry_rso_completion(record, "DISCORD_ROLES_UNAVAILABLE")
+            return
+        if not applied:
+            await self.bot.verification_sessions.fail_discord(
+                record.id, "VERIFICATION_LINK_CHANGED"
+            )
             return
         if not await _reconcile_applied_roles(self, member, link):
             await self.bot.verification_sessions.fail_discord(
@@ -2057,31 +2303,45 @@ class VerificationCog(commands.Cog):
         await self.bot.verifications.log_access(
             guild_id=interaction.guild_id or 0,
             actor_id=interaction.user.id,
-            reason=f"Usunięcie powiązania: {powod}",
+            reason=f"Sprawdzenie przed usunięciem: {powod}",
             discord_user_id=link.discord_user_id if link else None,
             puuid=account["puuid"],
         )
-        removed = await self.bot.verifications.delete_by_puuid(
-            interaction.guild_id or 0, account["puuid"]
-        )
-        if removed is None:
+        if link is None:
             await interaction.followup.send("To konto nie było powiązane.", ephemeral=True)
             return
-        await self.bot.verification_sessions.cancel_for_user(
-            interaction.guild_id or 0, removed.discord_user_id
-        )
-        if interaction.guild is not None:
-            member = interaction.guild.get_member(removed.discord_user_id)
-            if member:
-                await _remove_verified_roles(
-                    self.bot, member, reason=f"Administracyjne usunięcie: {powod}"
+        if link.deletion_requested_at is not None:
+            if link.deletion_remove_rank_region_roles:
+                message = "Usuwanie tego powiązania już trwa."
+            else:
+                message = (
+                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
                 )
-            channel_id = self.bot.settings.zweryfikowani_channel_id
-            channel = interaction.guild.get_channel(channel_id) if channel_id else None
-            if removed.message_id and isinstance(channel, discord.abc.Messageable):
-                with suppress(discord.NotFound):
-                    await channel.get_partial_message(removed.message_id).delete()
-        await interaction.followup.send("Usunięto powiązanie i zapisano operację.", ephemeral=True)
+            await interaction.followup.send(message, ephemeral=True)
+            return
+
+        riot_id = discord.utils.escape_markdown(f"{account['gameName']}#{account['tagLine']}")
+        region = SERVER_TRANSLATION.get(link.platform, link.platform)
+        await interaction.followup.send(
+            (
+                "Usunąć powiązanie?\n\n"
+                f"Discord: <@{link.discord_user_id}> (`{link.discord_user_id}`)\n"
+                f"Riot ID: **{riot_id}**\n"
+                f"Region: **{region}**\n\n"
+                "Bot usunie powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi.\n"
+                "Rola „Użytkownik” pozostanie bez zmian."
+            ),
+            view=AdminDeleteVerificationConfirmationView(
+                self.bot,
+                owner_id=interaction.user.id,
+                guild_id=interaction.guild_id or 0,
+                target_user_id=link.discord_user_id,
+                identity=VerificationLinkIdentity.from_link(link),
+                reason=powod,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot: MoonPoroBot) -> None:

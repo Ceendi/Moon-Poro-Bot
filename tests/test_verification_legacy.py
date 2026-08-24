@@ -27,6 +27,28 @@ class FakeRole:
         self.name = name
 
 
+async def _run_guarded_discord_operation(
+    *_args: object,
+    operation: Callable[[], Awaitable[None]],
+    **_kwargs: object,
+) -> bool:
+    await operation()
+    return True
+
+
+def _guarded_verifications(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "run_verification_role_update_with_identity": AsyncMock(
+            side_effect=_run_guarded_discord_operation
+        ),
+        "run_verification_deletion_role_cleanup_with_identity": AsyncMock(
+            side_effect=_run_guarded_discord_operation
+        ),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _modal_bot() -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(
@@ -165,6 +187,33 @@ async def test_legacy_start_explains_pending_deletion(
     interaction.response.send_modal.assert_not_awaited()
 
 
+async def test_legacy_start_explains_incomplete_previous_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMember:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    incomplete_link = SimpleNamespace(puuid=None, deletion_requested_at=None)
+    bot = _modal_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=incomplete_link))
+    view = LegacyVerificationStartView(bot, _rate_limiter())
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+    )
+
+    await view.begin_verification(interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
+        ephemeral=True,
+    )
+    interaction.response.send_modal.assert_not_awaited()
+
+
 async def test_retry_view_reopens_prefilled_modal() -> None:
     view = LegacyVerificationRetryView(
         _modal_bot(),
@@ -181,6 +230,7 @@ async def test_retry_view_reopens_prefilled_modal() -> None:
 
     await view.children[0].callback(interaction)
 
+    assert view.children[0].emoji is None
     modal = interaction.response.send_modal.await_args.args[0]
     assert isinstance(modal, LegacyVerificationModal)
     assert modal.game_name.default == "Moon Poro"
@@ -344,14 +394,17 @@ async def test_member_join_restores_cached_verified_roles_without_riot_lookup() 
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="account-puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         last_known_rank="EMERALD",
         rank_last_checked_at=datetime.now(UTC),
     )
     bot = SimpleNamespace(
         settings=SimpleNamespace(guild_id=123),
-        verifications=SimpleNamespace(
+        verifications=_guarded_verifications(
             get_by_user=AsyncMock(return_value=link),
             schedule_rank_refresh_now=AsyncMock(),
         ),
@@ -383,12 +436,15 @@ async def test_member_rejoin_restores_cache_and_refreshes_when_snapshot_is_stale
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="account-puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         last_known_rank="EMERALD",
         rank_last_checked_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
         get_by_user=AsyncMock(return_value=link),
         schedule_rank_refresh_now=AsyncMock(),
     )
@@ -412,16 +468,20 @@ async def test_member_join_does_not_restore_roles_for_pending_delete(
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="account-puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=False,
     )
     remove_marker = AsyncMock()
     monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = SimpleNamespace(
         settings=SimpleNamespace(guild_id=123),
-        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=link)),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
     )
     cog._managed_role_updates = set()
     cog.apply_verified_roles = AsyncMock()
@@ -436,12 +496,85 @@ async def test_member_join_does_not_restore_roles_for_pending_delete(
     )
 
 
+async def test_member_join_cleans_pending_delete_without_legacy_puuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=123)
+    member = SimpleNamespace(id=101, guild=guild)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid=None,
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=False,
+    )
+    remove_marker = AsyncMock()
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(
+        settings=SimpleNamespace(guild_id=123),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
+    )
+    cog._managed_role_updates = set()
+    cog.apply_verified_roles = AsyncMock()
+
+    await cog.on_member_join(member)
+
+    cog.apply_verified_roles.assert_not_awaited()
+    remove_marker.assert_awaited_once_with(
+        cog.bot,
+        member,
+        reason="Dokończenie usuwania weryfikacji Riot",
+    )
+
+
+async def test_member_join_removes_all_verification_roles_for_pending_admin_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=123)
+    member = SimpleNamespace(id=101, guild=guild)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="account-puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=True,
+    )
+    remove_roles = AsyncMock()
+    remove_marker = AsyncMock()
+    monkeypatch.setattr(verification, "_remove_verified_roles", remove_roles)
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(
+        settings=SimpleNamespace(guild_id=123),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
+    )
+    cog._managed_role_updates = set()
+    cog.apply_verified_roles = AsyncMock()
+
+    await cog.on_member_join(member)
+
+    cog.apply_verified_roles.assert_not_awaited()
+    remove_roles.assert_awaited_once_with(
+        cog.bot,
+        member,
+        reason="Dokończenie usuwania weryfikacji Riot",
+    )
+    remove_marker.assert_not_awaited()
+
+
 async def test_member_join_compensates_when_delete_wins_during_cached_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="account-puuid",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
@@ -454,7 +587,7 @@ async def test_member_join_compensates_when_delete_wins_during_cached_apply(
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = SimpleNamespace(
         settings=SimpleNamespace(guild_id=123),
-        verifications=SimpleNamespace(
+        verifications=_guarded_verifications(
             get_by_user=AsyncMock(side_effect=[link, None, None]),
             schedule_rank_refresh_now=AsyncMock(),
             enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
@@ -526,7 +659,7 @@ async def test_remove_own_verification_deletes_link_and_audit_only(
     guild = SimpleNamespace(get_channel=Mock(return_value=channel))
     response = SimpleNamespace(send_message=AsyncMock())
     interaction = SimpleNamespace(guild_id=123, user=member, guild=guild, response=response)
-    link = SimpleNamespace(message_id=456)
+    link = SimpleNamespace(message_id=456, audit_channel_id=789)
     bot = SimpleNamespace(
         settings=SimpleNamespace(zweryfikowani_channel_id=789),
         verifications=SimpleNamespace(delete_by_user=AsyncMock(return_value=link)),
@@ -582,6 +715,7 @@ async def test_icon_confirmation_explains_pending_deletion(
         followup=SimpleNamespace(send=AsyncMock()),
     )
 
+    assert view.children[0].emoji is None
     await view.children[0].callback(interaction)
 
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
@@ -618,7 +752,7 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
         created_at=created_at,
         rank_last_checked_at=checked_at,
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
         get_by_user=AsyncMock(return_value=None),
         get_by_puuid=AsyncMock(return_value=None),
         create=AsyncMock(return_value=link),
@@ -674,6 +808,7 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
 
     verifications.create.assert_awaited_once()
     assert verifications.create.await_args.kwargs["rank_snapshot"] == RankSnapshot("EMERALD")
+    assert verifications.create.await_args.kwargs["audit_channel_id"] == 789
     assert verifications.create.await_args.kwargs["riot_game_name"] == "Moon"
     assert verifications.create.await_args.kwargs["riot_tag_line"] == "EUNE"
     verifications.retry_rank_role_sync.assert_awaited_once_with(
@@ -697,8 +832,11 @@ async def test_manual_rank_change_is_reconciled_from_cached_rank() -> None:
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald, verified])
     after = SimpleNamespace(id=101, guild=guild, roles=[emerald, iron, verified])
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         last_known_rank="EMERALD",
         rank_last_checked_at=datetime.now(UTC),
     )
@@ -713,7 +851,7 @@ async def test_manual_rank_change_is_reconciled_from_cached_rank() -> None:
     )
     bot = SimpleNamespace(
         settings=settings,
-        verifications=SimpleNamespace(
+        verifications=_guarded_verifications(
             get_by_user=AsyncMock(return_value=link),
             request_rank_refresh=AsyncMock(),
         ),
@@ -750,9 +888,13 @@ async def test_member_update_does_not_restore_roles_for_pending_delete(
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=False,
     )
     remove_marker = AsyncMock()
     monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
@@ -766,7 +908,7 @@ async def test_member_update_does_not_restore_roles_for_pending_delete(
             member_role_name="Użytkownik",
             role_ids={},
         ),
-        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=link)),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
     )
     cog._managed_role_updates = set()
     cog.apply_verified_roles = AsyncMock()
@@ -781,6 +923,97 @@ async def test_member_update_does_not_restore_roles_for_pending_delete(
     )
 
 
+async def test_member_update_cleans_pending_delete_without_legacy_puuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emerald = FakeRole(1, "Emerald")
+    iron = FakeRole(2, "Iron")
+    guild = SimpleNamespace(id=123)
+    before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
+    after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid=None,
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=False,
+    )
+    remove_marker = AsyncMock()
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            lol_ranks=["Iron", "Emerald"],
+            lol_servers=["EUNE"],
+            verified_role_name="Zweryfikowany",
+            member_role_name="Użytkownik",
+            role_ids={},
+        ),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
+    )
+    cog._managed_role_updates = set()
+    cog.apply_verified_roles = AsyncMock()
+
+    await cog.on_member_update(before, after)
+
+    cog.apply_verified_roles.assert_not_awaited()
+    remove_marker.assert_awaited_once_with(
+        cog.bot,
+        after,
+        reason="Dokończenie usuwania weryfikacji Riot",
+    )
+
+
+async def test_member_update_removes_all_verification_roles_for_pending_admin_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emerald = FakeRole(1, "Emerald")
+    iron = FakeRole(2, "Iron")
+    guild = SimpleNamespace(id=123)
+    before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
+    after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        deletion_requested_at=datetime.now(UTC),
+        deletion_remove_rank_region_roles=True,
+    )
+    remove_roles = AsyncMock()
+    remove_marker = AsyncMock()
+    monkeypatch.setattr(verification, "_remove_verified_roles", remove_roles)
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            lol_ranks=["Iron", "Emerald"],
+            lol_servers=["EUNE"],
+            verified_role_name="Zweryfikowany",
+            member_role_name="Użytkownik",
+            role_ids={},
+        ),
+        verifications=_guarded_verifications(get_by_user=AsyncMock(return_value=link)),
+    )
+    cog._managed_role_updates = set()
+    cog.apply_verified_roles = AsyncMock()
+
+    await cog.on_member_update(before, after)
+
+    cog.apply_verified_roles.assert_not_awaited()
+    remove_roles.assert_awaited_once_with(
+        cog.bot,
+        after,
+        reason="Dokończenie usuwania weryfikacji Riot",
+    )
+    remove_marker.assert_not_awaited()
+
+
 async def test_member_update_compensates_when_delete_wins_during_cached_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -790,6 +1023,8 @@ async def test_member_update_compensates_when_delete_wins_during_cached_apply(
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
         created_at=datetime(2026, 8, 14, tzinfo=UTC),
@@ -810,7 +1045,7 @@ async def test_member_update_compensates_when_delete_wins_during_cached_apply(
             rank_refresh_manual_priority_cooldown_seconds=3600,
             role_ids={},
         ),
-        verifications=SimpleNamespace(
+        verifications=_guarded_verifications(
             get_by_user=AsyncMock(side_effect=[link, None, None]),
             request_rank_refresh=AsyncMock(),
             enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
@@ -839,8 +1074,11 @@ async def test_manual_rank_change_prioritizes_stale_cache_with_durable_cooldown(
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[emerald, iron])
     link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
         platform="EUN1",
         puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
         last_known_rank="EMERALD",
         rank_last_checked_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
@@ -853,7 +1091,7 @@ async def test_manual_rank_change_prioritizes_stale_cache_with_durable_cooldown(
         role_ids={},
         rank_refresh_manual_priority_cooldown_seconds=3600,
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
         get_by_user=AsyncMock(return_value=link),
         request_rank_refresh=AsyncMock(),
     )
@@ -887,7 +1125,14 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
         remove_roles=AsyncMock(),
         add_roles=AsyncMock(),
     )
-    link = SimpleNamespace(platform="EUN1", puuid="puuid", last_known_rank=None)
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        last_known_rank=None,
+    )
     settings = SimpleNamespace(
         guild_id=123,
         lol_ranks=["Iron", "Emerald"],
@@ -897,7 +1142,7 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
         rank_refresh_manual_priority_cooldown_seconds=3600,
         role_ids={},
     )
-    verifications = SimpleNamespace(
+    verifications = _guarded_verifications(
         get_by_user=AsyncMock(return_value=link),
         request_rank_refresh=AsyncMock(),
     )

@@ -58,7 +58,17 @@ After a pull request has passed CI and been merged into `master`, deploy it with
 sudo /usr/local/sbin/deploy-moon-poro-prod
 ```
 
-The deployment refuses local tracked changes and non-fast-forward updates. Before changing code it
+Before the first deployment containing migration `20260824_0007`, confirm the single Discord
+channel that contains all existing verification audit messages and add its ID to
+`/etc/moon-poro/prod-bot.env` as `LEGACY_AUDIT_CHANNEL_ID`. Do not infer it from the current
+`ZWERYFIKOWANI_CHANNEL_ID` if the channel may have changed. If historical messages span multiple
+channels, stop and prepare a verified per-record backfill first. This setting lets the bot's startup
+migration work safely even while the older installed deployment helper is completing that first
+update. Afterward, reinstall `deploy/install-prod-automation.sh` once so future deployments run
+migrations before restarting the service.
+
+The deployment refuses local tracked changes and non-fast-forward updates. It records the last
+successfully started commit and safely resumes an interrupted deployment. Before changing code it
 creates a custom-format dump of `moon_poro_prod`, verifies it with `pg_restore --list`, and writes a
 SHA-256 checksum. Daily backups use the same procedure through
 `moon-poro-prod-backup.timer`. Daily backup pairs remain for 90 days in

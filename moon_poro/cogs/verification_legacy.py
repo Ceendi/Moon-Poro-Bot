@@ -27,6 +27,7 @@ from moon_poro.cogs.verification import (
     _remove_verified_marker,
     _request_rank_refresh_from_panel,
     _restore_cached_roles_on_join,
+    _run_active_link_role_update,
     _show_account_profile,
     _show_delete_confirmation,
 )
@@ -190,6 +191,12 @@ class LegacyVerificationStartView(discord.ui.View):
         ):
             await interaction.response.send_message(
                 "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
+                ephemeral=True,
+            )
+            return
+        if existing_link is not None and not getattr(existing_link, "puuid", None):
+            await interaction.response.send_message(
+                "Otwórz „Moje konto” i usuń poprzednie powiązanie.",
                 ephemeral=True,
             )
             return
@@ -477,7 +484,7 @@ class LegacyVerificationRetryView(discord.ui.View):
         )
         return False
 
-    @discord.ui.button(label="Popraw dane", emoji="✏️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Popraw dane", style=discord.ButtonStyle.secondary)
     async def retry(
         self,
         interaction: discord.Interaction,
@@ -525,7 +532,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         )
         return False
 
-    @discord.ui.button(label="Sprawdź ikonę", emoji="🔎", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Sprawdź ikonę", style=discord.ButtonStyle.green)
     async def confirm(
         self,
         interaction: discord.Interaction,
@@ -540,6 +547,7 @@ class LegacyIconConfirmationView(discord.ui.View):
                 "Weryfikację możesz dokończyć tylko na serwerze Moon Poro.", ephemeral=True
             )
             return
+        member = interaction.user
         retry_after = self.rate_limiter.update_rate_limit(
             "icon",
             interaction.user.id,
@@ -627,6 +635,7 @@ class LegacyIconConfirmationView(discord.ui.View):
                 guild_id=interaction.guild_id,
                 user_id=self.owner_id,
                 message_id=audit_message.id,
+                audit_channel_id=channel_id,
                 platform=self.platform,
                 puuid=self.puuid,
                 method="PROFILE_ICON",
@@ -647,11 +656,15 @@ class LegacyIconConfirmationView(discord.ui.View):
             return
 
         cog = self.bot.get_cog("LegacyVerificationCog")
-        try:
+
+        async def apply_roles() -> None:
             if isinstance(cog, LegacyVerificationCog):
-                await cog.apply_verified_roles(interaction.user, self.platform, leagues)
+                await cog.apply_verified_roles(member, self.platform, leagues)
             else:
-                await _apply_verified_roles(self.bot, interaction.user, self.platform, leagues)
+                await _apply_verified_roles(self.bot, member, self.platform, leagues)
+
+        try:
+            applied = await _run_active_link_role_update(self.bot, link, apply_roles)
         except discord.HTTPException:
             await self.bot.verifications.retry_rank_role_sync(
                 interaction.guild_id,
@@ -670,7 +683,15 @@ class LegacyIconConfirmationView(discord.ui.View):
             with suppress(discord.HTTPException):
                 await interaction.edit_original_response(view=self)
             await interaction.followup.send(
-                "✅ Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
+                "Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
+                ephemeral=True,
+            )
+            return
+
+        if not applied:
+            await interaction.followup.send(
+                "Powiązanie konta zmieniło się podczas weryfikacji. "
+                "Otwórz „Moje konto”, aby zobaczyć aktualny stan.",
                 ephemeral=True,
             )
             return
@@ -706,7 +727,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         if not current:
             await interaction.followup.send(
                 "Powiązanie konta zmieniło się podczas weryfikacji. "
-                "Otwórz profil ponownie, aby zobaczyć aktualny stan.",
+                "Otwórz „Moje konto”, aby zobaczyć aktualny stan.",
                 ephemeral=True,
             )
             return
@@ -722,7 +743,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         button.disabled = True
         with suppress(discord.HTTPException):
             await interaction.edit_original_response(view=self)
-        await interaction.followup.send("✅ Konto Riot zostało zweryfikowane.", ephemeral=True)
+        await interaction.followup.send("Konto Riot zostało zweryfikowane.", ephemeral=True)
 
 
 class LegacyVerificationCog(VerificationCog):

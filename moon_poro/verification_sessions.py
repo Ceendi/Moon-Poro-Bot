@@ -353,6 +353,7 @@ class VerificationSessionRepository:
             link = cast(VerificationLink, link)
             if message_id is not None:
                 link.message_id = message_id
+                link.audit_channel_id = channel_id
             record.status = VerificationSessionStatus.COMPLETED.value
             record.error_code = None
             record.updated_at = now
@@ -472,8 +473,15 @@ class VerificationSessionRepository:
             record.updated_at = now
             record.completed_at = now
 
-    async def cancel_for_user(self, guild_id: int, user_id: int) -> None:
+    async def cancel_for_user(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        created_at_or_before: datetime,
+    ) -> None:
         now = datetime.now(UTC)
+        cutoff = as_utc(created_at_or_before)
         async with self._sessions.begin() as session:
             await session.execute(
                 update(VerificationSession)
@@ -481,6 +489,7 @@ class VerificationSessionRepository:
                     VerificationSession.guild_id == guild_id,
                     VerificationSession.discord_user_id == user_id,
                     VerificationSession.status.in_(ACTIVE_SESSION_STATUSES),
+                    VerificationSession.created_at <= cutoff,
                 )
                 .values(
                     status=VerificationSessionStatus.CANCELLED.value,
