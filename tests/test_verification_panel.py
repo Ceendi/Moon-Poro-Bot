@@ -56,7 +56,7 @@ def _panel_bot() -> SimpleNamespace:
             rank_refresh_button_cooldown_seconds=1800,
             rank_refresh_claim_timeout_seconds=300,
             privacy_policy_url="https://moonporo.pl/privacy/",
-            rso_base_url="https://moonporo.pl",
+            terms_of_service_url="https://moonporo.pl/terms/",
         ),
         riot_auth_breaker=SimpleNamespace(
             snapshot=Mock(return_value=SimpleNamespace(blocked=False))
@@ -145,9 +145,12 @@ def test_rso_and_legacy_views_are_persistent_and_keep_old_start_ids() -> None:
 
 
 def test_verification_legal_links_fall_back_to_the_public_site() -> None:
-    bot = _panel_bot()
-    bot.settings.privacy_policy_url = None
-    bot.settings.rso_base_url = "https://moonporo.pl/"
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            privacy_policy_url=None,
+            terms_of_service_url=None,
+        )
+    )
 
     assert _verification_legal_links(bot) == (
         "[Polityka prywatności](https://moonporo.pl/privacy/) · "

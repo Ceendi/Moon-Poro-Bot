@@ -76,6 +76,8 @@ _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
     "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać."
 )
+_DEFAULT_PRIVACY_POLICY_URL = "https://moonporo.pl/privacy/"
+_DEFAULT_TERMS_OF_SERVICE_URL = "https://moonporo.pl/terms/"
 
 
 def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
@@ -89,9 +91,9 @@ def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
 
 
 def _verification_legal_links(bot: MoonPoroBot) -> str:
-    base_url = str(bot.settings.rso_base_url).rstrip("/")
-    privacy_url = str(bot.settings.privacy_policy_url or f"{base_url}/privacy/")
-    return f"[Polityka prywatności]({privacy_url}) · [Warunki korzystania]({base_url}/terms/)"
+    privacy_url = str(bot.settings.privacy_policy_url or _DEFAULT_PRIVACY_POLICY_URL)
+    terms_url = str(bot.settings.terms_of_service_url or _DEFAULT_TERMS_OF_SERVICE_URL)
+    return f"[Polityka prywatności]({privacy_url}) · [Warunki korzystania]({terms_url})"
 
 
 def _lookup_reason_choices() -> list[Choice[str]]:

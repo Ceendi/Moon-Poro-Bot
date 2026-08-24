@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     verification_access_log_retention_days: int = Field(default=90, ge=30, le=3650)
     verification_session_retention_days: int = Field(default=7, ge=1, le=30)
     privacy_policy_url: AnyHttpUrl | None = None
+    terms_of_service_url: AnyHttpUrl | None = None
     rso_public_base_url: AnyHttpUrl | None = None
     rso_session_ttl_seconds: int = Field(default=600, ge=180, le=1800)
     rso_completion_interval_seconds: int = Field(default=3, ge=1, le=30)
