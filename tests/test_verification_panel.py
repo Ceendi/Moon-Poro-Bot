@@ -499,7 +499,7 @@ async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
     assert timeout_embed.description is None
     assert timeout_embed.fields[-1].name == "Stan odświeżania"
     assert timeout_embed.fields[-1].value == (
-        "Odświeżanie trwa dłużej niż zwykle.\nOtwórz `/profil` ponownie za chwilę."
+        "Odświeżanie trwa dłużej niż zwykle.\nSprawdź profil ponownie za chwilę."
     )
     assert timeout_kwargs["view"].children[0].disabled is True
     assert timeout_kwargs["view"].children[0].label == "W kolejce…"
@@ -662,7 +662,7 @@ async def test_stale_profile_refresh_does_not_render_the_new_link(
 
     bot.verifications.get_by_user.assert_not_awaited()
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
+        content="Ten widok jest już nieaktualny. Otwórz profil ponownie.",
         embed=None,
         view=None,
     )
@@ -718,7 +718,7 @@ async def test_profile_refresh_stops_if_link_changes_while_watching(
     await refresh.callback(interaction)
 
     assert interaction.edit_original_response.await_args.kwargs == {
-        "content": "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
+        "content": "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
         "embed": None,
         "view": None,
     }
@@ -769,6 +769,7 @@ async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
     interaction = SimpleNamespace(
         guild_id=123,
         response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         edit_original_response=AsyncMock(),
     )
 
@@ -777,16 +778,13 @@ async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
     )
     await refresh.callback(interaction)
 
-    interaction.edit_original_response.assert_awaited_once()
-    error_kwargs = interaction.edit_original_response.await_args.kwargs
-    assert error_kwargs["content"] is None
-    assert error_kwargs["embed"].description is None
-    assert error_kwargs["embed"].fields[-1].name == "Stan odświeżania"
-    assert error_kwargs["embed"].fields[-1].value == (
-        "Nie udało się rozpocząć odświeżania.\nSpróbuj ponownie."
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "Nie udało się rozpocząć odświeżania. Spróbuj ponownie.",
+        ephemeral=True,
     )
-    assert "internal" not in error_kwargs["embed"].fields[-1].value
-    assert error_kwargs["view"] is view
+    assert all(field.name != "Stan odświeżania" for field in view.presentation.embed.fields)
+    assert "internal" not in interaction.followup.send.await_args.args[0]
     assert refresh.label == "Odśwież rangę"
     assert refresh.disabled is False
     assert view._refresh_in_progress is False
@@ -997,15 +995,16 @@ async def test_profile_cooldown_lookup_failure_restores_the_active_button() -> N
     )
     await refresh.callback(interaction)
 
-    rendered = interaction.edit_original_response.await_args.kwargs
-    assert rendered["embed"].fields[-1].value == (
-        "Nie udało się sprawdzić możliwości odświeżenia.\nSpróbuj ponownie."
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "Nie udało się sprawdzić możliwości odświeżenia. Spróbuj ponownie.",
+        ephemeral=True,
     )
-    assert "database" not in rendered["embed"].fields[-1].value
+    assert all(field.name != "Stan odświeżania" for field in view.presentation.embed.fields)
+    assert "database" not in interaction.followup.send.await_args.args[0]
     assert refresh.label == "Odśwież rangę"
     assert refresh.disabled is False
     assert view._refresh_in_progress is False
-    interaction.followup.send.assert_not_awaited()
 
 
 async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> None:
@@ -1046,7 +1045,7 @@ async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> N
     assert observer_embed.fields[-1].value == (
         "Nie udało się pokazać wyniku odświeżania.\n"
         "Odświeżanie może nadal trwać.\n"
-        "Otwórz `/profil` ponownie za chwilę."
+        "Sprawdź profil ponownie za chwilę."
     )
     assert "database" not in observer_embed.fields[-1].value
     assert kwargs["view"] is view
@@ -1209,7 +1208,7 @@ async def test_delete_rejects_a_profile_for_an_old_link(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie.",
+        "Ten widok jest już nieaktualny. Otwórz profil ponownie.",
         ephemeral=True,
     )
 
@@ -1294,7 +1293,9 @@ async def test_delete_confirmation_hides_unexpected_internal_failure(
         content="Usuwanie powiązania…", view=None
     )
     interaction.edit_original_response.assert_awaited_once_with(
-        content=("Nie udało się usunąć powiązania. Otwórz `/profil`, aby sprawdzić aktualny stan."),
+        content=(
+            "Nie udało się usunąć powiązania. Otwórz profil ponownie, aby sprawdzić aktualny stan."
+        ),
         view=None,
     )
 

@@ -60,14 +60,14 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
         RankRefreshRequestStatus.ALREADY_CLAIMED,
     }
 )
-_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie."
+_ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz profil ponownie."
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie trwa dłużej niż zwykle.\nOtwórz `/profil` ponownie za chwilę."
+    "Odświeżanie trwa dłużej niż zwykle.\nSprawdź profil ponownie za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
     "Nie udało się pokazać wyniku odświeżania.\n"
     "Odświeżanie może nadal trwać.\n"
-    "Otwórz `/profil` ponownie za chwilę."
+    "Sprawdź profil ponownie za chwilę."
 )
 
 
@@ -1004,7 +1004,7 @@ async def _request_rank_refresh_from_panel(
             "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
         ),
         RankRefreshRequestStatus.LINK_CHANGED: (
-            "Dane konta zmieniły się. Otwórz `/profil`, aby zobaczyć aktualny stan."
+            "Dane konta zmieniły się. Otwórz profil ponownie, aby zobaczyć aktualny stan."
         ),
         RankRefreshRequestStatus.NOT_LINKED: (
             "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
@@ -1330,18 +1330,13 @@ class AccountProfileView(discord.ui.View):
                 )
                 return
             self._restore_refresh_button(button)
-            set_account_profile_status(
-                self.presentation.embed,
+            await interaction.followup.send(
                 (
-                    "Nie udało się sprawdzić możliwości odświeżenia.\nSpróbuj ponownie."
+                    "Nie udało się sprawdzić możliwości odświeżenia. Spróbuj ponownie."
                     if checking_cooldown
-                    else "Nie udało się rozpocząć odświeżania.\nSpróbuj ponownie."
+                    else "Nie udało się rozpocząć odświeżania. Spróbuj ponownie."
                 ),
-            )
-            await interaction.edit_original_response(
-                content=None,
-                embed=self.presentation.embed,
-                view=self,
+                ephemeral=True,
             )
 
     @discord.ui.button(
@@ -1442,7 +1437,8 @@ class DeleteVerificationConfirmationView(discord.ui.View):
         except Exception:
             logger.exception("Could not remove verification for %s", self.owner_id)
             message = (
-                "Nie udało się usunąć powiązania. Otwórz `/profil`, aby sprawdzić aktualny stan."
+                "Nie udało się usunąć powiązania. "
+                "Otwórz profil ponownie, aby sprawdzić aktualny stan."
             )
         await interaction.edit_original_response(content=message, view=None)
 

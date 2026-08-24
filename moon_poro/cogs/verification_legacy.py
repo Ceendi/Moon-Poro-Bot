@@ -706,7 +706,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         if not current:
             await interaction.followup.send(
                 "Powiązanie konta zmieniło się podczas weryfikacji. "
-                "Otwórz `/profil`, aby zobaczyć aktualny stan.",
+                "Otwórz profil ponownie, aby zobaczyć aktualny stan.",
                 ephemeral=True,
             )
             return
