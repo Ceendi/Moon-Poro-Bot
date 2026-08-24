@@ -66,24 +66,24 @@ cleanup_partial() {
     rm -f -- "$partial_path"
 }
 
-prune_expired_daily_backups() {
+prune_expired_backups() {
+    local backup_dir="$1"
     local old_dump old_name old_checksum
 
     while IFS= read -r -d '' old_dump; do
         old_name="${old_dump##*/}"
         if [[ ! "$old_name" =~ $BACKUP_NAME_PATTERN ]]; then
-            echo "Skipping unexpected daily backup name: $old_name" >&2
+            echo "Skipping unexpected backup name: $old_name" >&2
             continue
         fi
         old_checksum="${old_dump}.sha256"
-        if [[ ! -f "$old_checksum" ]]; then
-            echo "Skipping daily backup without checksum: $old_name" >&2
-            continue
+        rm -- "$old_dump"
+        if [[ -f "$old_checksum" ]]; then
+            rm -- "$old_checksum"
         fi
-        rm -- "$old_dump" "$old_checksum"
-        echo "Removed expired daily backup pair: $old_name"
+        echo "Removed expired backup: $old_name"
     done < <(
-        find "$BACKUP_DIR" -maxdepth 1 -type f -name "${DATABASE}-*.dump" \
+        find "$backup_dir" -maxdepth 1 -type f -name "${DATABASE}-*.dump" \
             -mtime "+$RETENTION_DAYS" -print0
     )
 }
@@ -100,9 +100,8 @@ mv -- "$partial_path" "$dump_path"
 chmod 0600 -- "$dump_path" "$checksum_path"
 trap - EXIT
 
-if [[ "$BACKUP_KIND" == "daily" ]]; then
-    prune_expired_daily_backups
-fi
+prune_expired_backups "$BACKUP_ROOT/daily"
+prune_expired_backups "$BACKUP_ROOT/pre-deploy"
 
 echo "Verified $BACKUP_KIND PostgreSQL backup created: $dump_path"
 echo "Checksum: $checksum_path"
