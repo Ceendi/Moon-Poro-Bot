@@ -14,7 +14,9 @@ from moon_poro.cogs.verification_legacy import (
     LegacyVerificationRateLimiter,
     LegacyVerificationRetryView,
     LegacyVerificationStartView,
+    _choose_legacy_challenge_icon,
     _normalize_riot_id_parts,
+    _profile_icon_id,
     _riot_id_validation_error,
 )
 from moon_poro.rank_refresh import RankSnapshot
@@ -101,6 +103,80 @@ def test_riot_id_input_rejects_invalid_parts(
 def test_riot_id_input_accepts_documented_lengths_and_unicode() -> None:
     assert _riot_id_validation_error("Poro", "ABC") is None
     assert _riot_id_validation_error("Księżycowy Poro", "ŁÓDŹ") is None
+
+
+def test_legacy_challenge_icon_excludes_current_icon(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidates: tuple[int, ...] = ()
+
+    def choose_icon(icon_ids: tuple[int, ...]) -> int:
+        nonlocal candidates
+        candidates = icon_ids
+        return icon_ids[0]
+
+    monkeypatch.setattr(verification_legacy.secrets, "choice", choose_icon)
+
+    selected_icon_id = _choose_legacy_challenge_icon(7)
+
+    assert 7 not in candidates
+    assert set(candidates) == set(range(29)) - {7}
+    assert selected_icon_id in candidates
+
+
+@pytest.mark.parametrize(
+    "summoner",
+    [None, {}, {"profileIconId": None}, {"profileIconId": "7"}, {"profileIconId": True}],
+)
+def test_profile_icon_id_rejects_missing_or_invalid_values(
+    summoner: dict[str, object] | None,
+) -> None:
+    assert _profile_icon_id(summoner) is None
+
+
+def test_profile_icon_id_accepts_non_negative_integer() -> None:
+    assert _profile_icon_id({"profileIconId": 7}) == 7
+
+
+async def test_legacy_modal_challenge_excludes_current_icon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _modal_bot()
+    bot.verifications = SimpleNamespace(get_by_puuid=AsyncMock(return_value=None))
+    modal = LegacyVerificationModal(bot, _rate_limiter())
+    modal.game_name._value = "Moon Poro"
+    modal.tag_line._value = "EUNE"
+    modal.platform._values = ["EUN1"]
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=101),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    candidates: tuple[int, ...] = ()
+
+    def choose_icon(icon_ids: tuple[int, ...]) -> int:
+        nonlocal candidates
+        candidates = icon_ids
+        return icon_ids[0]
+
+    monkeypatch.setattr(
+        verification_legacy,
+        "_get_account",
+        AsyncMock(return_value={"puuid": "puuid", "gameName": "Moon Poro", "tagLine": "EUNE"}),
+    )
+    monkeypatch.setattr(
+        verification_legacy,
+        "_get_summoner",
+        AsyncMock(return_value={"profileIconId": 7}),
+    )
+    monkeypatch.setattr(verification_legacy.secrets, "choice", choose_icon)
+
+    await modal.on_submit(interaction)
+
+    challenge_view = interaction.followup.send.await_args.kwargs["view"]
+    assert isinstance(challenge_view, LegacyIconConfirmationView)
+    assert 7 not in candidates
+    assert challenge_view.expected_icon_id in candidates
+    assert challenge_view.expected_icon_id != 7
 
 
 def test_legacy_modal_uses_constrained_inputs_and_region_select() -> None:
@@ -724,6 +800,71 @@ async def test_icon_confirmation_explains_pending_deletion(
         ephemeral=True,
     )
     verifications.get_by_puuid.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("summoner", "expected_message"),
+    [
+        ({"profileIconId": 7}, "Ikona profilu nie została jeszcze zmieniona"),
+        ({}, "Riot jest chwilowo niedostępny"),
+    ],
+)
+async def test_legacy_icon_mismatch_or_invalid_payload_does_not_create_link_or_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    summoner: dict[str, object],
+    expected_message: str,
+) -> None:
+    class FakeMember:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+
+    guild = SimpleNamespace(id=123, get_channel=Mock())
+    member = FakeMember(101)
+    verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=None),
+        get_by_puuid=AsyncMock(return_value=None),
+        create=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_timeout=120,
+            verification_icon_check_cooldown=5,
+        ),
+        verifications=verifications,
+    )
+    interaction = SimpleNamespace(
+        guild=guild,
+        guild_id=123,
+        user=member,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    get_leagues = AsyncMock()
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    monkeypatch.setattr(
+        verification_legacy,
+        "_get_summoner",
+        AsyncMock(return_value=summoner),
+    )
+    monkeypatch.setattr(verification_legacy, "_get_leagues", get_leagues)
+    view = LegacyIconConfirmationView(
+        bot,
+        _rate_limiter(),
+        owner_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+        expected_icon_id=8,
+    )
+
+    await view.children[0].callback(interaction)
+
+    assert expected_message in interaction.followup.send.await_args.args[0]
+    get_leagues.assert_not_awaited()
+    guild.get_channel.assert_not_called()
+    verifications.create.assert_not_awaited()
 
 
 async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(

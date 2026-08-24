@@ -51,6 +51,27 @@ RIOT_GAME_NAME_MIN_LENGTH = 3
 RIOT_GAME_NAME_MAX_LENGTH = 16
 RIOT_TAG_LINE_MIN_LENGTH = 3
 RIOT_TAG_LINE_MAX_LENGTH = 5
+LEGACY_CHALLENGE_ICON_IDS = tuple(range(29))
+
+
+def _profile_icon_id(summoner: RiotPayload | None) -> int | None:
+    if summoner is None:
+        return None
+    profile_icon_id = summoner.get("profileIconId")
+    if (
+        not isinstance(profile_icon_id, int)
+        or isinstance(profile_icon_id, bool)
+        or profile_icon_id < 0
+    ):
+        return None
+    return profile_icon_id
+
+
+def _choose_legacy_challenge_icon(current_icon_id: int) -> int:
+    available_icon_ids = tuple(
+        icon_id for icon_id in LEGACY_CHALLENGE_ICON_IDS if icon_id != current_icon_id
+    )
+    return secrets.choice(available_icon_ids)
 
 
 class LegacyVerificationRateLimiter:
@@ -428,7 +449,15 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             )
             return
 
-        icon_id = secrets.choice(range(29))
+        current_icon_id = _profile_icon_id(summoner)
+        if current_icon_id is None:
+            await interaction.followup.send(
+                "Riot jest chwilowo niedostępny. Spróbuj ponownie później.",
+                ephemeral=True,
+            )
+            return
+
+        icon_id = _choose_legacy_challenge_icon(current_icon_id)
         embed = discord.Embed(
             title="Potwierdź konto ikoną profilu",
             description=(
@@ -582,7 +611,14 @@ class LegacyIconConfirmationView(discord.ui.View):
                 )
                 return
             summoner = await _get_summoner(self.bot, self.platform, self.puuid)
-            if summoner is None or int(summoner.get("profileIconId", -1)) != self.expected_icon_id:
+            current_icon_id = _profile_icon_id(summoner)
+            if current_icon_id is None:
+                await interaction.followup.send(
+                    "Riot jest chwilowo niedostępny. Spróbuj ponownie później.",
+                    ephemeral=True,
+                )
+                return
+            if current_icon_id != self.expected_icon_id:
                 await interaction.followup.send(
                     "Ikona profilu nie została jeszcze zmieniona. Ustaw wskazaną ikonę "
                     "i spróbuj ponownie.",
