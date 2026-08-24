@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -107,11 +106,10 @@ def build_account_profile(
         embed.add_field(name="Konto Riot", value="Niepołączone", inline=False)
 
     _add_state_field(embed, state)
-    if state is AccountProfileState.REFRESH_COOLDOWN:
-        minutes = max(1, math.ceil(cooldown_remaining.total_seconds() / 60))
-        embed.set_footer(text=f"Otwórz /profil ponownie za {minutes} min")
-
-    refresh_enabled = state is AccountProfileState.SUCCESS
+    refresh_enabled = state in {
+        AccountProfileState.REFRESH_COOLDOWN,
+        AccountProfileState.SUCCESS,
+    }
     if state is AccountProfileState.REFRESH_QUEUED:
         refresh_button_label = REFRESH_QUEUED_BUTTON_LABEL
     elif state is AccountProfileState.REFRESH_RUNNING:

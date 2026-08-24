@@ -220,7 +220,7 @@ def test_missing_cache_is_described_without_a_riot_call() -> None:
     assert profile.embed.description is None
 
 
-def test_cooldown_text_rounds_remaining_time_up() -> None:
+def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
     profile = build_account_profile(
         _link(rank_user_refresh_requested_at=NOW - timedelta(seconds=1199)),
         now=NOW,
@@ -229,8 +229,9 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
 
     assert profile.state is AccountProfileState.REFRESH_COOLDOWN
     assert profile.embed.description is None
-    assert profile.embed.footer.text == "Otwórz /profil ponownie za 11 min"
+    assert profile.embed.footer.text is None
     assert profile.embed.colour == discord.Colour.green()
+    assert profile.refresh_enabled is True
 
 
 @pytest.mark.parametrize(
@@ -239,7 +240,7 @@ def test_cooldown_text_rounds_remaining_time_up() -> None:
         (AccountProfileState.UNVERIFIED, False),
         (AccountProfileState.DELETING, False),
         (AccountProfileState.AUTHORIZATION_UNAVAILABLE, False),
-        (AccountProfileState.REFRESH_COOLDOWN, False),
+        (AccountProfileState.REFRESH_COOLDOWN, True),
         (AccountProfileState.TEMPORARY_UNAVAILABLE, False),
         (AccountProfileState.REFRESH_RUNNING, False),
         (AccountProfileState.REFRESH_QUEUED, False),

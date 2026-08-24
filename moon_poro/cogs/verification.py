@@ -49,6 +49,7 @@ type VerificationStarter = Callable[[discord.Interaction], Awaitable[None]]
 
 _ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS = 60.0
 _ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS = 2.0
+_ACCOUNT_PROFILE_VIEW_TIMEOUT_BUFFER_SECONDS = 5 * 60
 _ACCOUNT_PROFILE_PENDING_STATES = frozenset(
     {AccountProfileState.REFRESH_QUEUED, AccountProfileState.REFRESH_RUNNING}
 )
@@ -57,7 +58,6 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
         RankRefreshRequestStatus.ENQUEUED,
         RankRefreshRequestStatus.ALREADY_DUE,
         RankRefreshRequestStatus.ALREADY_CLAIMED,
-        RankRefreshRequestStatus.COOLDOWN,
     }
 )
 _ACCOUNT_PROFILE_STALE_MESSAGE = "Ten widok jest już nieaktualny. Otwórz `/profil` ponownie."
@@ -69,6 +69,16 @@ _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
     "Odświeżanie może nadal trwać.\n"
     "Otwórz `/profil` ponownie za chwilę."
 )
+
+
+def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
+    if retry_after_seconds is None or retry_after_seconds <= 0:
+        return "Rangę będzie można odświeżyć za chwilę."
+    seconds = retry_after_seconds
+    if seconds >= 60:
+        minutes = math.ceil(seconds / 60)
+        return f"Rangę możesz odświeżyć za około {minutes} min."
+    return f"Rangę możesz odświeżyć za {seconds} s."
 
 
 def _lookup_reason_choices() -> list[Choice[str]]:
@@ -1001,8 +1011,7 @@ async def _request_rank_refresh_from_panel(
         ),
     }
     if result.status == RankRefreshRequestStatus.COOLDOWN:
-        minutes = max(1, ((result.retry_after_seconds or 0) + 59) // 60)
-        message = f"Rangę możesz odświeżyć ponownie za około {minutes} min."
+        message = _rank_refresh_cooldown_message(result.retry_after_seconds)
     else:
         message = messages[result.status]
     await interaction.response.send_message(message, ephemeral=True)
@@ -1049,7 +1058,12 @@ class AccountProfileView(discord.ui.View):
         link: VerificationLink | None,
         start_verification: VerificationStarter,
     ) -> None:
-        super().__init__(timeout=300)
+        super().__init__(
+            timeout=(
+                bot.settings.rank_refresh_button_cooldown_seconds
+                + _ACCOUNT_PROFILE_VIEW_TIMEOUT_BUFFER_SECONDS
+            )
+        )
         self.bot = bot
         self.owner_id = owner_id
         self.presentation = presentation
@@ -1070,6 +1084,15 @@ class AccountProfileView(discord.ui.View):
             self.refresh_rank.disabled = not presentation.refresh_enabled
             if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
                 self.refresh_rank.style = discord.ButtonStyle.secondary
+
+    def _restore_refresh_button(
+        self,
+        button: discord.ui.Button[AccountProfileView],
+    ) -> None:
+        self._refresh_in_progress = False
+        button.label = self.presentation.refresh_button_label
+        button.disabled = not self.presentation.refresh_enabled
+        button.style = discord.ButtonStyle.blurple
 
     def _matches_current_link(self, link: VerificationLink | None) -> bool:
         return bool(
@@ -1213,7 +1236,7 @@ class AccountProfileView(discord.ui.View):
     ) -> None:
         if self._refresh_in_progress:
             await interaction.response.send_message(
-                "Odświeżanie rangi już trwa.",
+                "Sprawdzamy możliwość odświeżenia. Poczekaj chwilę.",
                 ephemeral=True,
             )
             return
@@ -1222,6 +1245,7 @@ class AccountProfileView(discord.ui.View):
         button.label = REFRESH_RUNNING_BUTTON_LABEL
         button.style = discord.ButtonStyle.secondary
         request_recorded = False
+        checking_cooldown = False
         try:
             await interaction.response.defer()
             if (
@@ -1246,7 +1270,8 @@ class AccountProfileView(discord.ui.View):
             }:
                 await self._edit_stale_profile(interaction)
                 return
-            request_recorded = True
+            checking_cooldown = result.status is RankRefreshRequestStatus.COOLDOWN
+            request_recorded = not checking_cooldown
             link = await self.bot.verifications.get_by_user(
                 interaction.guild_id or 0,
                 self.owner_id,
@@ -1260,7 +1285,30 @@ class AccountProfileView(discord.ui.View):
             ):
                 await self._edit_profile(interaction, link)
                 return
-            presentation = await self._edit_profile(interaction, link)
+            presentation = _build_account_profile(self.bot, link)
+            if result.status is RankRefreshRequestStatus.COOLDOWN:
+                if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+                    request_recorded = True
+                    await self._edit_presentation(interaction, presentation, link)
+                    await self._watch_rank_refresh(
+                        interaction,
+                        initial_state=presentation.state,
+                        baseline_rank_last_checked_at=result.baseline_rank_last_checked_at,
+                    )
+                    return
+                if presentation.state in {
+                    AccountProfileState.REFRESH_COOLDOWN,
+                    AccountProfileState.SUCCESS,
+                }:
+                    self._restore_refresh_button(button)
+                    await interaction.followup.send(
+                        _rank_refresh_cooldown_message(result.retry_after_seconds),
+                        ephemeral=True,
+                    )
+                    return
+                await self._edit_presentation(interaction, presentation, link)
+                return
+            await self._edit_presentation(interaction, presentation, link)
             if (
                 result.status in _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS
                 and presentation.state in _ACCOUNT_PROFILE_PENDING_STATES
@@ -1283,13 +1331,14 @@ class AccountProfileView(discord.ui.View):
                     view=self,
                 )
                 return
-            self._refresh_in_progress = False
-            button.label = self.presentation.refresh_button_label
-            button.disabled = not self.presentation.refresh_enabled
-            button.style = discord.ButtonStyle.blurple
+            self._restore_refresh_button(button)
             set_account_profile_status(
                 self.presentation.embed,
-                "Nie udało się rozpocząć odświeżania.\nSpróbuj ponownie.",
+                (
+                    "Nie udało się sprawdzić możliwości odświeżenia.\nSpróbuj ponownie."
+                    if checking_cooldown
+                    else "Nie udało się rozpocząć odświeżania.\nSpróbuj ponownie."
+                ),
             )
             await interaction.edit_original_response(
                 content=None,
