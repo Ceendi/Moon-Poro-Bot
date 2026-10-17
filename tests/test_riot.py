@@ -1,14 +1,17 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import ClientTimeout, web
 from aiohttp.test_utils import TestServer
 from pulsefire.invocation import Invocation
+from pulsefire.ratelimiters import BaseRateLimiter
 
 from moon_poro import riot
 from moon_poro.riot import (
+    RiotAPIInvalidResponse,
     RiotAPIMonitor,
     RiotAPINotFound,
     RiotAPIUnavailable,
@@ -47,8 +50,27 @@ def test_missing_solo_rank_is_unranked() -> None:
     assert get_rank_from_leagues([]) == "UNRANKED"
 
 
-def test_missing_tier_is_unranked() -> None:
-    assert get_rank_from_leagues([{"queueType": "RANKED_SOLO_5x5"}]) == "UNRANKED"
+@pytest.mark.parametrize(
+    "leagues",
+    [
+        [{"queueType": "RANKED_SOLO_5x5"}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": 3}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": "WOOD"}],
+        b"",
+        {"queueType": "RANKED_SOLO_5x5", "tier": "GOLD"},
+        ["GOLD"],
+    ],
+)
+def test_malformed_leagues_are_an_error_not_unranked(leagues: object) -> None:
+    with pytest.raises(RiotAPIInvalidResponse):
+        get_rank_from_leagues(leagues)  # type: ignore[arg-type]
+
+
+def test_cached_unranked_and_lowercase_tiers_are_accepted() -> None:
+    assert get_rank_from_leagues([{"queueType": "RANKED_SOLO_5x5", "tier": "UNRANKED"}]) == (
+        "UNRANKED"
+    )
+    assert get_rank_from_leagues([{"queueType": "RANKED_SOLO_5x5", "tier": "gold"}]) == "GOLD"
 
 
 def test_profile_icon_url_uses_requested_icon() -> None:
@@ -182,21 +204,26 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
     auth_middleware = object()
     monitoring_middleware = object()
     rate_limiter = object()
+    league_payload = object()
+    path_params = object()
     client = object()
     client_class = Mock(return_value=client)
     breaker_factory = Mock(return_value=breaker_middleware)
     auth_factory = Mock(return_value=auth_middleware)
     monitoring_factory = Mock(return_value=monitoring_middleware)
+    http_error_factory = Mock(return_value=http_error)
     breaker = RiotCircuitBreaker()
     auth_breaker = RiotAuthBreaker()
     monitor = RiotAPIMonitor()
     monkeypatch.setattr(riot, "_BoundedRiotAPIClient", client_class)
     monkeypatch.setattr(riot, "json_response_middleware", Mock(return_value=json_middleware))
-    monkeypatch.setattr(riot, "http_error_middleware", Mock(return_value=http_error))
+    monkeypatch.setattr(riot, "http_error_middleware", http_error_factory)
     monkeypatch.setattr(riot, "riot_circuit_breaker_middleware", breaker_factory)
     monkeypatch.setattr(riot, "riot_auth_breaker_middleware", auth_factory)
     monkeypatch.setattr(riot, "riot_api_monitoring_middleware", monitoring_factory)
-    monkeypatch.setattr(riot, "rate_limiter_middleware", Mock(return_value=rate_limiter))
+    monkeypatch.setattr(riot, "riot_rate_limiter_middleware", Mock(return_value=rate_limiter))
+    monkeypatch.setattr(riot, "riot_league_payload_middleware", Mock(return_value=league_payload))
+    monkeypatch.setattr(riot, "riot_path_params_middleware", Mock(return_value=path_params))
 
     result = riot.create_riot_api_client(
         "test-token",
@@ -209,7 +236,10 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
     breaker_factory.assert_called_once_with(breaker)
     auth_factory.assert_called_once_with(auth_breaker)
     monitoring_factory.assert_called_once_with(monitor)
+    http_error_factory.assert_called_once_with(max_retries=1)
     assert client_class.call_args.kwargs["middlewares"] == [
+        league_payload,
+        path_params,
         json_middleware,
         http_error,
         rate_limiter,
@@ -217,6 +247,47 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
         auth_middleware,
         monitoring_middleware,
     ]
+
+
+async def test_requests_waiting_in_the_limiter_are_refused_after_a_401() -> None:
+    class SlowLimiter(BaseRateLimiter):
+        async def acquire(self, invocation: Invocation) -> float:
+            if invocation.params["who"] == "first":
+                return 0
+            if invocation.params.setdefault("waited", False):
+                return 0
+            invocation.params["waited"] = True
+            return 0.05
+
+        async def synchronize(self, invocation: Invocation, headers: dict[str, str]) -> None:
+            return None
+
+    sent: list[str] = []
+
+    async def transport(invocation: Invocation) -> SimpleNamespace:
+        sent.append(invocation.params["who"])
+        await asyncio.sleep(0.02)
+        return SimpleNamespace(status=401, headers={})
+
+    call = riot.riot_rate_limiter_middleware(SlowLimiter())(
+        riot.riot_auth_breaker_middleware(RiotAuthBreaker())(transport)
+    )
+
+    async def request(who: str) -> object:
+        invocation = Invocation(
+            "GET",
+            "https://{region}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}",
+            {"region": "eun1", "puuid": "p", "who": who},
+        )
+        try:
+            return (await call(invocation)).status
+        except riot.RiotAuthCircuitOpen:
+            return "refused"
+
+    results = await asyncio.gather(*(request(who) for who in ("first", "a", "b", "c")))
+
+    assert results == [401, "refused", "refused", "refused"]
+    assert sent == ["first"]
 
 
 async def test_riot_api_call_returns_successful_response() -> None:
@@ -268,7 +339,9 @@ async def test_auth_breaker_allows_only_one_probe_and_recovers() -> None:
 async def test_forbidden_api_family_does_not_pause_other_riot_apis() -> None:
     now = [100.0]
     breaker = RiotAuthBreaker(clock=lambda: now[0])
-    transport = AsyncMock(side_effect=[RiotResponse(403), RiotResponse(200), RiotResponse(200)])
+    transport = AsyncMock(
+        side_effect=[*(RiotResponse(403) for _ in range(3)), RiotResponse(200), RiotResponse(200)]
+    )
     middleware = riot_auth_breaker_middleware(breaker)(transport)
     summoner = Invocation(
         "GET",
@@ -280,6 +353,9 @@ async def test_forbidden_api_family_does_not_pause_other_riot_apis() -> None:
         "https://{region}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}",
         {"region": "EUN1", "puuid": "test-puuid"},
     )
+    for _ in range(2):
+        await middleware(summoner)
+        assert breaker.can_attempt(scope="/lol/summoner/v4")
     await middleware(summoner)
     assert breaker.can_attempt()
     assert not breaker.can_attempt(scope="/lol/summoner/v4")
@@ -292,7 +368,7 @@ async def test_forbidden_api_family_does_not_pause_other_riot_apis() -> None:
     now[0] += 900
     assert (await middleware(summoner)).status == 200
     assert not breaker.snapshot(scope="/lol/summoner/v4").blocked
-    assert transport.await_count == 3
+    assert transport.await_count == 5
     assert set(breaker._endpoint_breakers) == {"/lol/summoner/v4", "/lol/league/v4"}
 
 
@@ -312,7 +388,9 @@ async def test_cancelled_auth_probe_releases_both_gates() -> None:
     breaker = RiotAuthBreaker(clock=lambda: now[0])
     scope = riot.RIOT_LEAGUE_AUTH_SCOPE
     breaker.record_status(401, was_probe=False)
-    breaker.for_scope(scope).record_status(403, was_probe=False)
+    for _ in range(riot.RIOT_FORBIDDEN_THRESHOLD):
+        breaker.for_scope(scope).record_status(403, was_probe=False)
+    assert breaker.snapshot(scope=scope).blocked
     now[0] += 900
     transport = AsyncMock(side_effect=asyncio.CancelledError)
     middleware = riot_auth_breaker_middleware(breaker)(transport)
@@ -331,6 +409,11 @@ async def test_forbidden_recovery_probe_does_not_hold_global_credential_gate() -
     now[0] += 900
     middleware = riot_auth_breaker_middleware(breaker)(AsyncMock(return_value=RiotResponse(403)))
     await middleware(Invocation("GET", "https://example.invalid/lol/summoner/v4/item", {}))
+    # The 403 probe closes the credential-wide gate; the endpoint needs more 403s.
+    assert not breaker.snapshot().blocked
+    assert breaker.can_attempt(scope="/lol/summoner/v4")
+    for _ in range(riot.RIOT_FORBIDDEN_THRESHOLD - 1):
+        await middleware(Invocation("GET", "https://example.invalid/lol/summoner/v4/item", {}))
     assert breaker.can_attempt(scope=riot.RIOT_LEAGUE_AUTH_SCOPE)
     assert not breaker.can_attempt(scope="/lol/summoner/v4")
 
@@ -356,7 +439,10 @@ async def test_riot_api_call_does_not_repeat_client_retries(status: int) -> None
     with pytest.raises(RiotAPIUnavailable) as raised:
         await riot_api_call(operation)
 
-    assert isinstance(raised.value.__cause__, RiotResponseError)
+    # The original aiohttp error text holds the formatted URL; do not chain it.
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+    assert raised.value.status == status
     operation.assert_awaited_once_with()
 
 
@@ -374,9 +460,9 @@ async def test_riot_client_bounds_transport_and_closes_its_session() -> None:
     async with client:
         session = client.session
         assert session is not None
-        assert session.timeout.total == 15
+        assert session.timeout.total == 10
         assert session.timeout.connect == 5
-        assert session.timeout.sock_read == 10
+        assert session.timeout.sock_read == 8
         with pytest.raises(RuntimeError, match="already open"):
             await client.__aenter__()
     assert session.closed
@@ -427,10 +513,11 @@ async def test_riot_client_stalled_response_exhausts_bounded_retries(
                     ),
                     timeout=2,
                 )
-        assert attempts == 4
-        # The real limiter also waits for its bounded header-discovery lease
-        # after a transport timeout; do not bypass it to exercise retry timing.
-        assert [delay for delay in retry_sleeps if delay >= 1] == [2, 4, 8]
+        assert attempts == 2
+        assert [delay for delay in retry_sleeps if delay >= 1] == [2]
+        # The timed out attempt released its limiter lease, so the retry did not
+        # poll the "pinging" limits for 10 seconds.
+        assert 0.1 not in retry_sleeps
     finally:
         release.set()
         await server.close()

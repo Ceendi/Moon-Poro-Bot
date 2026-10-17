@@ -9,6 +9,21 @@ from discord.ext import commands
 from moon_poro.bot import MoonPoroBot
 from moon_poro.permissions import administrator_only
 
+MONTHS = (
+    "styczeń",
+    "luty",
+    "marzec",
+    "kwiecień",
+    "maj",
+    "czerwiec",
+    "lipiec",
+    "sierpień",
+    "wrzesień",
+    "październik",
+    "listopad",
+    "grudzień",
+)
+
 
 class StatsPaginator(discord.ui.View):
     def __init__(
@@ -28,14 +43,16 @@ class StatsPaginator(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
             return True
-        await interaction.response.send_message("To nie jest Twój paginator.", ephemeral=True)
+        await interaction.response.send_message(
+            "Te przyciski działają tylko dla osoby, która użyła komendy.", ephemeral=True
+        )
         return False
 
     def embed(self) -> discord.Embed:
         year, month = self.periods[self.page]
         embed = discord.Embed(
-            title=f"📊 Statystyki moderacji — {year:04d}-{month:02d}",
-            description="**Format:** historyczne zgłoszenia | warny",
+            title=f"📊 Statystyki moderacji: {MONTHS[month - 1]} {year}",
+            description="Przy każdym moderatorze: dawne zgłoszenia | warny",
             colour=discord.Colour.blue(),
         )
         for user_id, (reports, warnings) in sorted(self.entries[(year, month)].items()):

@@ -86,6 +86,16 @@ def as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def browser_matches(record: VerificationSession, browser_token: str) -> bool:
+    """Whether the browser cookie is the one the session was bound to."""
+
+    return bool(
+        browser_token
+        and record.browser_binding_hash
+        and secrets.compare_digest(record.browser_binding_hash, hash_secret(browser_token))
+    )
+
+
 class VerificationSessionRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = session_factory
@@ -179,6 +189,14 @@ class VerificationSessionRepository:
     async def begin_oauth(
         self, *, token: str, state: str, browser_token: str
     ) -> VerificationSession:
+        """Bind the session to a browser and issue a fresh OAuth state.
+
+        The bound browser may start again while the session awaits Riot (a
+        double click or the Back button). Each start replaces the stored state,
+        so only the newest authorization redirect can complete. The row lock
+        serializes concurrent starts; any other browser is rejected.
+        """
+
         expired = False
         async with self._sessions.begin() as session:
             record = await session.scalar(
@@ -190,10 +208,13 @@ class VerificationSessionRepository:
                 raise SessionNotFound
             if record.status == VerificationSessionStatus.EXPIRED.value:
                 raise SessionExpired
-            if (
-                record.verification_method != "RSO"
-                or record.status != VerificationSessionStatus.CREATED.value
-            ):
+            if record.verification_method != "RSO":
+                raise SessionAlreadyUsed
+            if record.status == VerificationSessionStatus.AWAITING_RIOT.value:
+                if not browser_matches(record, browser_token):
+                    # A foreign browser must not replace the bound OAuth state.
+                    raise SessionBrowserMismatch
+            elif record.status != VerificationSessionStatus.CREATED.value:
                 raise SessionAlreadyUsed
             now = datetime.now(UTC)
             if as_utc(record.expires_at) <= now:
@@ -221,14 +242,10 @@ class VerificationSessionRepository:
             )
             if record is None:
                 raise SessionNotFound
-            if (
-                not browser_token
-                or not record.browser_binding_hash
-                or not secrets.compare_digest(
-                    record.browser_binding_hash, hash_secret(browser_token)
-                )
-            ):
+            if not browser_matches(record, browser_token):
                 # A foreign browser must not consume even a valid OAuth state.
+                # Checked first, so SessionAlreadyUsed below implies the bound
+                # browser (for example a reload while Riot is still answering).
                 raise SessionBrowserMismatch
             if record.status == VerificationSessionStatus.EXPIRED.value:
                 raise SessionExpired
@@ -355,11 +372,22 @@ class VerificationSessionRepository:
         record.completed_at = now
         return result
 
-    async def fail(self, session_id: int, error_code: str) -> None:
+    async def fail(
+        self, session_id: int, error_code: str, *, expected_status: str | None = None
+    ) -> None:
+        """Mark a session failed unless it already ended.
+
+        With expected_status the update applies only from that status. Error
+        paths whose earlier commit outcome is unknown use it, so a reserved
+        link is never orphaned by a FAILED session.
+        """
+
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
             record = await session.get(VerificationSession, session_id, with_for_update=True)
             if record is None or record.status in TERMINAL_SESSION_STATUSES:
+                return
+            if expected_status is not None and record.status != expected_status:
                 return
             record.status = VerificationSessionStatus.FAILED.value
             record.error_code = error_code[:64]

@@ -362,7 +362,7 @@ async def test_icon_challenge_has_hard_deadline_even_with_repeated_rate_limited_
         limiter.update_rate_limit("icon", 101, user_cooldown_seconds=200)
     now[0] = 220
     await view.children[0].callback(interaction)
-    assert "wygasło" in interaction.response.send_message.await_args.args[0]
+    assert "wygasła" in interaction.response.send_message.await_args.args[0]
     assert view.deadline == 220
 
 
@@ -454,7 +454,7 @@ async def test_inflight_icon_check_cannot_finish_after_challenge_invalidation(
     )
     await view.children[0].callback(interaction)
     bot.verification_sessions.reserve_link.assert_not_awaited()
-    assert "wygasło" in interaction.followup.send.await_args.args[0]
+    assert "wygasła" in interaction.followup.send.await_args.args[0]
 
 
 def test_legacy_rate_limiter_applies_global_window_without_consuming_denied_attempt() -> None:
@@ -1550,3 +1550,69 @@ async def test_manual_rank_change_without_cache_removes_unknown_rank_and_schedul
         source="role_tamper",
     )
     assert cog._managed_role_updates == set()
+
+
+def test_legacy_modals_get_distinct_random_custom_ids() -> None:
+    bot = _modal_bot()
+    limiter = _rate_limiter()
+
+    first = LegacyVerificationModal(bot, limiter)
+    second = LegacyVerificationModal(bot, limiter)
+
+    # discord.py stores open modals by custom_id alone; a shared id would let
+    # one user's modal replace another's.
+    assert first.custom_id != second.custom_id
+    assert not first.custom_id.startswith("verification:")
+
+
+async def test_legacy_start_sends_modal_then_clears_an_orphan_verified_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMember:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+            self.roles = [FakeRole(1, "Verified")]
+            self.guild = SimpleNamespace(id=123)
+
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    bot = _modal_bot()
+    bot.settings.verified_role_name = "Verified"
+    bot.settings.role_ids = {}
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=None))
+    order: list[str] = []
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=FakeMember(101),
+        response=SimpleNamespace(
+            send_message=AsyncMock(),
+            send_modal=AsyncMock(side_effect=lambda _modal: order.append("modal")),
+            defer=AsyncMock(),
+        ),
+    )
+
+    async def remove_marker(*_args: object, **_kwargs: object) -> None:
+        order.append("remove")
+
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)
+
+    await LegacyVerificationStartView(bot, _rate_limiter()).begin_verification(interaction)
+
+    assert order == ["modal", "remove"]
+    interaction.response.send_message.assert_not_awaited()
+    assert isinstance(interaction.response.send_modal.await_args.args[0], LegacyVerificationModal)
+
+
+async def test_legacy_completion_loop_finishes_sessions_of_both_methods_and_survives_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cog = object.__new__(LegacyVerificationCog)
+    cog.bot = SimpleNamespace(
+        verification_sessions=SimpleNamespace(
+            claim_pending=AsyncMock(side_effect=ConnectionError("terminating connection"))
+        )
+    )
+
+    await LegacyVerificationCog.complete_legacy_verifications.coro(cog)
+
+    cog.bot.verification_sessions.claim_pending.assert_awaited_once_with(limit=5, method=None)
+    assert "next run will retry" in caplog.text

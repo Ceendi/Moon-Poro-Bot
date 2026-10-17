@@ -3,9 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from discord import app_commands
 
 from moon_poro.cogs import core_events
 from moon_poro.cogs.core_events import ACCOUNT_AGE_FEATURE, CoreEventsCog
+from moon_poro.permissions import is_administrator
 
 
 def make_cog(*, enabled: bool = True) -> CoreEventsCog:
@@ -80,15 +82,77 @@ async def test_log_sends_without_mentions(monkeypatch: pytest.MonkeyPatch) -> No
     assert channel.send.await_args.kwargs["allowed_mentions"].everyone is False
 
 
-async def test_toggle_account_age_gate_persists_inverse() -> None:
-    cog = make_cog(enabled=True)
-    interaction = SimpleNamespace(
+def make_interaction() -> SimpleNamespace:
+    return SimpleNamespace(
         guild_id=123,
         user=SimpleNamespace(id=7),
         response=SimpleNamespace(send_message=AsyncMock()),
     )
 
-    await CoreEventsCog.toggle_account_age_gate.callback(cog, interaction)
+
+@pytest.mark.parametrize("current", [False, True])
+async def test_account_age_gate_enable_is_idempotent(current: bool) -> None:
+    cog = make_cog(enabled=current)
+    interaction = make_interaction()
+
+    await CoreEventsCog.account_age_gate.callback(
+        cog, interaction, app_commands.Choice(name="włącz", value="on")
+    )
+
+    cog.bot.guild_features.set.assert_awaited_once_with(123, ACCOUNT_AGE_FEATURE, True, 7)
+    message = interaction.response.send_message.await_args.args[0]
+    assert "jest teraz **włączona**" in message
+    assert "młodsze niż 90 dni" in message
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.parametrize("current", [False, True])
+async def test_account_age_gate_disable_is_idempotent(current: bool) -> None:
+    cog = make_cog(enabled=current)
+    interaction = make_interaction()
+
+    await CoreEventsCog.account_age_gate.callback(
+        cog, interaction, app_commands.Choice(name="wyłącz", value="off")
+    )
 
     cog.bot.guild_features.set.assert_awaited_once_with(123, ACCOUNT_AGE_FEATURE, False, 7)
-    assert "wyłączona" in interaction.response.send_message.await_args.args[0]
+    assert "jest teraz **wyłączona**" in interaction.response.send_message.await_args.args[0]
+
+
+@pytest.mark.parametrize(("current", "label"), [(False, "wyłączona"), (True, "włączona")])
+async def test_account_age_gate_check_does_not_change_state(current: bool, label: str) -> None:
+    cog = make_cog(enabled=current)
+    interaction = make_interaction()
+
+    await CoreEventsCog.account_age_gate.callback(
+        cog, interaction, app_commands.Choice(name="sprawdź", value="check")
+    )
+
+    cog.bot.guild_features.set.assert_not_awaited()
+    cog.bot.guild_features.get.assert_awaited_once_with(123, ACCOUNT_AGE_FEATURE, current)
+    message = interaction.response.send_message.await_args.args[0]
+    assert f"jest **{label}**" in message
+    assert "teraz" not in message
+
+
+def test_account_age_gate_command_is_admin_only_with_three_choices() -> None:
+    command = CoreEventsCog.account_age_gate
+    assert command.name == "multikonta"
+    assert command.default_permissions is not None
+    assert command.default_permissions.administrator
+    assert is_administrator in command.checks
+    (stan,) = command.parameters
+    assert stan.name == "stan"
+    assert stan.required
+    assert [(choice.name, choice.value) for choice in stan.choices] == [
+        ("włącz", "on"),
+        ("wyłącz", "off"),
+        ("sprawdź", "check"),
+    ]
+
+
+def test_account_age_gate_message_uses_singular_day() -> None:
+    cog = make_cog()
+    cog.bot.settings.minimum_account_age_days = 1
+
+    assert "młodsze niż 1 dzień" in cog._account_age_gate_message(True, changed=True)

@@ -18,7 +18,9 @@ def test_static_404_fallback_uses_error_handler_without_overriding_rso_headers()
     for filename in ("Caddyfile", "Caddyfile.web-http", "Caddyfile.web-pre-rso"):
         source = (ROOT / "deploy" / filename).read_text(encoding="utf-8")
         assert "try_files {path} {path}/index.html =404" in source
-        assert "handle_errors 404" in source
+        # Status-code arguments need Caddy 2.8; the distro package is 2.6.
+        assert "handle_errors 404" not in source
+        assert "@not_found expression `{err.status_code} == 404`" in source
         assert "rewrite * /404.html" in source
     production = (ROOT / "deploy/Caddyfile").read_text(encoding="utf-8")
     assert "handle /verify/*" in production
@@ -36,3 +38,30 @@ def test_caddy_blocks_exact_public_readiness_and_keeps_cheap_health_proxy() -> N
         handler = production.split(f"handle {route} {{", 1)[1].split("}", 1)[0]
         assert "reverse_proxy 127.0.0.1:8080" in handler
         assert "import moon_poro_static_headers" not in handler
+
+
+def test_production_rso_unit_runs_the_deployed_checkout() -> None:
+    unit = (ROOT / "deploy/moon-poro-prod-rso.service").read_text(encoding="utf-8")
+    assert "WorkingDirectory=/opt/moon-poro-prod" in unit
+    assert "ExecStart=/opt/moon-poro-prod/.venv/bin/python /opt/moon-poro-prod/rso_main.py" in unit
+    assert "EnvironmentFile=/etc/moon-poro/prod-rso.env" in unit
+    assert "User=moon-poro-rso" in unit
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    assert "moon-poro-prod-rso.service" in installer
+    assert "enable --now moon-poro-prod-rso" not in installer.split("echo", 1)[0]
+
+
+def test_production_deploy_stops_rso_before_migrations_and_restarts_it_after_the_bot() -> None:
+    script = (ROOT / "deploy/deploy-prod.sh").read_text(encoding="utf-8")
+    stop_rso = script.index('systemctl stop "$RSO_SERVICE"')
+    migrate = script.index("-m moon_poro.migrate")
+    start_bot = script.index('systemctl start "$SERVICE"')
+    start_rso = script.index('systemctl start "$RSO_SERVICE"')
+    assert stop_rso < migrate < start_bot < start_rso
+
+
+def test_bootstrap_validates_caddyfile_before_installing_it() -> None:
+    script = (ROOT / "deploy/bootstrap-web.sh").read_text(encoding="utf-8")
+    validate = script.index('caddy validate --config "$CADDY_SOURCE"')
+    install = script.index('"$CADDY_SOURCE" /etc/caddy/Caddyfile')
+    assert validate < install

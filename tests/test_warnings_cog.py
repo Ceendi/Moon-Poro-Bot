@@ -88,15 +88,11 @@ def test_warning_embed_contains_readable_audit_states() -> None:
 
     assert active.title == "Warn"
     assert active.footer.text == "ID kary: 42"
-    assert {field.name for field in active.fields} >= {"Użytkownik", "Moderatorzy"}
-    assert expired.title == "Warn — wygasł"
-    assert next(field.value for field in expired.fields if field.name == "Status") == (
-        "Wygasł (EXPIRED)"
-    )
-    assert revoked.title == "Warn — cofnięty"
-    assert next(field.value for field in revoked.fields if field.name == "Status") == (
-        "Cofnięty (REVOKED)"
-    )
+    assert {field.name for field in active.fields} >= {"Osoba", "Moderatorzy"}
+    assert expired.title == "Warn (wygasł)"
+    assert next(field.value for field in expired.fields if field.name == "Status") == ("Wygasł")
+    assert revoked.title == "Warn (cofnięty)"
+    assert next(field.value for field in revoked.fields if field.name == "Status") == ("Cofnięty")
 
 
 def test_duration_mapping_uses_role_configuration() -> None:
@@ -364,4 +360,4 @@ async def test_cw_role_sync_survives_audit_edit_failure(
     await WarningsCog.revert_warning.callback(cog, interaction, member)
 
     cog._sync_member_warning_role.assert_awaited_once_with(member)
-    assert "automatycznie ponowiona" in interaction.followup.send.await_args.args[0]
+    assert "w ciągu kilku minut" in interaction.followup.send.await_args.args[0]

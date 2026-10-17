@@ -3,11 +3,11 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import { siteConfig } from "../config";
 ---
 
-<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Połącz konto Riot i otrzymaj role regionu oraz rangi Solo/Duo.">
+<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Zaloguj się przez Riot i dostań role z regionem i rangą Solo/Duo.">
   <section class="hero">
     <div class="hero-text">
       <h1>Pokaż swoją rangę na serwerze</h1>
-      <p class="lead">Moon Poro to bot serwera League of Legends PL. Łączysz konto Riot, a bot nadaje Ci role regionu i rangi Solo/Duo. Potem sam dba o aktualność rangi.</p>
+      <p class="lead">Moon Poro to bot serwera League of Legends PL. Logujesz się przez Riot, a bot nadaje Ci role regionu i rangi Solo/Duo. Potem sam pilnuje, żeby ranga była aktualna.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Dołącz do serwera</a>
         <a class="button ghost" href="#jak">Jak się zweryfikować</a>
@@ -27,19 +27,19 @@ import { siteConfig } from "../config";
     <ol class="steps">
       <li>
         <h3>Kliknij „Zweryfikuj konto”</h3>
-        <p>Przycisk jest pod panelem weryfikacji na serwerze. Podaj Riot ID i region konta.</p>
+        <p>Przycisk jest pod panelem weryfikacji na serwerze. Bot wyśle Ci prywatny link.</p>
       </li>
       <li>
-        <h3>Zmień ikonę profilu</h3>
-        <p>W kliencie League of Legends ustaw ikonę wskazaną przez bota. Masz na to 2 minuty.</p>
+        <h3>Otwórz link</h3>
+        <p>Kliknij „Zaloguj się przez Riot”. Sprawdź, czy strona pokazuje Twoje konto Discord, i kliknij „Przejdź do logowania Riot”. Link działa tylko raz i przez 10 minut.</p>
       </li>
       <li>
-        <h3>Potwierdź zmianę</h3>
-        <p>Wróć do Discorda i kliknij przycisk potwierdzenia. Bot sprawdzi konto i nada role.</p>
+        <h3>Zaloguj się na konto Riot</h3>
+        <p>Logujesz się na stronie Riot Games tym samym kontem, co w grze. Riot przekazuje nam Twoje Riot ID i region.</p>
       </li>
       <li>
         <h3>Gotowe</h3>
-        <p>Po weryfikacji otrzymasz role „Zweryfikowany” i „Użytkownik” oraz role regionu i rangi.</p>
+        <p>Wróć do Discorda. Masz już role „Zweryfikowany” i „Użytkownik” oraz role regionu i rangi. Jeśli Riot akurat nie odpowiada, rolę rangi bot doda trochę później.</p>
       </li>
     </ol>
   </section>
@@ -71,7 +71,7 @@ import { siteConfig } from "../config";
       </li>
       <li>
         <p class="feature-key"><span class="discord-button blurple">Odśwież rangę</span></p>
-        <p>Bot aktualizuje rangę automatycznie. Możesz też zlecić odświeżenie w sekcji „Moje konto”, raz na 30 minut.</p>
+        <p>Ranga odświeża się sama. Po awansie nie musisz czekać, wystarczy kliknąć ten przycisk. Możesz to zrobić raz na 30 minut.</p>
       </li>
       <li>
         <p class="feature-key"><span class="discord-button red">Usuń powiązanie</span> <span class="or">lub</span> <code>/usun_weryfikacje</code></p>
@@ -85,9 +85,9 @@ import { siteConfig } from "../config";
       <img src="/moon-poro.png" alt="" width="72" height="72" />
       <div>
         <h2>Hasło wpisujesz tylko u Riot</h2>
-        <p>Logowanie przez Riot zastąpi zmianę ikony profilu. Dostęp został przyznany, a nową weryfikację testujemy przed publicznym uruchomieniem. Logowanie będzie odbywać się na stronie riotgames.com.</p>
-        <p>Moon Poro nie widzi Twojego hasła i nigdy nie zapyta o nie na Discordzie. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, zgłoś to moderacji.</p>
-        <p>Zapisujemy tylko to, co potrzebne do ról: identyfikator konta Discord, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
+        <p>Logowanie odbywa się na stronie riotgames.com. Moon Poro nie widzi Twojego hasła, a bot nigdy nie zapyta o nie na Discordzie. Poro woli Poro-Snaxy. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
+        <p>Link od bota jest tylko dla Ciebie. Nie przekazuj go nikomu i nie otwieraj linków weryfikacyjnych od innych osób. W ten sposób ktoś mógłby podpiąć Twoje konto Riot pod swojego Discorda.</p>
+        <p>Do ról zapisujemy identyfikator konta Discord, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
       </div>
     </div>
   </section>
@@ -96,8 +96,12 @@ import { siteConfig } from "../config";
     <h2>Częste pytania</h2>
     <div class="faq">
       <details>
-        <summary>Weryfikacja wygasła</summary>
-        <p>Na zmianę ikony masz 2 minuty. Kliknij jeszcze raz „Zweryfikuj konto” i rozpocznij od nowa.</p>
+        <summary>Link nie działa albo wygasł</summary>
+        <p>Każdy link działa tylko raz i przez 10 minut. Kliknij jeszcze raz „Zweryfikuj konto”, a bot wyśle nowy.</p>
+      </details>
+      <details>
+        <summary>Strona prosi o powrót do poprzedniej przeglądarki</summary>
+        <p>Całe logowanie musi odbyć się w jednej przeglądarce. Dokończ je tam, gdzie otwarto link. Jeśli to niemożliwe, kliknij jeszcze raz „Zweryfikuj konto” i otwórz nowy link w przeglądarce, w której zalogujesz się do Riot.</p>
       </details>
       <details>
         <summary>Gram na innym serwerze niż EUNE</summary>

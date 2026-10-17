@@ -42,6 +42,10 @@ vm.vfs_cache_pressure=50
 SYSCTL
 /sbin/sysctl --system >/dev/null
 
+# Validate before changing anything, so a bad file never replaces the working
+# site or config.
+/usr/bin/caddy validate --config "$CADDY_SOURCE" --adapter caddyfile
+
 install -d -o root -g root -m 0755 /opt/moon-poro/site/dist
 find /opt/moon-poro/site/dist -mindepth 1 -delete
 cp -a "$SITE_SOURCE"/. /opt/moon-poro/site/dist/
@@ -49,7 +53,6 @@ find /opt/moon-poro/site/dist -type d -exec chmod 0755 {} +
 find /opt/moon-poro/site/dist -type f -exec chmod 0644 {} +
 
 install -o root -g root -m 0644 "$CADDY_SOURCE" /etc/caddy/Caddyfile
-/usr/bin/caddy validate --config /etc/caddy/Caddyfile
 systemctl enable caddy >/dev/null
 systemctl restart caddy
 

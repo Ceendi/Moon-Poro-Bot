@@ -15,15 +15,15 @@ klienta RSO; tylko `moon-poro-bot` czyta token Discord i produkcyjny klucz Riot 
 kod tylko do odczytu i baza z oddzielnymi loginami.
 
 > [!IMPORTANT]
-> Repozytorium zawiera tymczasową weryfikację ikoną oraz docelowe RSO. Do czasu otrzymania danych
-> klienta Riot używaj `VERIFICATION_MODE=legacy_icon` i pozostaw `moon-poro-rso.service` wyłączone.
-
-Dostęp RSO dla Moon Poro został przyznany. Przełączenie produkcji nastąpi osobno, po testach;
-sam dostęp ani aktualizacja kodu nie zmieniają `VERIFICATION_MODE` istniejącej instalacji.
+> Produkcja weryfikuje przez RSO (`VERIFICATION_MODE=rso`). Weryfikacja ikoną zostaje w kodzie
+> tylko jako awaryjny powrót. Sama aktualizacja kodu nie zmienia `VERIFICATION_MODE` istniejącej
+> instalacji. Produkcyjna VM `moon-poro-web` używa układu z README (`/opt/moon-poro-prod`,
+> `moon-poro-prod-rso.service`); ten dokument opisuje ogólną instalację w `/opt/moon-poro`.
 
 ## 1. Warunki wstępne
 
-- wspierany system Linux i Python 3.12 lub 3.13;
+- wspierany system Linux i Python 3.12, 3.13 lub 3.14;
+- Caddy 2.6 lub nowszy (pakiet z dystrybucji wystarczy);
 - wspierany PostgreSQL (nie wdrażaj publicznego RSO na niewspieranym PostgreSQL 11);
 - domena, której jesteś właścicielem, rekord `A` do stałego zewnętrznego IP VM;
 - firewall GCP: Internet ma dostęp tylko do TCP 80/443; SSH ograniczony do zaufanych adresów;
@@ -120,14 +120,15 @@ python3.12 -m venv .venv
 .venv/bin/uv sync --frozen --no-dev
 ```
 
-Skopiuj jednostki z `deploy/` do `/etc/systemd/system/`, a `deploy/Caddyfile` do `/etc/caddy/`.
-Plik jest już skonfigurowany dla `moonporo.pl`; nie używa zmiennej z przykładową domeną.
-Po przyznaniu danych klienta sprawdź konfigurację przed przeładowaniem:
+Skopiuj jednostki z `deploy/` do `/etc/systemd/system/`. Plik `deploy/Caddyfile` jest już
+skonfigurowany dla `moonporo.pl`. Sprawdź go przed skopiowaniem do `/etc/caddy/`:
 
 ```bash
-caddy validate --config /etc/caddy/Caddyfile
+caddy validate --config deploy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
-systemctl enable --now moon-poro.service caddy.service
+systemctl enable moon-poro.service caddy.service
+# reload nie działa przy admin off, dlatego restart
+systemctl restart moon-poro.service caddy.service
 systemctl enable --now moon-poro-rso.service
 ```
 
@@ -136,7 +137,7 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 ## 6. Kolejność pierwszego wdrożenia
 
 1. Przed zatrzymaniem starego bota wykonaj snapshot oraz zweryfikowany logiczny backup bazy.
-2. Ustaw `VERIFICATION_MODE=legacy_icon` i potwierdź działanie weryfikacji ikoną. Nie uruchamiaj
+2. Jeśli przenosisz starą instalację z weryfikacją ikoną, najpierw potwierdź, że działa. Nie uruchamiaj
    jeszcze usługi RSO.
 3. Po otrzymaniu danych klienta wdróż kod RSO oraz zbudowany poza VM katalog `site/dist`.
 4. Zatrzymaj legacy bota na czas finalnego przełączenia i uruchom migracje kontem właściciela
@@ -172,18 +173,18 @@ Orientacyjny cel, nie gwarantowany limit:
 
 | Proces | Typowe dążenie | Limit systemd |
 |---|---:|---:|
-| bot Python | 150–280 MB | 400 MB |
-| RSO aiohttp | 45–85 MB | 128 MB |
-| PostgreSQL | 120–220 MB | konfiguracja DB |
-| Caddy + system | 80–160 MB | system |
+| bot Python | 150-280 MB | 400 MB |
+| RSO aiohttp | 45-85 MB | 128 MB |
+| PostgreSQL | 120-220 MB | konfiguracja DB |
+| Caddy + system | 80-160 MB | system |
 
 Dla PostgreSQL zacznij od `shared_buffers=64MB`, `work_mem=2MB`,
 `maintenance_work_mem=32MB`, `max_connections=20` i monitoruj, zamiast ślepo zwiększać cache. Utrzymuj
-pulę bota na maksymalnie 5 połączeń oraz callbacku na 2. Skonfiguruj 1–2 GB swap jako zabezpieczenie
+pulę bota na maksymalnie 10 połączeń (domyślnie 5 + 5) oraz callbacku na 2. Skonfiguruj 1-2 GB swap jako zabezpieczenie
 przed OOM (nie jako zamiennik RAM), alert dla pamięci >85%, dysku >80% i restartów usług.
 
 Static Astro nie zużywa pamięci aplikacyjnej. Caddy kompresuje pliki raz przy odpowiedzi, a strona
-nie ładuje fontów, bibliotek JS, analityki ani zasobów zewnętrznych.
+nie ładuje bibliotek JS, analityki ani zasobów zewnętrznych. Fonty są serwowane z tej samej domeny.
 
 ## 9. Odświeżanie rang
 

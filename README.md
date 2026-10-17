@@ -14,7 +14,7 @@ moderator statistics.
 - persistent role selection panels;
 - versioned moderation warnings with escalation, rollback, and automatic expiration;
 - monthly moderation statistics;
-- audited administrator lookups for Discord–Riot account links;
+- audited administrator lookups for Discord-Riot account links;
 - optional account-age protection, member logs, and message filters.
 
 Features, channels, and roles are configured through environment variables. The bot does not
@@ -75,6 +75,33 @@ SHA-256 checksum. Daily backups use the same procedure through
 `/var/backups/moon-poro-prod/daily`; cleanup runs only after a new dump and checksum have been
 verified. Backups made before deployments remain in `/var/backups/moon-poro-prod/pre-deploy` and
 are also retained for 90 days. Both directories are pruned only after a new verified backup.
+
+### Enabling Riot Sign On on `moon-poro-web`
+
+The callback runs from the same checkout as `moon-poro-prod-rso.service`. Once, after the first
+deployment that contains it:
+
+1. Reinstall the helpers so the deployment script also manages the callback:
+   `sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh`.
+2. Create the service account:
+   `sudo useradd --system --no-create-home --shell /usr/sbin/nologin moon-poro-rso`.
+3. Create `/etc/moon-poro/prod-rso.env` from `.env.rso.example`, owned by `moon-poro-rso`, mode
+   `0600`. Set `POSTGRES_DB=moon_poro_prod` and grant its database login only the tables listed in
+   `docs/DEPLOYMENT_RSO_GCP.md` (use `moon_poro_prod` in the `GRANT CONNECT` line).
+4. Check that the account can import the code:
+   `sudo -u moon-poro-rso /opt/moon-poro-prod/.venv/bin/python -c 'import moon_poro.rso_web'`.
+5. Copy the freshly built `site/dist` to `/opt/moon-poro/site/dist`. The callback pages load
+   `/fonts/*` and `/moon-poro.png` from the static site.
+6. Validate and install the Caddyfile, then restart Caddy. `reload` does not work because the
+   Caddyfile sets `admin off`:
+   `sudo caddy validate --config /opt/moon-poro-prod/deploy/Caddyfile --adapter caddyfile`,
+   copy it to `/etc/caddy/Caddyfile` and run `sudo systemctl restart caddy`.
+7. `sudo systemctl enable --now moon-poro-prod-rso.service`, check
+   `curl --fail http://127.0.0.1:8080/readyz`, set `VERIFICATION_MODE=rso` in
+   `/etc/moon-poro/prod-bot.env`, restart the bot and publish a new panel with `/weryfikacja`.
+
+After that, `deploy-moon-poro-prod` stops the callback before migrations and starts it again after
+the bot.
 
 ## Development
 

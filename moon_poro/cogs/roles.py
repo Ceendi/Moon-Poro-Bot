@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from enum import StrEnum
-from typing import cast
+from typing import Any, cast
 
 import discord
 from discord import app_commands
@@ -19,6 +20,17 @@ from moon_poro.roles import (
     member_has_role,
     member_roles_named,
     role_is_configured,
+)
+from moon_poro.settings import Settings
+
+logger = logging.getLogger("moon_poro.roles")
+
+ROLE_PANEL_FORBIDDEN_MESSAGE = (
+    "Bot nie ma uprawnień, żeby zmienić tę rolę. Daj znać administracji serwera."
+)
+ROLE_PANEL_ERROR_MESSAGE = (
+    "Nie udało się zmienić ról. Spróbuj ponownie za chwilę, "
+    "a jeśli problem się powtórzy, daj znać administracji serwera."
 )
 
 
@@ -59,22 +71,51 @@ async def _current_roles(member: discord.Member) -> AsyncIterator[discord.Member
         yield cast(discord.Member, _RoleState(current))
 
 
-async def _update_member_role(bot: MoonPoroBot, member: discord.Member) -> bool:
-    settings = bot.settings
-    member_role = find_role(member.guild, settings.member_role_name, settings)
-    if member_role is None:
-        return False
+def _qualifies_for_member_role(member: discord.Member, settings: Settings) -> bool:
     has_required_roles = bool(member_roles_named(member, settings.lol_servers, settings)) and bool(
         member_roles_named(member, settings.lol_ranks, settings)
     )
-    should_have = has_required_roles or member_has_role(member, settings.no_lol_role_name, settings)
-    if should_have and member_role not in member.roles:
-        await member.add_roles(member_role, reason="Synchronizacja ról Moon Poro")
-        return True
-    elif not should_have and member_role in member.roles:
-        await member.remove_roles(member_role, reason="Synchronizacja ról Moon Poro")
-        return True
-    return False
+    return has_required_roles or member_has_role(member, settings.no_lol_role_name, settings)
+
+
+async def _update_member_role(bot: MoonPoroBot, member: discord.Member) -> bool:
+    """Grant the member role once its requirements are met.
+
+    The member role is never taken away here. Removing a Riot verification keeps
+    it on purpose, and a verified account can briefly have no rank role.
+    """
+    settings = bot.settings
+    member_role = find_role(member.guild, settings.member_role_name, settings)
+    if member_role is None or member_role in member.roles:
+        return False
+    if not _qualifies_for_member_role(member, settings):
+        return False
+    await member.add_roles(member_role, reason="Synchronizacja ról Moon Poro")
+    return True
+
+
+class _RolePanelView(discord.ui.View):
+    """Answer the deferred interaction when a role panel callback fails."""
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item[Any],
+        /,
+    ) -> None:
+        logger.error(
+            "Role panel item %s failed for Discord user %s",
+            getattr(item, "custom_id", None),
+            interaction.user.id,
+            exc_info=error,
+        )
+        message = (
+            ROLE_PANEL_FORBIDDEN_MESSAGE
+            if isinstance(error, discord.Forbidden)
+            else ROLE_PANEL_ERROR_MESSAGE
+        )
+        await safe_send(interaction, message)
 
 
 async def _require_guild(interaction: discord.Interaction) -> discord.Guild | None:
@@ -103,14 +144,14 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
         new_role = find_role(interaction.guild, self.values[0], settings)
         if new_role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
         async with _current_roles(interaction.user) as member:
             if member_has_role(member, settings.verified_role_name, settings):
                 await interaction.followup.send(
-                    "Zweryfikowane konta otrzymują rangę automatycznie.", ephemeral=True
+                    "Po weryfikacji bot sam nadaje rolę rangi.", ephemeral=True
                 )
                 return
             if member_has_role(member, settings.no_lol_role_name, settings):
@@ -118,17 +159,42 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
                     f"Najpierw usuń rolę **{settings.no_lol_role_name}**.", ephemeral=True
                 )
                 return
-            old_roles = member_roles_named(member, settings.lol_ranks, settings)
-            removable = [role for role in old_roles if role != new_role]
-            if removable:
-                await member.remove_roles(*removable, reason="Zmiana wybranej rangi")
-            if new_role not in member.roles:
-                await member.add_roles(new_role, reason="Wybór rangi")
+            await _swap_rank_role(member, new_role, settings)
             await _update_member_role(self.bot, member)
         await interaction.followup.send(f"Wybrano rangę **{new_role.name}**.", ephemeral=True)
 
 
-class RankSelect(discord.ui.View):
+async def _swap_rank_role(
+    member: discord.Member, new_role: discord.Role, settings: Settings
+) -> None:
+    """Add the new rank before removing old ones; on failure restore the previous ranks."""
+    removable = [
+        role
+        for role in member_roles_named(member, settings.lol_ranks, settings)
+        if role != new_role
+    ]
+    added = new_role not in member.roles
+    if added:
+        await member.add_roles(new_role, reason="Wybór rangi")
+    removed: list[discord.Role] = []
+    try:
+        # One role at a time, so a partial failure knows exactly what to undo.
+        for role in removable:
+            await member.remove_roles(role, reason="Zmiana wybranej rangi")
+            removed.append(role)
+    except Exception:
+        # Best effort: go back to the previous ranks instead of a mixed state.
+        try:
+            if removed:
+                await member.add_roles(*removed, reason="Cofnięcie nieudanej zmiany rangi")
+            if added:
+                await member.remove_roles(new_role, reason="Cofnięcie nieudanej zmiany rangi")
+        except Exception:
+            logger.warning("Could not roll back rank role for Discord user %s", member.id)
+        raise
+
+
+class RankSelect(_RolePanelView):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
         self.add_item(RankDropdown(bot))
@@ -165,7 +231,7 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
         role = find_role(interaction.guild, self.role_name, settings)
         if role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
@@ -181,7 +247,7 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
                 member, settings.verified_role_name, settings
             ):
                 await interaction.followup.send(
-                    "Region zweryfikowanego konta jest zarządzany automatycznie.", ephemeral=True
+                    "Po weryfikacji bot sam ustawia rolę regionu.", ephemeral=True
                 )
                 return
             if role in member.roles:
@@ -194,7 +260,7 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
         await interaction.followup.send(f"{action} rolę **{role.name}**.", ephemeral=True)
 
 
-class RoleButtons(discord.ui.View):
+class RoleButtons(_RolePanelView):
     def __init__(
         self,
         bot: MoonPoroBot,
@@ -206,7 +272,7 @@ class RoleButtons(discord.ui.View):
             self.add_item(ToggleRoleButton(bot, role_name, category, row=index // 5))
 
 
-class MiscRolesView(discord.ui.View):
+class MiscRolesView(_RolePanelView):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
@@ -228,14 +294,14 @@ class MiscRolesView(discord.ui.View):
         role = find_role(interaction.guild, settings.no_lol_role_name, settings)
         if role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
         async with _current_roles(interaction.user) as member:
             if member_has_role(member, settings.verified_role_name, settings):
                 await interaction.followup.send(
-                    "Najpierw usuń weryfikację konta Riot.", ephemeral=True
+                    "Najpierw usuń powiązanie z kontem Riot w sekcji „Moje konto”.", ephemeral=True
                 )
                 return
             league_roles = settings.lol_ranks + settings.lol_servers + settings.lol_positions
@@ -271,8 +337,9 @@ class MiscRolesView(discord.ui.View):
             verified = member_has_role(member, settings.verified_role_name, settings)
             names = set(settings.lol_positions + settings.optional_roles)
             if not verified:
+                # The member role stays: it is granted by the bot, not picked here.
                 names.update(settings.lol_ranks + settings.lol_servers)
-                names.update([settings.member_role_name, settings.no_lol_role_name])
+                names.add(settings.no_lol_role_name)
             selected = member_roles_named(member, names, settings)
             if selected:
                 await member.remove_roles(*selected, reason="Usunięcie ról konfigurowalnych")
@@ -302,7 +369,7 @@ class RolesCog(commands.Cog):
     ) -> None:
         channel = interaction.channel
         if not isinstance(channel, discord.abc.Messageable):
-            await safe_send(interaction, "Nie można publikować panelu na tym kanale.")
+            await safe_send(interaction, "Bot nie może wysłać panelu na tym kanale.")
             return
 
         await interaction.response.send_message("**Ranga Solo/Duo**", view=RankSelect(self.bot))
@@ -392,13 +459,11 @@ class RolesCog(commands.Cog):
                 await interaction.followup.send("Wybierz tylko jedną rangę Solo/Duo.")
                 return
             if rank_roles:
-                existing = member_roles_named(
-                    member, self.bot.settings.lol_ranks, self.bot.settings
-                )
-                if existing:
-                    await member.remove_roles(*existing, reason=f"Zmiana przez {interaction.user}")
-            if allowed:
-                await member.add_roles(*allowed, reason=f"Nadanie przez {interaction.user}")
+                # Same swap as the panel: never leave the member without a rank.
+                await _swap_rank_role(member, rank_roles[0], self.bot.settings)
+            other_roles = [role for role in allowed if role not in rank_roles]
+            if other_roles:
+                await member.add_roles(*other_roles, reason=f"Nadanie przez {interaction.user}")
             await _update_member_role(self.bot, member)
         message = f"Dodano: {', '.join(role.mention for role in allowed) or 'brak'}"
         if denied:
@@ -423,8 +488,9 @@ class RolesCog(commands.Cog):
         async with _current_roles(uzytkownik) as member:
             allowed = [role for role in configured if role in member.roles]
             if allowed:
+                # No member role sync here: removing roles cannot newly qualify
+                # anyone, and it would put back an explicitly removed „Użytkownik”.
                 await member.remove_roles(*allowed, reason=f"Usunięcie przez {interaction.user}")
-            await _update_member_role(self.bot, member)
         await interaction.followup.send(
             f"Usunięto: {', '.join(role.mention for role in allowed) or 'brak'}."
         )
@@ -435,6 +501,8 @@ class RolesCog(commands.Cog):
         servers = member_roles_named(member, settings.lol_servers, settings)
         has_member = member_has_role(member, settings.member_role_name, settings)
         has_no_lol = member_has_role(member, settings.no_lol_role_name, settings)
+        # Having the member role without region or rank is fine: removing a
+        # verification keeps it and the bot never takes it away automatically.
         return (
             len(ranks) > 1
             or (
@@ -443,12 +511,14 @@ class RolesCog(commands.Cog):
                     ranks + servers + member_roles_named(member, settings.lol_positions, settings)
                 )
             )
-            or (has_member != (has_no_lol or (bool(ranks) and bool(servers))))
+            or (not has_member and _qualifies_for_member_role(member, settings))
         )
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
-    @app_commands.command(name="pbr", description="Pokazuje osoby z niespójnymi rolami")
+    @app_commands.command(
+        name="pbr", description="Pokazuje osoby z brakującymi albo zbędnymi rolami"
+    )
     async def show_broken_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         guild = await _require_guild(interaction)
@@ -456,14 +526,14 @@ class RolesCog(commands.Cog):
             return
         members = [member.mention for member in guild.members if self._role_problem(member)]
         if not members:
-            await interaction.followup.send("Nie znaleziono niespójnych ról.", ephemeral=True)
+            await interaction.followup.send("Wszystkie role się zgadzają.", ephemeral=True)
             return
         for start in range(0, len(members), 30):
             await interaction.followup.send(", ".join(members[start : start + 30]), ephemeral=True)
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
-    @app_commands.command(name="nr", description="Naprawia podstawowe zależności ról")
+    @app_commands.command(name="nr", description="Poprawia brakujące albo zbędne role")
     async def repair_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         guild = await _require_guild(interaction)
@@ -477,7 +547,7 @@ class RolesCog(commands.Cog):
             async with _current_roles(member) as current:
                 if await _update_member_role(self.bot, current):
                     changed += 1
-        await interaction.followup.send(f"Zaktualizowano {changed} użytkowników.", ephemeral=True)
+        await interaction.followup.send(f"Zmienione osoby: {changed}.", ephemeral=True)
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
@@ -497,7 +567,7 @@ class RolesCog(commands.Cog):
             and not member_has_role(member, settings.verified_role_name, settings)
         ]
         if not members:
-            await interaction.followup.send("Nie znaleziono użytkowników.", ephemeral=True)
+            await interaction.followup.send("Nie ma takich osób.", ephemeral=True)
             return
         for start in range(0, len(members), 30):
             await interaction.followup.send(", ".join(members[start : start + 30]), ephemeral=True)
@@ -505,7 +575,8 @@ class RolesCog(commands.Cog):
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(
-        name="napraw_weryfikacje", description="Usuwa role weryfikacji bez rekordu w bazie"
+        name="napraw_weryfikacje",
+        description="Zdejmuje role weryfikacji, rangi i regionu osobom bez połączonego konta Riot",
     )
     async def repair_verifications(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -534,7 +605,7 @@ class RolesCog(commands.Cog):
                     ]
                     await current.remove_roles(*to_remove, reason="Brak rekordu weryfikacji")
                     fixed += 1
-        await interaction.followup.send(f"Naprawiono {fixed} użytkowników.", ephemeral=True)
+        await interaction.followup.send(f"Poprawione osoby: {fixed}.", ephemeral=True)
 
 
 async def setup(bot: MoonPoroBot) -> None:

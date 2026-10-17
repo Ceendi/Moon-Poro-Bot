@@ -38,6 +38,10 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-backup.timer" \
     /etc/systemd/system/moon-poro-prod-backup.timer
+# Installed but not enabled: RSO starts only after /etc/moon-poro/prod-rso.env exists.
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/moon-poro-prod-rso.service" \
+    /etc/systemd/system/moon-poro-prod-rso.service
 
 systemctl daemon-reload
 systemctl enable --now moon-poro-prod-backup.timer
@@ -46,3 +50,4 @@ echo "Production deployment command: sudo /usr/local/sbin/deploy-moon-poro-prod"
 echo "Manual verified backup: sudo systemctl start moon-poro-prod-backup.service"
 echo "Daily backups remain for 90 days in $BACKUP_DIR/daily."
 echo "Pre-deploy backups also remain for 90 days in $BACKUP_DIR/pre-deploy."
+echo "Enable Riot Sign On once: sudo systemctl enable --now moon-poro-prod-rso.service"

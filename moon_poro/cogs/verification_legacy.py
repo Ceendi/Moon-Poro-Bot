@@ -20,6 +20,7 @@ from moon_poro.bot import MoonPoroBot
 from moon_poro.cogs.verification import (
     VerificationCog,
     _apply_verified_roles,
+    _clear_orphan_verified_role,
     _get_leagues,
     _reconcile_cached_role_change,
     _record_leagues,
@@ -251,25 +252,23 @@ class LegacyVerificationStartView(discord.ui.View):
             )
             await interaction.edit_original_response(
                 content=(
-                    "Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+                    "Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
                     if resumed
                     else "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
                     "obecne powiązanie w sekcji „Moje konto”."
                 )
             )
             return
-        if member_has_role(
+        orphan_verified_role = member_has_role(
             interaction.user,
             self.bot.settings.verified_role_name,
             self.bot.settings,
-        ):
-            await interaction.response.send_message(
-                "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
-                "obecne powiązanie w sekcji „Moje konto”.",
-                ephemeral=True,
-            )
-            return
+        )
         await interaction.response.send_modal(LegacyVerificationModal(self.bot, self.rate_limiter))
+        if orphan_verified_role:
+            # The modal must be the first response, so clear the stale role
+            # afterwards. A link created meanwhile is caught when the icon is checked.
+            await _clear_orphan_verified_role(self.bot, interaction.user)
 
     @discord.ui.button(
         label="Moje konto",
@@ -297,7 +296,11 @@ class LegacyVerificationStartView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[LegacyVerificationStartView],
     ) -> None:
-        await _request_rank_refresh_from_panel(self.bot, interaction)
+        await _request_rank_refresh_from_panel(
+            self.bot,
+            interaction,
+            start_verification=self.begin_verification,
+        )
 
     @discord.ui.button(
         label="Usuń powiązanie",
@@ -322,10 +325,9 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         tag_line: str = "",
         platform: str | None = None,
     ) -> None:
-        super().__init__(
-            timeout=bot.settings.verification_timeout,
-            custom_id="verification:legacy-account:v2",
-        )
+        # discord.py keys open modals by custom_id alone. Keep its random default
+        # so concurrent users never replace each other's modal.
+        super().__init__(timeout=bot.settings.verification_timeout)
         self.bot = bot
         self.rate_limiter = rate_limiter
         self.game_name: discord.ui.TextInput[LegacyVerificationModal] = discord.ui.TextInput(
@@ -516,7 +518,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             )
         except SessionAlreadyUsed:
             await interaction.followup.send(
-                "Poprzednia weryfikacja jest już finalizowana. Sprawdź „Moje konto”.",
+                "Poprzednia weryfikacja jeszcze się kończy. Sprawdź „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -626,7 +628,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             return False
         if not self._is_current():
             await interaction.response.send_message(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return False
@@ -709,7 +711,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         # A newer challenge or cancellation must invalidate an in-flight request.
         if not self._is_current():
             await interaction.followup.send(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return
@@ -733,7 +735,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             )
         except SessionError:
             await interaction.followup.send(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return
@@ -813,13 +815,12 @@ class LegacyVerificationCog(VerificationCog):
 
     @tasks.loop(seconds=3, reconnect=True)
     async def complete_legacy_verifications(self) -> None:
-        records = await self.bot.verification_sessions.claim_pending(limit=5, method="PROFILE_ICON")
-        for record in records:
-            try:
-                await self._complete_rso_verification(record)
-            except Exception:
-                logger.exception("Could not complete profile-icon session %s", record.id)
-                await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
+        # Shares the RSO completion path, so RSO sessions created before a mode
+        # switch are finished too. Never let one database error stop the loop.
+        try:
+            await self._complete_pending_verifications()
+        except Exception:
+            logger.exception("Profile-icon completion worker error; next run will retry")
 
     @complete_legacy_verifications.before_loop
     async def before_legacy_completion(self) -> None:
@@ -833,7 +834,7 @@ class LegacyVerificationCog(VerificationCog):
         self,
         member: discord.Member,
         platform: str,
-        leagues: list[RiotPayload],
+        leagues: list[RiotPayload] | None,
     ) -> None:
         self._managed_role_updates.add(member.id)
         try:

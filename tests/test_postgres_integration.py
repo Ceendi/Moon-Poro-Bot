@@ -2035,3 +2035,483 @@ async def test_verification_deletion_lifecycle_migration_preserves_existing_link
                 )
         finally:
             await cleanup.close()
+
+
+async def _start_rso_web_against_postgres(settings_factory: Callable[..., Settings]):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from moon_poro.rso_web import create_app
+    from moon_poro.settings import RSOSettings
+
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    database_settings = {
+        "postgres_user": os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        "postgres_password": os.getenv(
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),  # pragma: allowlist secret
+        "postgres_host": os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        "postgres_port": int(os.environ["TEST_POSTGRES_PORT"]),
+        "postgres_db": os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        "guild_id": guild_id,
+    }
+    await upgrade_database(settings_factory(**database_settings))
+    rso_settings = RSOSettings(
+        _env_file=None,
+        rso_client_id="moon-poro-client",
+        rso_client_auth_method="private_key_jwt",
+        rso_client_assertion="signed-client-assertion",  # pragma: allowlist secret
+        rso_public_base_url="http://localhost:8080",
+        **database_settings,
+    )
+    database = Database(rso_settings)
+    client = TestClient(TestServer(create_app(rso_settings, database)))
+    await client.start_server()
+    return guild_id, database, client
+
+
+async def _stop_rso_web_against_postgres(guild_id: int, database: Database, client) -> None:
+    try:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+            await connection.execute(
+                text("DELETE FROM verification_sessions WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+    finally:
+        await client.close()
+
+
+def _oauth_state(response) -> str:
+    from urllib.parse import parse_qs, urlsplit
+
+    return parse_qs(urlsplit(response.headers["Location"]).query)["state"][0]
+
+
+async def test_rso_double_click_on_postgres_reaches_riot_with_newest_state(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from urllib.parse import urlsplit
+
+    import aiohttp
+
+    from moon_poro.rso_web import BROWSER_COOKIE, REPOSITORY_KEY, RSO_CLIENT_KEY, RiotIdentity
+    from moon_poro.verification_sessions import hash_secret
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        app = client.server.app
+        repository = app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        path = f"/verify/start/{created.token}"
+        host = {"Host": "localhost:8080"}
+        origin = {**host, "Origin": "http://localhost:8080"}
+        landing = await client.get(path, headers=host)
+        browser = landing.cookies[BROWSER_COOKIE].value
+
+        # Hold the session row so both clicks queue on the same row lock.
+        async with database.engine.connect() as blocker:
+            await blocker.begin()
+            await blocker.execute(
+                text("SELECT id FROM verification_sessions WHERE guild_id=:guild FOR UPDATE"),
+                {"guild": guild_id},
+            )
+            clicks = [
+                asyncio.create_task(client.post(path, headers=origin, allow_redirects=False))
+                for _click in range(2)
+            ]
+            await asyncio.sleep(0.2)
+            assert not any(click.done() for click in clicks)
+            await blocker.rollback()
+        responses = await asyncio.wait_for(asyncio.gather(*clicks), timeout=5)
+
+        assert [response.status for response in responses] == [303, 303]
+        assert all(
+            urlsplit(response.headers["Location"]).netloc == "auth.riotgames.com"
+            for response in responses
+        )
+        states = [_oauth_state(response) for response in responses]
+        assert states[0] != states[1]
+        stored = await repository.get_by_start_token(created.token)
+        assert stored is not None and stored.status == "AWAITING_RIOT"
+        assert stored.browser_binding_hash == hash_secret(browser)
+        newest = [state for state in states if hash_secret(state) == stored.oauth_state_hash]
+        stale = [state for state in states if hash_secret(state) != stored.oauth_state_hash]
+        assert len(newest) == len(stale) == 1
+
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as foreign:
+            rejected = await foreign.post(
+                client.make_url(path),
+                headers={**origin, "Cookie": f"{BROWSER_COOKIE}={'f' * 43}"},
+                allow_redirects=False,
+            )
+            assert rejected.status == 200
+            assert "Logowanie trwa w innej przeglądarce" in await rejected.text()
+
+        monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", AsyncMock(return_value="t"))
+        monkeypatch.setattr(
+            app[RSO_CLIENT_KEY],
+            "get_identity",
+            AsyncMock(return_value=RiotIdentity(f"click-{guild_id}", "Moon", "EUNE", "EUN1")),
+        )
+        old = await client.get(f"/oauth2/callback?state={stale[0]}&code=code", headers=host)
+        assert "Ten link logowania jest nieaktualny" in await old.text()
+        done = await client.get(
+            f"/oauth2/callback?state={newest[0]}&code=code", headers=host, allow_redirects=False
+        )
+        assert done.status == 303 and done.headers["Location"] == "/verify/result"
+        finished = await repository.get_by_start_token(created.token)
+        assert finished is not None and finished.status == "VERIFIED_PENDING_DISCORD"
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
+
+
+async def test_rso_callback_reload_on_postgres_waits_for_first_request(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aiohttp
+
+    from moon_poro.rso_web import BROWSER_COOKIE, REPOSITORY_KEY, RSO_CLIENT_KEY, RiotIdentity
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        app = client.server.app
+        repository = app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        path = f"/verify/start/{created.token}"
+        host = {"Host": "localhost:8080"}
+        await client.get(path, headers=host)
+        started = await client.post(
+            path, headers={**host, "Origin": "http://localhost:8080"}, allow_redirects=False
+        )
+        callback = f"/oauth2/callback?state={_oauth_state(started)}&code=code"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_exchange(_code: str) -> str:
+            entered.set()
+            await release.wait()
+            return "temporary-token"
+
+        exchange = AsyncMock(side_effect=slow_exchange)
+        monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", exchange)
+        monkeypatch.setattr(
+            app[RSO_CLIENT_KEY],
+            "get_identity",
+            AsyncMock(return_value=RiotIdentity(f"reload-{guild_id}", "Moon", "EUNE", "EUN1")),
+        )
+        first = asyncio.create_task(client.get(callback, headers=host, allow_redirects=False))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            reloaded = await client.get(callback, headers=host, allow_redirects=False)
+            assert reloaded.status == 303
+            assert reloaded.headers["Location"] == "/verify/result"
+            pending = await client.get("/verify/result", headers=host)
+            assert "Potwierdzamy logowanie w Riot" in await pending.text()
+            assert pending.headers["Refresh"] == "2"
+            async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as foreign:
+                rejected = await foreign.get(
+                    client.make_url(callback),
+                    headers={**host, "Cookie": f"{BROWSER_COOKIE}={'f' * 43}"},
+                    allow_redirects=False,
+                )
+                assert "Wróć do poprzedniej przeglądarki" in await rejected.text()
+        finally:
+            release.set()
+        response = await asyncio.wait_for(first, timeout=5)
+
+        assert response.status == 303 and response.headers["Location"] == "/verify/result"
+        exchange.assert_awaited_once_with("code")
+        finished = await repository.get_by_start_token(created.token)
+        assert finished is not None and finished.status == "VERIFIED_PENDING_DISCORD"
+        page = await client.get("/verify/result", headers=host)
+        assert "Riot potwierdził konto" in await page.text()
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
+
+
+def _launch_fix_settings(
+    settings_factory: Callable[..., Settings],
+    guild_id: int,
+) -> Settings:
+    return settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+
+
+async def test_manual_rank_refresh_jumps_the_backlog_without_spending_cooldown(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    now = datetime.now(UTC)
+    try:
+        for user_id in (801, 802, 803, 804, 805):
+            await repository.create(
+                guild_id=guild_id,
+                user_id=user_id,
+                message_id=None,
+                platform="EUN1",
+                puuid=f"priority-{guild_id}-{user_id}",
+                rank_snapshot=RankSnapshot("GOLD"),
+            )
+        async with database.session_factory.begin() as session:
+            for user_id, hours in ((801, 3), (802, 2), (803, 1)):
+                link = await session.get(VerificationLink, (guild_id, user_id))
+                assert link is not None
+                link.rank_next_refresh_at = now - timedelta(hours=hours)
+            failing = await session.get(VerificationLink, (guild_id, 805))
+            assert failing is not None
+            failing.rank_refresh_failures = 1
+            failing.rank_next_refresh_at = now + timedelta(hours=1)
+        oldest_before = (await repository.rank_refresh_queue_stats(guild_id)).oldest_due_at
+        assert oldest_before is not None
+
+        enqueued = await repository.request_rank_refresh(
+            guild_id, 804, cooldown_seconds=1800, source="user"
+        )
+        assert enqueued.status is RankRefreshRequestStatus.ENQUEUED
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [804]
+        again = await repository.request_rank_refresh(
+            guild_id, 804, cooldown_seconds=1800, source="user"
+        )
+        assert again.status is RankRefreshRequestStatus.COOLDOWN
+
+        # 803 is the newest overdue row; a click moves it ahead of 801 and 802
+        # without spending the user's cooldown.
+        due = await repository.request_rank_refresh(
+            guild_id, 803, cooldown_seconds=1800, source="user"
+        )
+        assert due.status is RankRefreshRequestStatus.ALREADY_DUE
+        assert (await repository.get_by_user(guild_id, 803)).rank_user_refresh_requested_at is None
+        stats = await repository.rank_refresh_queue_stats(guild_id)
+        assert stats.oldest_due_at is not None
+        assert oldest_before - stats.oldest_due_at <= timedelta(seconds=1)
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [803]
+        running = await repository.request_rank_refresh(
+            guild_id, 803, cooldown_seconds=1800, source="user"
+        )
+        assert running.status is RankRefreshRequestStatus.ALREADY_CLAIMED
+        assert (await repository.get_by_user(guild_id, 803)).rank_user_refresh_requested_at is None
+
+        for _attempt in range(2):
+            backoff = await repository.request_rank_refresh(
+                guild_id, 805, cooldown_seconds=1800, source="user"
+            )
+            assert backoff.status is RankRefreshRequestStatus.BACKOFF_ACTIVE
+        assert (await repository.get_by_user(guild_id, 805)).rank_user_refresh_requested_at is None
+
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=2, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [801, 802]
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
+        await database.close()
+
+
+async def test_requested_rank_refreshes_are_served_first_come_first_served(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    now = datetime.now(UTC)
+    try:
+        for user_id in (901, 902, 903, 904, 905):
+            await repository.create(
+                guild_id=guild_id,
+                user_id=user_id,
+                message_id=None,
+                platform="EUN1",
+                puuid=f"fifo-{guild_id}-{user_id}",
+                rank_snapshot=RankSnapshot("GOLD"),
+            )
+        async with database.session_factory.begin() as session:
+            backlog = await session.get(VerificationLink, (guild_id, 901))
+            assert backlog is not None
+            backlog.rank_next_refresh_at = now - timedelta(hours=3)
+            already_due = await session.get(VerificationLink, (guild_id, 904))
+            assert already_due is not None
+            already_due.rank_next_refresh_at = now - timedelta(minutes=1)
+            deleting = await session.get(VerificationLink, (guild_id, 905))
+            assert deleting is not None
+            deleting.rank_next_refresh_at = now - timedelta(days=30)
+            deleting.deletion_requested_at = now
+
+        for user_id in (902, 903):
+            result = await repository.request_rank_refresh(
+                guild_id, user_id, cooldown_seconds=1800, source="user"
+            )
+            assert result.status is RankRefreshRequestStatus.ENQUEUED
+        # Clicking again while already due must not jump ahead of earlier requests.
+        for _attempt in range(5):
+            result = await repository.request_rank_refresh(
+                guild_id, 904, cooldown_seconds=1800, source="user"
+            )
+            assert result.status is RankRefreshRequestStatus.ALREADY_DUE
+
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=4, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [902, 903, 904, 901]
+        # A link waiting for deletion never anchors the priority far in the past.
+        first = await repository.get_by_user(guild_id, 902)
+        assert first is not None
+        assert now - first.rank_next_refresh_at < timedelta(hours=4)
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
+        await database.close()
+
+
+async def test_stalled_role_operation_releases_the_link_lock_and_keeps_retry_state(
+    settings_factory: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from moon_poro import repositories
+
+    monkeypatch.setattr(repositories, "ROLE_OPERATION_TIMEOUT_SECONDS", 0.2)
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=811,
+            message_id=None,
+            platform="EUN1",
+            puuid=f"timeout-{guild_id}",
+        )
+        identity = VerificationLinkIdentity.from_link(link)
+
+        async def stalled_discord_call() -> None:
+            await asyncio.sleep(30)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                repository.run_verification_role_update_with_identity(
+                    guild_id,
+                    811,
+                    identity=identity,
+                    expected_rank_last_checked_at=None,
+                    operation=stalled_discord_call,
+                ),
+                timeout=5,
+            )
+        # The row lock is gone: another locking write completes immediately.
+        refresh = await asyncio.wait_for(
+            repository.request_rank_refresh(guild_id, 811, cooldown_seconds=60, source="user"),
+            timeout=2,
+        )
+        assert refresh.status is RankRefreshRequestStatus.ALREADY_DUE
+
+        request = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            811,
+            identity=identity,
+            policy=VerificationDeletionPolicy.USER,
+        )
+        assert request.link is not None
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                repository.run_verification_deletion_role_cleanup_with_identity(
+                    guild_id,
+                    811,
+                    identity=identity,
+                    expected_requested_at=request.link.deletion_requested_at,
+                    expected_remove_rank_region_roles=False,
+                    operation=stalled_discord_call,
+                ),
+                timeout=5,
+            )
+
+        async def stalled_cleanup() -> bool:
+            await asyncio.sleep(30)
+            return True
+
+        claimed_at = request.link.deletion_claimed_at
+        assert claimed_at is not None
+        result = await asyncio.wait_for(
+            repository.process_verification_deletion_with_identity(
+                guild_id,
+                811,
+                identity=identity,
+                expected_claimed_at=claimed_at,
+                base_delay_seconds=30,
+                operation=stalled_cleanup,
+            ),
+            timeout=5,
+        )
+        assert result.status is VerificationDeletionProcessStatus.RETRY_SCHEDULED
+        pending = await repository.get_by_user(guild_id, 811)
+        assert pending is not None
+        assert pending.deletion_requested_at is not None
+        assert pending.deletion_failures == 1
+        assert pending.deletion_claimed_at is None
+    finally:
+        await _delete_verification_link(repository, guild_id, 811)
+        await database.close()
+
+
+async def test_rso_shutdown_finishes_pending_failure_update_on_postgres(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    from moon_poro.rso_web import REPOSITORY_KEY, _start_failure
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        repository = client.server.app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        state, browser = "p" * 64, "b" * 43
+        await repository.begin_oauth(token=created.token, state=state, browser_token=browser)
+        claimed = await repository.claim_callback(state, browser_token=browser)
+
+        # The failure update queues on the row lock while the app shuts down.
+        async with database.engine.connect() as blocker:
+            await blocker.begin()
+            await blocker.execute(
+                text("SELECT id FROM verification_sessions WHERE id=:id FOR UPDATE"),
+                {"id": claimed.id},
+            )
+            task = _start_failure(repository, claimed.id)
+            shutdown = asyncio.create_task(client.close())
+            await asyncio.sleep(0.3)
+            assert not task.done() and not shutdown.done()
+            await blocker.rollback()
+        await asyncio.wait_for(shutdown, timeout=5)
+
+        assert task.done() and task.exception() is None
+        stored = await repository.get_by_start_token(created.token)
+        assert stored is not None
+        assert (stored.status, stored.error_code) == ("FAILED", "INTERNAL_ERROR")
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
+        await database.close()

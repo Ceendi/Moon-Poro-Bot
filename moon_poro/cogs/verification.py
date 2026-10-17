@@ -40,8 +40,10 @@ from moon_poro.repositories import (
 )
 from moon_poro.riot import (
     API_SERVERS,
+    RANK_TO_ROLE,
     RIOT_LEAGUE_AUTH_SCOPE,
     SERVER_TRANSLATION,
+    RiotAPIInvalidResponse,
     RiotAPINotFound,
     RiotAPIUnavailable,
     get_discord_rank_role,
@@ -53,6 +55,9 @@ from moon_poro.time_utils import timestamps_match
 from moon_poro.verification_sessions import SessionAlreadyUsed
 
 logger = logging.getLogger("moon_poro.verification")
+
+# Members whose rank refresh is already followed by a private reply.
+_ACTIVE_RANK_REFRESH_WATCHES: set[tuple[int, int]] = set()
 
 type RiotPayload = dict[str, Any]
 type LeagueEntries = list[RiotPayload]
@@ -72,14 +77,19 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
     }
 )
 _ACCOUNT_PROFILE_STALE_MESSAGE = (
-    "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz."
+    "Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz."
 )
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie trwa dłużej niż zwykle. Wyświetl „Moje konto” ponownie za chwilę."
+    "Odświeżanie trwa dłużej niż zwykle. Otwórz „Moje konto” jeszcze raz za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
-    "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać."
+    "Nie udało się pokazać wyniku. Odświeżanie może jeszcze trwać, sprawdź „Moje konto” za chwilę."
 )
+_PANEL_LINK_CHANGED_MESSAGE = (
+    "Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”."
+)
+_PANEL_NOT_LINKED_MESSAGE = "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
+_ORPHAN_VERIFIED_ROLE_TIMEOUT_SECONDS = 10.0
 _DEFAULT_PRIVACY_POLICY_URL = "https://moonporo.pl/privacy/"
 _DEFAULT_TERMS_OF_SERVICE_URL = "https://moonporo.pl/terms/"
 
@@ -176,6 +186,32 @@ async def _sync_riot_id(
     return stored
 
 
+_reported_missing_roles: set[tuple[int | None, str]] = set()
+
+
+def _warn_missing_role(guild: discord.Guild, role_name: str) -> None:
+    """Log a configured role that cannot be found, once per guild and process."""
+
+    key = (getattr(guild, "id", None), role_name)
+    if key in _reported_missing_roles:
+        return
+    _reported_missing_roles.add(key)
+    logger.warning(
+        "Verification role %r was not found in guild %s; check ROLE_IDS and role names",
+        role_name,
+        key[0],
+    )
+
+
+def _find_verification_role(
+    guild: discord.Guild, role_name: str, bot: MoonPoroBot
+) -> discord.Role | None:
+    role = find_role(guild, role_name, bot.settings)
+    if role is None:
+        _warn_missing_role(guild, role_name)
+    return role
+
+
 async def _apply_verified_roles(
     bot: MoonPoroBot,
     member: discord.Member,
@@ -187,21 +223,32 @@ async def _apply_verified_roles(
     member = await member.guild.fetch_member(member.id)
     settings = bot.settings
     # A missing cache is unknown, not a Riot-confirmed unranked account.
-    rank_role = (
-        get_discord_rank_role(member.guild, get_rank_from_leagues(leagues), settings)
-        if leagues is not None
-        else None
-    )
+    rank_role = None
+    keep_current_rank = False
+    if leagues is not None:
+        try:
+            rank = get_rank_from_leagues(leagues)
+        except RiotAPIInvalidResponse:
+            # Fresh Riot data is validated by the client, so only a corrupt cached
+            # tier lands here. Treat it as unknown rather than failing the restore.
+            logger.warning("Ignoring an unknown cached rank for Discord user %s", member.id)
+            keep_current_rank = True
+        else:
+            rank_role = get_discord_rank_role(member.guild, rank, settings)
+            if rank_role is None:
+                _warn_missing_role(member.guild, RANK_TO_ROLE.get(rank.upper(), "Unranked"))
     server_name = SERVER_TRANSLATION[platform]
-    server_role = find_role(member.guild, server_name, settings)
-    verified_role = find_role(member.guild, settings.verified_role_name, settings)
-    member_role = find_role(member.guild, settings.member_role_name, settings)
+    server_role = _find_verification_role(member.guild, server_name, bot)
+    verified_role = _find_verification_role(member.guild, settings.verified_role_name, bot)
+    member_role = _find_verification_role(member.guild, settings.member_role_name, bot)
 
     managed_names = set(settings.lol_ranks + settings.lol_servers)
     no_lol_role_name = getattr(settings, "no_lol_role_name", None)
     if no_lol_role_name:
         managed_names.add(no_lol_role_name)
     desired = {role for role in (rank_role, server_role) if role is not None}
+    if keep_current_rank:
+        desired.update(member_roles_named(member, settings.lol_ranks, settings))
     current_managed = set(member_roles_named(member, managed_names, settings))
     to_remove = current_managed - desired
     to_add = desired - set(member.roles)
@@ -254,6 +301,45 @@ async def _run_pending_deletion_role_cleanup(
             expected_remove_rank_region_roles=link.deletion_remove_rank_region_roles,
             operation=operation,
         )
+
+
+async def _schedule_role_sync_retry(bot: MoonPoroBot, link: VerificationLink) -> int | None:
+    """Hand a failed role write for the observed snapshot to the durable worker."""
+
+    return await bot.verifications.retry_rank_role_sync(
+        link.guild_id,
+        link.discord_user_id,
+        base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
+        expected_rank_last_checked_at=getattr(link, "rank_last_checked_at", None),
+        expected_puuid=link.puuid,
+        expected_platform=link.platform,
+        expected_created_at=link.created_at,
+    )
+
+
+async def _clear_orphan_verified_role(bot: MoonPoroBot, member: discord.Member) -> bool:
+    """Remove a Verified role left without any verification link.
+
+    Return ``False`` when a link exists after waiting for the member's role lock,
+    so the caller must not start another verification.
+    """
+
+    guild_id = member.guild.id
+    try:
+        async with asyncio.timeout(_ORPHAN_VERIFIED_ROLE_TIMEOUT_SECONDS):
+            async with member_role_lock(guild_id, member.id):
+                # A writer holding this lock may have just finished a verification.
+                if await bot.verifications.get_by_user(guild_id, member.id) is not None:
+                    return False
+                await _remove_verified_marker(
+                    bot,
+                    member,
+                    reason="Usunięcie roli weryfikacji bez połączonego konta Riot",
+                )
+    except (discord.HTTPException, TimeoutError):
+        # The new verification sets the role again; a failure here is cosmetic.
+        logger.exception("Could not remove an orphaned Verified role from %s", member.id)
+    return True
 
 
 async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
@@ -427,11 +513,26 @@ async def _ensure_active_link_roles_once(
 ) -> bool:
     cached = _cached_rank_leagues(link)
     if cached is None:
-        applied = await _run_active_link_role_update(
-            cog.bot,
-            link,
-            lambda: _apply_verified_roles(cog.bot, member, link.platform, None),
-        )
+        try:
+            applied = await _run_active_link_role_update(
+                cog.bot,
+                link,
+                lambda: _apply_verified_roles(cog.bot, member, link.platform, None),
+            )
+        except (discord.HTTPException, TimeoutError):
+            await cog.bot.verifications.retry_rank_role_sync(
+                member.guild.id,
+                member.id,
+                base_delay_seconds=cog.bot.settings.rank_refresh_retry_base_seconds,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
+                expected_puuid=link.puuid,
+                expected_platform=link.platform,
+                expected_created_at=link.created_at,
+            )
+            logger.exception(
+                "Could not restore roles after obsolete marker cleanup for %s", member.id
+            )
+            return False
         if not applied:
             return False
         await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
@@ -442,7 +543,7 @@ async def _ensure_active_link_roles_once(
                 link,
                 lambda: cog.apply_verified_roles(member, link.platform, cached),
             )
-        except discord.HTTPException:
+        except (discord.HTTPException, TimeoutError):
             await cog.bot.verifications.retry_rank_role_sync(
                 member.guild.id,
                 member.id,
@@ -628,19 +729,9 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
             expected_created_at=link.created_at,
         )
         return
+    # Without a cached rank, restore the verified, member and region roles only.
+    # The rank refresh queue adds the rank role once Riot confirms it.
     leagues = _cached_rank_leagues(link)
-    if leagues is None:
-        acknowledged = await bot.verifications.acknowledge_rank_role_sync(
-            guild.id,
-            link.discord_user_id,
-            expected_rank_last_checked_at=link.rank_last_checked_at,
-            expected_puuid=link.puuid,
-            expected_platform=link.platform,
-            expected_created_at=link.created_at,
-        )
-        if acknowledged:
-            await bot.verifications.schedule_rank_refresh_now(guild.id, link.discord_user_id)
-        return
     try:
         applied = await _run_active_link_role_update(
             bot,
@@ -650,7 +741,7 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
     except VerificationSnapshotChanged:
         # The newer snapshot owns its own synchronization intent and ACK.
         return
-    except discord.HTTPException:
+    except (discord.HTTPException, TimeoutError):
         delay = await bot.verifications.retry_rank_role_sync(
             guild.id,
             link.discord_user_id,
@@ -670,7 +761,7 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
         return
     if not await _reconcile_applied_roles(cog, member, link):
         return
-    await bot.verifications.acknowledge_rank_role_sync(
+    acknowledged = await bot.verifications.acknowledge_rank_role_sync(
         guild.id,
         link.discord_user_id,
         expected_rank_last_checked_at=link.rank_last_checked_at,
@@ -678,6 +769,8 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
         expected_platform=link.platform,
         expected_created_at=link.created_at,
     )
+    if leagues is None and acknowledged:
+        await bot.verifications.schedule_rank_refresh_now(guild.id, link.discord_user_id)
 
 
 async def _retry_next_rso_audit_cleanup(cog: VerificationCog) -> None:
@@ -783,7 +876,9 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         )
         return
     except RiotAPIUnavailable as error:
-        if error.status in {401, 403} or not bot.riot_auth_breaker.can_attempt(
+        # A single 403 does not open the league gate, so it backs off like any
+        # other failure instead of putting the same link straight back in the queue.
+        if error.status == 401 or not bot.riot_auth_breaker.can_attempt(
             scope=RIOT_LEAGUE_AUTH_SCOPE
         ):
             await bot.verifications.release_rank_refresh_claim(
@@ -838,7 +933,7 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         )
     except VerificationSnapshotChanged:
         return
-    except discord.HTTPException:
+    except (discord.HTTPException, TimeoutError):
         await bot.verifications.retry_rank_role_sync(
             guild.id,
             link.discord_user_id,
@@ -960,20 +1055,15 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
                     reason="Dokończenie usuwania weryfikacji Riot",
                 ),
             )
-        except discord.HTTPException:
+        except (discord.HTTPException, TimeoutError):
+            # The deletion queue retries this cleanup on its own schedule.
             logger.exception("Could not enforce pending verification deletion for %s", member.id)
         return
     if not link.puuid:
         return
+    # Without a cached rank, restore Verified, member and region roles only and
+    # let the rank refresh queue add the rank role once Riot confirms it.
     leagues = _cached_rank_leagues(link)
-    if leagues is None:
-        await cog.bot.verifications.request_rank_refresh(
-            member.guild.id,
-            member.id,
-            cooldown_seconds=cog.bot.settings.rank_refresh_manual_priority_cooldown_seconds,
-            source="role_tamper",
-        )
-        return
     try:
         applied = await _run_active_link_role_update(
             cog.bot,
@@ -983,8 +1073,13 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
     except VerificationSnapshotChanged:
         await _ensure_active_link_roles(cog, member, link)
         return
-    except discord.HTTPException:
-        logger.exception("Could not restore cached verification roles for %s", member.id)
+    except (discord.HTTPException, TimeoutError):
+        delay = await _schedule_role_sync_retry(cog.bot, link)
+        logger.exception(
+            "Could not restore verification roles for %s; retrying in %s seconds",
+            member.id,
+            delay,
+        )
     else:
         if not applied:
             return
@@ -999,6 +1094,14 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
                 expected_platform=link.platform,
                 expected_created_at=link.created_at,
             )
+    if leagues is None:
+        await cog.bot.verifications.request_rank_refresh(
+            member.guild.id,
+            member.id,
+            cooldown_seconds=cog.bot.settings.rank_refresh_manual_priority_cooldown_seconds,
+            source="role_tamper",
+        )
+        return
     checked_at = getattr(link, "rank_last_checked_at", None)
     if _timestamp_is_older_than(checked_at, timedelta(hours=24)):
         await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
@@ -1039,7 +1142,8 @@ async def _reconcile_cached_role_change(
                     reason="Dokończenie usuwania weryfikacji Riot",
                 ),
             )
-        except discord.HTTPException:
+        except (discord.HTTPException, TimeoutError):
+            # The deletion queue retries this cleanup on its own schedule.
             logger.exception("Could not enforce pending verification deletion for %s", after.id)
         return
     if not link.puuid:
@@ -1055,8 +1159,13 @@ async def _reconcile_cached_role_change(
         except VerificationSnapshotChanged:
             await _ensure_active_link_roles(cog, after, link)
             return
-        except discord.HTTPException:
-            logger.exception("Could not restore cached verification roles for %s", after.id)
+        except (discord.HTTPException, TimeoutError):
+            delay = await _schedule_role_sync_retry(cog.bot, link)
+            logger.exception(
+                "Could not restore cached verification roles for %s; retrying in %s seconds",
+                after.id,
+                delay,
+            )
         else:
             if not applied:
                 return
@@ -1081,24 +1190,22 @@ async def _reconcile_cached_role_change(
             )
         return
 
-    async def restore_canonical_roles() -> None:
-        cog._managed_role_updates.add(after.id)
-        try:
-            await _apply_verified_roles(cog.bot, after, link.platform, None)
-        finally:
-            cog._managed_role_updates.discard(after.id)
-
     try:
         applied = await _run_active_link_role_update(
             cog.bot,
             link,
-            restore_canonical_roles,
+            lambda: cog.apply_verified_roles(after, link.platform, None),
         )
     except VerificationSnapshotChanged:
         await _ensure_active_link_roles(cog, after, link)
         return
-    except discord.HTTPException:
-        logger.exception("Could not restore canonical verification roles for %s", after.id)
+    except (discord.HTTPException, TimeoutError):
+        delay = await _schedule_role_sync_retry(cog.bot, link)
+        logger.exception(
+            "Could not restore canonical verification roles for %s; retrying in %s seconds",
+            after.id,
+            delay,
+        )
         return
     if not applied:
         return
@@ -1154,12 +1261,12 @@ async def _remove_user_verification(
         link=link,
     )
     if not completed:
-        return "Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie."
+        return "Usuwanie powiązania jeszcze trwa. Bot dokończy je sam."
     if identity.puuid is None:
         return "Usunięto poprzednie powiązanie. Możesz teraz ponownie połączyć konto Riot."
     return (
         "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
-        "Role regionu, rangi i użytkownika pozostają bez zmian."
+        "Role regionu i rangi oraz rola „Użytkownik” zostają."
     )
 
 
@@ -1281,10 +1388,24 @@ async def _retry_next_verification_deletion(cog: VerificationCog) -> None:
     )
 
 
+def _panel_refresh_blocker(link: VerificationLink | None) -> str | None:
+    if link is None:
+        return _PANEL_NOT_LINKED_MESSAGE
+    if link.deletion_requested_at is not None:
+        return "Usuwanie powiązania jeszcze trwa."
+    if not link.puuid:
+        return "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”."
+    return None
+
+
 async def _request_rank_refresh_from_panel(
     bot: MoonPoroBot,
     interaction: discord.Interaction,
+    *,
+    start_verification: VerificationStarter,
 ) -> None:
+    """Run the public panel refresh through the private account profile view."""
+
     if interaction.guild_id != bot.settings.guild_id or not isinstance(
         interaction.user, discord.Member
     ):
@@ -1292,31 +1413,39 @@ async def _request_rank_refresh_from_panel(
             "Rangę możesz odświeżyć tylko na serwerze Moon Poro.", ephemeral=True
         )
         return
-    result = await bot.verifications.request_rank_refresh(
-        interaction.guild_id,
-        interaction.user.id,
-        cooldown_seconds=bot.settings.rank_refresh_button_cooldown_seconds,
-        source="user",
+    # The queue lookup and request use the database; answer Discord first.
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        link = await bot.verifications.get_by_user(interaction.guild_id, interaction.user.id)
+    except Exception:
+        logger.exception("Could not open rank refresh for %s", interaction.user.id)
+        await interaction.edit_original_response(
+            content="Nie udało się rozpocząć odświeżania. Spróbuj ponownie."
+        )
+        return
+    blocker = _panel_refresh_blocker(link)
+    if blocker is not None or link is None:
+        await interaction.edit_original_response(content=blocker or _PANEL_NOT_LINKED_MESSAGE)
+        return
+    view = AccountProfileView(
+        bot,
+        owner_id=interaction.user.id,
+        presentation=_build_account_profile(bot, link),
+        link=link,
+        start_verification=start_verification,
     )
-    messages = {
-        RankRefreshRequestStatus.ENQUEUED: "Odświeżenie rangi czeka w kolejce.",
-        RankRefreshRequestStatus.ALREADY_DUE: "Odświeżenie rangi jest już w kolejce.",
-        RankRefreshRequestStatus.ALREADY_CLAIMED: "Trwa już odświeżanie rangi.",
-        RankRefreshRequestStatus.BACKOFF_ACTIVE: (
-            "Riot jest chwilowo niedostępny. Spróbujemy ponownie automatycznie."
-        ),
-        RankRefreshRequestStatus.LINK_CHANGED: (
-            "Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”."
-        ),
-        RankRefreshRequestStatus.NOT_LINKED: (
-            "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
-        ),
-    }
-    if result.status == RankRefreshRequestStatus.COOLDOWN:
-        message = _rank_refresh_cooldown_message(result.retry_after_seconds)
-    else:
-        message = messages[result.status]
-    await interaction.response.send_message(message, ephemeral=True)
+    view.stale_message = _PANEL_LINK_CHANGED_MESSAGE
+    await view.run_rank_refresh(interaction, deferred=True)
+
+
+def _riot_id_from_account(account: RiotPayload) -> str | None:
+    game_name = account.get("gameName")
+    tag_line = account.get("tagLine")
+    if not isinstance(game_name, str) or not isinstance(tag_line, str):
+        return None
+    if not game_name.strip() or not tag_line.strip():
+        return None
+    return f"{game_name.strip()}#{tag_line.strip()}"
 
 
 def _riot_id_from_link(link: VerificationLink | None) -> str | None:
@@ -1365,6 +1494,7 @@ class AccountProfileView(discord.ui.View):
         self.presentation = presentation
         self.start_verification = start_verification
         self.link_identity = VerificationLinkIdentity.from_link(link) if link is not None else None
+        self.stale_message = _ACCOUNT_PROFILE_STALE_MESSAGE
         self._refresh_in_progress = False
 
         if presentation.state is AccountProfileState.UNVERIFIED:
@@ -1430,16 +1560,18 @@ class AccountProfileView(discord.ui.View):
         interaction: discord.Interaction,
         presentation: AccountProfilePresentation,
         link: VerificationLink,
+        *,
+        content: str | None = None,
     ) -> None:
         await interaction.edit_original_response(
-            content=None,
+            content=content,
             embed=presentation.embed,
             view=self._new_view(presentation, link),
         )
 
     async def _edit_stale_profile(self, interaction: discord.Interaction) -> None:
         await interaction.edit_original_response(
-            content=_ACCOUNT_PROFILE_STALE_MESSAGE,
+            content=self.stale_message,
             embed=None,
             view=None,
         )
@@ -1452,6 +1584,30 @@ class AccountProfileView(discord.ui.View):
         baseline_rank_last_checked_at: datetime | None,
     ) -> None:
         guild_id = interaction.guild_id or 0
+        watch_key = (guild_id, self.owner_id)
+        if watch_key in _ACTIVE_RANK_REFRESH_WATCHES:
+            # Another reply already follows this refresh; repeated clicks only
+            # show the current state instead of polling the database again.
+            return
+        _ACTIVE_RANK_REFRESH_WATCHES.add(watch_key)
+        try:
+            await self._poll_rank_refresh(
+                interaction,
+                guild_id=guild_id,
+                initial_state=initial_state,
+                baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+            )
+        finally:
+            _ACTIVE_RANK_REFRESH_WATCHES.discard(watch_key)
+
+    async def _poll_rank_refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        initial_state: AccountProfileState,
+        baseline_rank_last_checked_at: datetime | None,
+    ) -> None:
         current_state = initial_state
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS
@@ -1528,7 +1684,7 @@ class AccountProfileView(discord.ui.View):
     async def refresh_rank(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button[AccountProfileView],
+        _button: discord.ui.Button[AccountProfileView],
     ) -> None:
         if self._refresh_in_progress:
             await interaction.response.send_message(
@@ -1536,6 +1692,22 @@ class AccountProfileView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        await self.run_rank_refresh(interaction, deferred=False)
+
+    async def run_rank_refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        deferred: bool,
+    ) -> None:
+        """Queue one manual refresh and keep the original response up to date.
+
+        ``deferred`` is true when the caller already answered the interaction
+        with a private thinking response, as the public panel does. That
+        response has no profile yet, so every outcome replaces its content.
+        """
+
+        button = self.refresh_rank
         self._refresh_in_progress = True
         button.disabled = True
         button.label = REFRESH_RUNNING_BUTTON_LABEL
@@ -1543,7 +1715,8 @@ class AccountProfileView(discord.ui.View):
         request_recorded = False
         checking_cooldown = False
         try:
-            await interaction.response.defer()
+            if not deferred:
+                await interaction.response.defer()
             identity = self.link_identity
             if identity is None or identity.puuid is None:
                 await self._edit_stale_profile(interaction)
@@ -1594,10 +1767,13 @@ class AccountProfileView(discord.ui.View):
                     AccountProfileState.SUCCESS,
                 }:
                     self._restore_refresh_button(button)
-                    await interaction.followup.send(
-                        _rank_refresh_cooldown_message(result.retry_after_seconds),
-                        ephemeral=True,
-                    )
+                    cooldown_message = _rank_refresh_cooldown_message(result.retry_after_seconds)
+                    if deferred:
+                        await self._edit_presentation(
+                            interaction, presentation, link, content=cooldown_message
+                        )
+                    else:
+                        await interaction.followup.send(cooldown_message, ephemeral=True)
                     return
                 await self._edit_presentation(interaction, presentation, link)
                 return
@@ -1613,24 +1789,51 @@ class AccountProfileView(discord.ui.View):
                 )
         except Exception:
             logger.exception("Could not refresh account profile for %s", self.owner_id)
-            if request_recorded:
+            await self._report_refresh_failure(
+                interaction,
+                deferred=deferred,
+                request_recorded=request_recorded,
+                checking_cooldown=checking_cooldown,
+            )
+
+    async def _report_refresh_failure(
+        self,
+        interaction: discord.Interaction,
+        *,
+        deferred: bool,
+        request_recorded: bool,
+        checking_cooldown: bool,
+    ) -> None:
+        if request_recorded:
+            if deferred:
                 with suppress(discord.HTTPException):
-                    await interaction.edit_original_response(view=self)
-                with suppress(discord.HTTPException):
-                    await interaction.followup.send(
-                        _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=_ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
+                        embed=None,
+                        view=None,
                     )
                 return
-            self._restore_refresh_button(button)
-            await interaction.followup.send(
-                (
-                    "Nie udało się sprawdzić możliwości odświeżenia. Spróbuj ponownie."
-                    if checking_cooldown
-                    else "Nie udało się rozpocząć odświeżania. Spróbuj ponownie."
-                ),
-                ephemeral=True,
-            )
+            with suppress(discord.HTTPException):
+                await interaction.edit_original_response(view=self)
+            with suppress(discord.HTTPException):
+                await interaction.followup.send(
+                    _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE,
+                    ephemeral=True,
+                )
+            return
+        self._restore_refresh_button(self.refresh_rank)
+        failure_message = (
+            "Nie udało się sprawdzić, czy możesz odświeżyć rangę. Spróbuj ponownie."
+            if checking_cooldown
+            else "Nie udało się rozpocząć odświeżania. Spróbuj ponownie."
+        )
+        if deferred:
+            with suppress(discord.HTTPException):
+                await interaction.edit_original_response(
+                    content=failure_message, embed=None, view=None
+                )
+            return
+        await interaction.followup.send(failure_message, ephemeral=True)
 
     @discord.ui.button(
         label="Usuń powiązanie",
@@ -1778,14 +1981,14 @@ async def _show_delete_confirmation(
         confirmation = (
             "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i użytkownika pozostaną bez zmian.\n"
+            "Role regionu i rangi oraz rola „Użytkownik” zostaną.\n"
             "Po usunięciu możesz ponownie połączyć konto Riot."
         )
     else:
         confirmation = (
             "Czy na pewno chcesz usunąć powiązanie z kontem Riot?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i użytkownika pozostaną bez zmian."
+            "Role regionu i rangi oraz rola „Użytkownik” zostaną."
         )
     await interaction.response.send_message(
         confirmation,
@@ -1859,12 +2062,12 @@ class AdminDeleteVerificationConfirmationView(discord.ui.View):
                 VerificationDeletionRequestStatus.LINK_CHANGED,
                 VerificationDeletionRequestStatus.NOT_LINKED,
             }:
-                message = "Powiązanie zmieniło się. Uruchom komendę ponownie."
+                message = "Powiązanie się zmieniło. Użyj komendy jeszcze raz."
             elif result.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED:
                 message = "Usuwanie tego powiązania już trwa."
             elif result.status is VerificationDeletionRequestStatus.POLICY_CONFLICT:
                 message = (
-                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
+                    "Ta osoba sama zaczęła już usuwać powiązanie. Role regionu i rangi zostaną."
                 )
             elif result.link is None:
                 message = "Nie udało się rozpocząć usuwania. Spróbuj ponownie."
@@ -1971,15 +2174,17 @@ class VerificationStartView(discord.ui.View):
             )
         ):
             await interaction.edit_original_response(
-                content="Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+                content="Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
             )
             return
-        if (
-            member_has_role(
-                interaction.user, self.bot.settings.verified_role_name, self.bot.settings
-            )
-            or existing_link is not None
+        already_linked = existing_link is not None
+        if not already_linked and member_has_role(
+            interaction.user, self.bot.settings.verified_role_name, self.bot.settings
         ):
+            # A Verified role without any link is stale. "Moje konto" would show
+            # no account to remove, so clear the role and start normally.
+            already_linked = not await _clear_orphan_verified_role(self.bot, interaction.user)
+        if already_linked:
             await interaction.edit_original_response(
                 content="Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
                 "obecne powiązanie w sekcji „Moje konto”.",
@@ -1996,7 +2201,7 @@ class VerificationStartView(discord.ui.View):
             )
         except SessionAlreadyUsed:
             await interaction.edit_original_response(
-                content="Łączenie konta już trwa lub zostało zakończone. Sprawdź sekcję „Moje konto”.",
+                content="Łączenie konta już trwa albo się zakończyło. Sprawdź „Moje konto”.",
             )
             return
         verification_url = f"{self.bot.settings.rso_base_url}/verify/start/{session.token}"
@@ -2014,11 +2219,12 @@ class VerificationStartView(discord.ui.View):
             description=(
                 "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
                 "Moon Poro nie zobaczy Twojego hasła. "
-                f"Jednorazowy link wygaśnie za {minutes} min."
+                f"Link jest przypisany do Twojego konta Discord i wygaśnie za {minutes} min. "
+                "Nie przekazuj go nikomu."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
-        embed.set_footer(text="Po zalogowaniu wróć do Discorda. Role zostaną nadane automatycznie.")
+        embed.set_footer(text="Po zalogowaniu wróć do Discorda, role pojawią się same.")
         await interaction.edit_original_response(content=None, embed=embed, view=link_view)
 
     @discord.ui.button(
@@ -2047,7 +2253,11 @@ class VerificationStartView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button[VerificationStartView],
     ) -> None:
-        await _request_rank_refresh_from_panel(self.bot, interaction)
+        await _request_rank_refresh_from_panel(
+            self.bot,
+            interaction,
+            start_verification=self.begin_verification,
+        )
 
     @discord.ui.button(
         label="Usuń powiązanie",
@@ -2094,7 +2304,7 @@ class VerificationCog(commands.Cog):
         self,
         member: discord.Member,
         platform: str,
-        leagues: LeagueEntries,
+        leagues: LeagueEntries | None,
     ) -> None:
         self._managed_role_updates.add(member.id)
         try:
@@ -2104,14 +2314,37 @@ class VerificationCog(commands.Cog):
 
     @tasks.loop(seconds=3, reconnect=True)
     async def complete_rso_verifications(self) -> None:
-        # Finish already accepted icon proofs when the server switches to RSO.
+        # tasks.loop stops for good on an unhandled exception, and a database
+        # outage raises from every call here. Log it and let the next run retry.
+        try:
+            await self._complete_pending_verifications()
+        except Exception:
+            logger.exception("RSO completion worker error; next run will retry")
+
+    async def _complete_pending_verifications(self) -> None:
+        # Finish both RSO sessions and accepted icon proofs, so switching the
+        # verification mode never strands sessions created by the other mode.
         records = await self.bot.verification_sessions.claim_pending(limit=5, method=None)
         for record in records:
             try:
                 await self._complete_rso_verification(record)
             except Exception:
-                logger.exception("Unexpected RSO completion error for session %s", record.id)
-                await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
+                logger.exception(
+                    "Unexpected verification completion error for session %s", record.id
+                )
+                await self._retry_rso_completion_safely(record, "UNEXPECTED_COMPLETION_ERROR")
+
+    async def _retry_rso_completion_safely(
+        self, record: VerificationSession, error_code: str
+    ) -> None:
+        # One failed retry write must not abort the rest of the batch. A claim
+        # left behind is reclaimed by claim_pending once it becomes stale.
+        try:
+            await self._retry_rso_completion(record, error_code)
+        except Exception:
+            logger.exception(
+                "Could not schedule verification completion retry for session %s", record.id
+            )
 
     async def _reconcile_rso_audits(self) -> None:
         reconciliations = await self.bot.verification_sessions.claim_audit_reconciliations(limit=5)
@@ -2120,7 +2353,7 @@ class VerificationCog(commands.Cog):
                 await self._publish_rso_audit(record)
             except Exception:
                 logger.exception("Could not reconcile RSO audit for session %s", record.id)
-                await self._retry_rso_completion(record, "DISCORD_AUDIT_UNAVAILABLE")
+                await self._retry_rso_completion_safely(record, "DISCORD_AUDIT_UNAVAILABLE")
 
     async def _complete_rso_verification(self, record: VerificationSession) -> None:
         platform = record.platform
@@ -2154,8 +2387,11 @@ class VerificationCog(commands.Cog):
                 record.id, "VERIFICATION_LINK_CHANGED"
             )
             return
-        cached = _cached_rank_leagues(link) if link is not None else None
-        cached_checked_at = link.rank_last_checked_at if link is not None else None
+        cached = _cached_rank_leagues(link)
+        cached_checked_at = link.rank_last_checked_at
+        role_leagues: LeagueEntries | None
+        checked_at: datetime | None
+        rank_pending = False
         try:
             if (
                 cached_checked_at is not None
@@ -2165,17 +2401,32 @@ class VerificationCog(commands.Cog):
                 role_leagues = cached
                 checked_at = cached_checked_at
             else:
-                leagues = await _get_leagues(self.bot, platform, puuid)
-                recorded = await _record_leagues(
-                    self.bot,
-                    link,
-                    leagues,
-                    expected_claimed_at=None,
-                )
-                if recorded is None:
-                    await self._retry_rso_completion(record, "RANK_SNAPSHOT_CONFLICT")
-                    return
-                role_leagues, checked_at = recorded
+                try:
+                    leagues = await _get_leagues(self.bot, platform, puuid)
+                except RiotAPIUnavailable as error:
+                    # A Riot outage can outlast the completion retry budget. Finish
+                    # now without guessing a rank; the rank refresh queue adds the
+                    # rank role after Riot confirms it.
+                    logger.warning(
+                        "Riot rank unavailable (HTTP %s) for session %s; "
+                        "completing verification without a rank",
+                        error.status,
+                        record.id,
+                    )
+                    role_leagues = cached
+                    checked_at = cached_checked_at
+                    rank_pending = True
+                else:
+                    recorded = await _record_leagues(
+                        self.bot,
+                        link,
+                        leagues,
+                        expected_claimed_at=None,
+                    )
+                    if recorded is None:
+                        await self._retry_rso_completion(record, "RANK_SNAPSHOT_CONFLICT")
+                        return
+                    role_leagues, checked_at = recorded
             applied = await _run_active_link_role_update(
                 self.bot,
                 link,
@@ -2185,10 +2436,7 @@ class VerificationCog(commands.Cog):
         except VerificationSnapshotChanged:
             await self._retry_rso_completion(record, "RANK_SNAPSHOT_CONFLICT")
             return
-        except RiotAPIUnavailable:
-            await self._retry_rso_completion(record, "RIOT_API_UNAVAILABLE")
-            return
-        except discord.HTTPException:
+        except (discord.HTTPException, TimeoutError):
             await self.bot.verifications.retry_rank_role_sync(
                 record.guild_id,
                 record.discord_user_id,
@@ -2218,6 +2466,12 @@ class VerificationCog(commands.Cog):
             expected_platform=link.platform,
             expected_created_at=link.created_at,
         )
+        if rank_pending:
+            # Make the new link due now. An active Riot backoff keeps its own
+            # schedule, so the queue does not hammer Riot during the outage.
+            await self.bot.verifications.schedule_rank_refresh_now(
+                record.guild_id, record.discord_user_id
+            )
 
         try:
             completed = await self._publish_rso_audit(record)
@@ -2237,11 +2491,19 @@ class VerificationCog(commands.Cog):
                 observed_current=current,
             )
             return
-        with suppress(discord.Forbidden, discord.HTTPException):
-            await member.send(
-                "Twoje konto Riot zostało zweryfikowane. "
-                f"Na serwerze **{guild.name}** zaktualizowano role regionu i rangi."
+        if role_leagues is None:
+            message = (
+                "Twoje konto Riot jest połączone. "
+                f"Na serwerze **{guild.name}** masz już rolę regionu, "
+                "a rolę rangi bot doda, gdy Riot ją potwierdzi."
             )
+        else:
+            message = (
+                "Twoje konto Riot jest połączone. "
+                f"Na serwerze **{guild.name}** masz już role regionu i rangi."
+            )
+        with suppress(discord.Forbidden, discord.HTTPException):
+            await member.send(message)
 
     async def _publish_rso_audit(self, record: VerificationSession) -> bool:
         channel_id = record.audit_pending_channel_id or self.bot.settings.zweryfikowani_channel_id
@@ -2369,7 +2631,10 @@ class VerificationCog(commands.Cog):
 
     @tasks.loop(minutes=5, reconnect=True)
     async def report_riot_monitoring(self) -> None:
-        await _report_riot_monitoring(self.bot)
+        try:
+            await _report_riot_monitoring(self.bot)
+        except Exception:
+            logger.exception("Riot monitoring report failed; next run will retry")
 
     @tasks.loop(hours=24, reconnect=True)
     async def verification_maintenance(self) -> None:
@@ -2441,8 +2706,8 @@ class VerificationCog(commands.Cog):
         embed = discord.Embed(
             title="Weryfikacja konta League of Legends",
             description=(
-                "Połącz konto przez oficjalne logowanie Riot. Bot zapisze Riot ID i region "
-                "oraz będzie aktualizował rangę Solo/Duo i role."
+                "Zaloguj się przez Riot, a bot nada Ci role regionu i rangi Solo/Duo. "
+                "Potem będzie sam dbał o to, żeby ranga była aktualna."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
@@ -2451,7 +2716,7 @@ class VerificationCog(commands.Cog):
             value=_verification_legal_links(self.bot),
             inline=False,
         )
-        embed.set_footer(text="Logowanie odbywa się na stronie Riot.")
+        embed.set_footer(text="Hasło wpisujesz tylko na stronie Riot.")
         await interaction.response.send_message(embed=embed, view=self.rso_start_view)
 
     @app_commands.command(
@@ -2482,7 +2747,7 @@ class VerificationCog(commands.Cog):
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.choices(server=_server_choices(), powod=_lookup_reason_choices())
-    @app_commands.command(name="show_wer_user", description="Znajduje Discord na podstawie Riot ID")
+    @app_commands.command(name="show_wer_user", description="Szuka konta Discord po Riot ID")
     async def lookup_by_riot_id(
         self,
         interaction: discord.Interaction,
@@ -2512,13 +2777,13 @@ class VerificationCog(commands.Cog):
         if link:
             await interaction.followup.send(
                 f"Powiązane konto Discord: <@{link.discord_user_id}> (`{link.discord_user_id}`). "
-                "Sprawdzenie zapisano w dzienniku audytowym.",
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                "Nie znaleziono powiązania. Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
 
@@ -2545,26 +2810,39 @@ class VerificationCog(commands.Cog):
         )
         if link is None or not link.puuid:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                "Nie znaleziono powiązania. Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
             return
+        region = SERVER_TRANSLATION.get(link.platform, link.platform)
         try:
             account = await riot_api_call(
                 lambda: self.bot.riot_client.get_account_v1_by_puuid(
                     puuid=link.puuid, region=API_SERVERS[link.platform]
-                )
+                ),
+                not_found=None,
             )
         except RiotAPIUnavailable:
             await interaction.followup.send("Riot jest chwilowo niedostępny.", ephemeral=True)
             return
         if account is None:
-            await interaction.followup.send("Nie udało się pobrać Riot ID.", ephemeral=True)
+            await interaction.followup.send(
+                f"Riot nie znalazł konta przypisanego do tego powiązania (region **{region}**). "
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
+                ephemeral=True,
+            )
+            return
+        riot_id = _riot_id_from_account(account)
+        if riot_id is None:
+            await interaction.followup.send(
+                f"Riot nie zwrócił Riot ID dla tego konta (region **{region}**). "
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
+                ephemeral=True,
+            )
             return
         await interaction.followup.send(
-            f"Konto Riot: **{account['gameName']}#{account['tagLine']}**, region "
-            f"**{SERVER_TRANSLATION[link.platform]}**. "
-            "Sprawdzenie zapisano w dzienniku audytowym.",
+            f"Konto Riot: **{discord.utils.escape_markdown(riot_id)}**, region **{region}**. "
+            "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
             ephemeral=True,
         )
 
@@ -2572,7 +2850,7 @@ class VerificationCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.choices(server=_server_choices())
     @app_commands.command(
-        name="usun_wer_nick", description="Administracyjnie usuwa powiązanie Riot ID"
+        name="usun_wer_nick", description="Usuwa powiązanie wybranej osoby z kontem Riot"
     )
     async def remove_by_riot_id(
         self,
@@ -2609,12 +2887,14 @@ class VerificationCog(commands.Cog):
                 message = "Usuwanie tego powiązania już trwa."
             else:
                 message = (
-                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
+                    "Ta osoba sama zaczęła już usuwać powiązanie. Role regionu i rangi zostaną."
                 )
             await interaction.followup.send(message, ephemeral=True)
             return
 
-        riot_id = discord.utils.escape_markdown(f"{account['gameName']}#{account['tagLine']}")
+        riot_id = discord.utils.escape_markdown(
+            _riot_id_from_account(account) or f"{nick.strip()}#{tag.replace('#', '').strip()}"
+        )
         region = SERVER_TRANSLATION.get(link.platform, link.platform)
         await interaction.followup.send(
             (

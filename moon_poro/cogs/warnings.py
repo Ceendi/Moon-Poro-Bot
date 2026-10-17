@@ -41,7 +41,7 @@ def warning_embed(
         if resolved_status is WarningStatus.ACTIVE
         else discord.Colour(0x607D8B)
     )
-    title = f"{role_name} — {suffix}" if suffix else role_name
+    title = f"{role_name} ({suffix})" if suffix else role_name
     embed = discord.Embed(
         title=title,
         description=f"Punkty regulaminu: {warning.reasons}",
@@ -51,14 +51,14 @@ def warning_embed(
         embed.add_field(name="Opis", value=warning.description[:1024], inline=False)
     embed.add_field(name="Data otrzymania", value=f"<t:{int(warning.starts_at.timestamp())}:F>")
     embed.add_field(name="Data zakończenia", value=f"<t:{int(warning.expires_at.timestamp())}:F>")
-    embed.add_field(name="Użytkownik", value=f"<@{warning.discord_user_id}>", inline=False)
+    embed.add_field(name="Osoba", value=f"<@{warning.discord_user_id}>", inline=False)
     moderators = ", ".join(f"<@{item.moderator_id}>" for item in warning.moderators) or "brak"
     embed.add_field(name="Moderatorzy", value=moderators, inline=False)
     if resolved_status is not WarningStatus.ACTIVE:
         labels = {
-            WarningStatus.EXPIRED: "Wygasł (EXPIRED)",
-            WarningStatus.REVOKED: "Cofnięty (REVOKED)",
-            WarningStatus.SUPERSEDED: "Zastąpiony (SUPERSEDED)",
+            WarningStatus.EXPIRED: "Wygasł",
+            WarningStatus.REVOKED: "Cofnięty",
+            WarningStatus.SUPERSEDED: "Zastąpiony wyższym poziomem",
         }
         embed.add_field(name="Status", value=labels[resolved_status], inline=False)
     embed.set_footer(text=f"ID kary: {warning.id}")
@@ -245,7 +245,7 @@ class WarningsCog(commands.Cog):
             Choice(name="TIMEOUT", value=3),
         ]
     )
-    @app_commands.command(name="w", description="Nadaje lub eskaluje karę użytkownika")
+    @app_commands.command(name="w", description="Nadaje karę albo podnosi jej poziom")
     async def warn(
         self,
         interaction: discord.Interaction,
@@ -267,7 +267,7 @@ class WarningsCog(commands.Cog):
             and interaction.guild.owner_id != interaction.user.id
         ):
             await interaction.followup.send(
-                "Nie możesz ukarać użytkownika z równą lub wyższą rolą.",
+                "Nie możesz ukarać osoby z taką samą albo wyższą rolą.",
                 ephemeral=True,
             )
             return
@@ -276,14 +276,14 @@ class WarningsCog(commands.Cog):
             active = await self.bot.warnings.get_active(interaction.guild_id or 0, uzytkownik.id)
             if active is not None and active.level >= 3:
                 await interaction.followup.send(
-                    "Użytkownik ma już najwyższy poziom kary.", ephemeral=True
+                    "Ta osoba ma już najwyższy poziom kary.", ephemeral=True
                 )
                 return
             channel_id = self.bot.settings.warn_channel_id
             channel = interaction.guild.get_channel(channel_id) if channel_id else None
             if not isinstance(channel, discord.abc.Messageable):
                 await interaction.followup.send(
-                    "Kanał kar jest źle skonfigurowany.", ephemeral=True
+                    "Kanał kar nie jest ustawiony albo bot go nie widzi.", ephemeral=True
                 )
                 return
 
@@ -352,10 +352,12 @@ class WarningsCog(commands.Cog):
                     warning.id,
                 )
             suffix = (
-                " Synchronizacja Discord zostanie automatycznie ponowiona." if sync_failed else ""
+                " Bot dokończy aktualizację roli i wpisu na kanale kar w ciągu kilku minut."
+                if sync_failed
+                else ""
             )
             await interaction.followup.send(
-                f"{uzytkownik.mention} otrzymał karę **{role_name}**.{suffix}",
+                f"{uzytkownik.mention} ma teraz karę **{role_name}**.{suffix}",
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
 
@@ -372,7 +374,7 @@ class WarningsCog(commands.Cog):
         async with self._member_locks[(interaction.guild.id, uzytkownik.id)]:
             result = await self.bot.warnings.revert(interaction.guild_id or 0, uzytkownik.id)
             if result is None:
-                await interaction.followup.send("Użytkownik nie ma aktywnej kary.", ephemeral=True)
+                await interaction.followup.send("Ta osoba nie ma aktywnej kary.", ephemeral=True)
                 return
             current, previous = result
             channel_id = self.bot.settings.warn_channel_id
@@ -412,7 +414,9 @@ class WarningsCog(commands.Cog):
                     current.id,
                 )
             suffix = (
-                " Synchronizacja Discord zostanie automatycznie ponowiona." if sync_failed else ""
+                " Bot dokończy aktualizację roli i wpisu na kanale kar w ciągu kilku minut."
+                if sync_failed
+                else ""
             )
             if previous:
                 await interaction.followup.send(

@@ -1,7 +1,10 @@
+import pytest
+
 from moon_poro.rank_refresh import (
     SIX_HOURS,
     TWELVE_HOURS,
     TWENTY_FOUR_HOURS,
+    InvalidLeagueEntries,
     RankSnapshot,
     decide_rank_refresh,
     deterministic_accelerating_jitter,
@@ -10,6 +13,7 @@ from moon_poro.rank_refresh import (
     predicted_requests_per_day,
     retry_delay_with_jitter,
     solo_rank_snapshot,
+    validate_league_entries,
 )
 
 
@@ -48,6 +52,36 @@ def test_parser_reads_every_league_v4_field_used_by_scheduler() -> None:
 
     assert parsed == RankSnapshot("EMERALD", "I", 73, 123, 99, False)
     assert solo_rank_snapshot([]) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"<html>gateway error</html>",
+        {"queueType": "RANKED_SOLO_5x5", "tier": "GOLD"},
+        None,
+        ["RANKED_SOLO_5x5"],
+        [{"queueType": "RANKED_SOLO_5x5"}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": None}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": ""}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": "WOOD"}],
+        [{"queueType": "RANKED_SOLO_5x5", "tier": "UNRANKED"}],
+    ],
+)
+def test_parser_rejects_malformed_league_payloads(payload: object) -> None:
+    with pytest.raises(InvalidLeagueEntries):
+        solo_rank_snapshot(payload)  # type: ignore[arg-type]
+
+
+def test_validator_accepts_cached_unranked_only_when_allowed() -> None:
+    cached = [{"queueType": "RANKED_SOLO_5x5", "tier": "UNRANKED"}]
+
+    assert validate_league_entries(cached, allow_unranked=True) == cached
+    with pytest.raises(InvalidLeagueEntries):
+        validate_league_entries(cached)
+    flex_only = [{"queueType": "RANKED_FLEX_SR"}]
+    assert validate_league_entries(flex_only) == flex_only
 
 
 def test_first_snapshot_and_stable_rank_are_24_hours() -> None:
