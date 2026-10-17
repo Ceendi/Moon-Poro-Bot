@@ -23,6 +23,7 @@ from moon_poro.verification_sessions import (
     SessionAlreadyUsed,
     SessionBrowserMismatch,
     SessionExpired,
+    SessionNotFound,
     VerificationSessionRepository,
     as_utc,
     hash_secret,
@@ -884,3 +885,112 @@ async def test_pending_at_retry_cap_pauses_without_a_new_worker_claim(
         claimed.id, error_code="PAUSED", delay_seconds=0, max_attempts=1
     )
     assert await session_repository.claim_pending() == []
+
+
+async def test_bound_browser_can_restart_oauth_and_only_newest_state_works(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    await session_repository.begin_oauth(
+        token=created.token, state="first-state", browser_token="bound-browser"
+    )
+    restarted = await session_repository.begin_oauth(
+        token=created.token, state="second-state", browser_token="bound-browser"
+    )
+
+    assert restarted.status == "AWAITING_RIOT"
+    assert restarted.oauth_state_hash == hash_secret("second-state")
+    with pytest.raises(SessionNotFound):
+        await session_repository.claim_callback("first-state", browser_token="bound-browser")
+    claimed = await session_repository.claim_callback("second-state", browser_token="bound-browser")
+    assert claimed.status == "PROCESSING_RIOT"
+    # Once Riot answered, the start link cannot issue another state.
+    with pytest.raises(SessionAlreadyUsed):
+        await session_repository.begin_oauth(
+            token=created.token, state="third-state", browser_token="bound-browser"
+        )
+
+
+@pytest.mark.parametrize("browser_token", ["", "foreign-browser"])
+async def test_foreign_browser_cannot_restart_oauth(
+    session_repository: VerificationSessionRepository, browser_token: str
+) -> None:
+    created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    await session_repository.begin_oauth(
+        token=created.token, state="bound-state", browser_token="bound-browser"
+    )
+
+    with pytest.raises(SessionBrowserMismatch):
+        await session_repository.begin_oauth(
+            token=created.token, state="stolen-state", browser_token=browser_token
+        )
+
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "AWAITING_RIOT"
+    assert stored.oauth_state_hash == hash_secret("bound-state")
+    assert stored.browser_binding_hash == hash_secret("bound-browser")
+
+
+async def test_restart_after_expiry_is_persisted_only_for_bound_browser(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    record = await session_repository.begin_oauth(
+        token=created.token, state="old-state", browser_token="bound-browser"
+    )
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, record.id)
+        assert stored is not None
+        stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    with pytest.raises(SessionBrowserMismatch):
+        await session_repository.begin_oauth(
+            token=created.token, state="new-state", browser_token="foreign-browser"
+        )
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "AWAITING_RIOT"
+    with pytest.raises(SessionExpired):
+        await session_repository.begin_oauth(
+            token=created.token, state="new-state", browser_token="bound-browser"
+        )
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "EXPIRED"
+    assert stored.oauth_state_hash == hash_secret("old-state")
+
+
+async def test_fail_with_expected_status_never_overwrites_reserved_link(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created, record = await authorize_session(
+        session_repository, guild_id=123, user_id=456, state="reserved-state"
+    )
+    assert (
+        await session_repository.reserve_link(
+            session_id=record.id,
+            platform="EUN1",
+            puuid="reserved-puuid",
+            game_name="Moon",
+            tag_line="EUNE",
+        )
+        == LinkReservationResult.RESERVED
+    )
+
+    await session_repository.fail(
+        record.id, "INTERNAL_ERROR", expected_status=VerificationSessionStatus.PROCESSING_RIOT.value
+    )
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "VERIFIED_PENDING_DISCORD"
+
+    other, processing = await authorize_session(
+        session_repository, guild_id=123, user_id=789, state="processing-state"
+    )
+    await session_repository.fail(
+        processing.id,
+        "INTERNAL_ERROR",
+        expected_status=VerificationSessionStatus.PROCESSING_RIOT.value,
+    )
+    failed = await session_repository.get_by_start_token(other.token)
+    assert failed is not None and (failed.status, failed.error_code) == (
+        "FAILED",
+        "INTERNAL_ERROR",
+    )

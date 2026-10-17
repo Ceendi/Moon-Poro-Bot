@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import html
 import ipaddress
 import json
@@ -7,9 +9,10 @@ import logging
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -28,6 +31,7 @@ from moon_poro.verification_sessions import (
     SessionNotFound,
     VerificationSessionRepository,
     as_utc,
+    browser_matches,
 )
 
 logger = logging.getLogger("moon_poro.rso")
@@ -35,9 +39,16 @@ logger = logging.getLogger("moon_poro.rso")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,80}$")
 STATE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,200}$")
 MAX_RIOT_RESPONSE_BYTES = 64 * 1024
+MAX_RIOT_ERROR_BYTES = 4096
 SESSION_COOKIE = "moon_poro_rso"
-NEW_LINK_HINT = "Kliknij „Zweryfikuj konto” na Discordzie, a bot wyśle nowy."
+NEW_LINK_HINT = "Kliknij „Zweryfikuj konto” na Discordzie, a bot wyśle nowy link."
 BROWSER_COOKIE = "moon_poro_rso_browser"
+RATE_LIMIT_REFRESH_SECONDS = 10
+# After this long the bot is still expected to finish, but fast polling is pointless.
+DISCORD_PENDING_SLOW_AFTER = timedelta(minutes=3)
+# Runs of URL-safe characters this long may be tokens or codes; never log them.
+_SECRET_LIKE = re.compile(r"[A-Za-z0-9._~+/=-]{20,}")
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 ACCOUNT_CLUSTER_BY_PLATFORM = {
     "EUN1": "europe",
     "EUW1": "europe",
@@ -117,7 +128,7 @@ class RiotRSOClient:
                 auth=auth,
                 allow_redirects=False,
             ) as response:
-                payload = await _read_riot_json(response, expected_status=200)
+                payload = await _read_riot_json(response, expected_status=200, endpoint="token")
         except (aiohttp.ClientError, TimeoutError) as error:
             raise RiotRSOError("RIOT_AUTH_UNAVAILABLE") from error
 
@@ -130,7 +141,9 @@ class RiotRSOClient:
     async def get_identity(self, access_token: str) -> RiotIdentity:
         headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
         try:
-            userinfo = await self._get_json("https://auth.riotgames.com/userinfo", headers)
+            userinfo = await self._get_json(
+                "https://auth.riotgames.com/userinfo", headers, endpoint="userinfo"
+            )
         except (aiohttp.ClientError, TimeoutError) as error:
             raise RiotRSOError("RIOT_IDENTITY_UNAVAILABLE") from error
 
@@ -143,7 +156,7 @@ class RiotRSOClient:
             "riot/account/v1/accounts/me"
         )
         try:
-            account = await self._get_json(account_url, headers)
+            account = await self._get_json(account_url, headers, endpoint="account")
         except (aiohttp.ClientError, TimeoutError) as error:
             raise RiotRSOError("RIOT_IDENTITY_UNAVAILABLE") from error
 
@@ -166,19 +179,28 @@ class RiotRSOClient:
             platform=platform,
         )
 
-    async def _get_json(self, url: str, headers: dict[str, str]) -> dict[str, Any]:
+    async def _get_json(
+        self, url: str, headers: dict[str, str], *, endpoint: str
+    ) -> dict[str, Any]:
         async with self._session.get(url, headers=headers, allow_redirects=False) as response:
-            return await _read_riot_json(response, expected_status=200)
+            return await _read_riot_json(response, expected_status=200, endpoint=endpoint)
 
 
 RSO_CLIENT_KEY = web.AppKey("rso_client", RiotRSOClient)
 
 
 async def _read_riot_json(
-    response: aiohttp.ClientResponse, *, expected_status: int
+    response: aiohttp.ClientResponse, *, expected_status: int, endpoint: str
 ) -> dict[str, Any]:
     if response.status != expected_status:
-        logger.warning("RSO upstream returned HTTP %s", response.status)
+        error, description = await _riot_error_details(response)
+        logger.warning(
+            "RSO %s endpoint returned HTTP %s (error=%s, error_description=%s)",
+            endpoint,
+            response.status,
+            error or "-",
+            description or "-",
+        )
         raise RiotRSOError("RIOT_UPSTREAM_REJECTED")
     body = bytearray()
     while True:
@@ -197,16 +219,52 @@ async def _read_riot_json(
     return payload
 
 
-class RequestRateLimiter:
-    """Small fixed-window limiter; no external cache is needed on a single e2-micro."""
+async def _riot_error_details(response: aiohttp.ClientResponse) -> tuple[str | None, str | None]:
+    """Best-effort OAuth error fields for logs; never raises."""
 
-    def __init__(self, *, limit: int = 60, window_seconds: int = 60) -> None:
-        if limit < 1 or window_seconds < 1:
-            raise ValueError("Rate limit and window must be positive")
+    try:
+        body = bytearray()
+        while len(body) < MAX_RIOT_ERROR_BYTES:
+            chunk = await response.content.read(MAX_RIOT_ERROR_BYTES - len(body))
+            if not chunk:
+                break
+            body.extend(chunk)
+        payload = json.loads(body)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    return (
+        _safe_log_text(payload.get("error"), 64),
+        _safe_log_text(payload.get("error_description"), 200),
+    )
+
+
+def _safe_log_text(value: object, limit: int) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    printable = "".join(character if character.isprintable() else " " for character in value)
+    return _SECRET_LIKE.sub("[redacted]", printable)[:limit]
+
+
+class RequestRateLimiter:
+    """Small fixed-window limiter; no external cache is needed on a single e2-micro.
+
+    Buckets are kept in window start order, so expired ones are dropped from
+    the front in amortized O(1). When the table is full, the bucket with the
+    oldest window is evicted: a flood of new addresses can never lock out new
+    legitimate clients, and known clients keep their counters until then.
+    """
+
+    def __init__(
+        self, *, limit: int = 60, window_seconds: int = 60, max_clients: int = 4096
+    ) -> None:
+        if limit < 1 or window_seconds < 1 or max_clients < 1:
+            raise ValueError("Rate limit, window and capacity must be positive")
         self._limit = limit
         self._window_seconds = window_seconds
-        self._clients: dict[str, tuple[int, float]] = {}
-        self._next_cleanup = 0.0
+        self._max_clients = max_clients
+        self._clients: OrderedDict[str, tuple[int, float]] = OrderedDict()
 
     def allowed(self, client: str) -> bool:
         # IPv6 privacy addresses within one /64 share a budget. IPv4-mapped
@@ -225,22 +283,22 @@ class RequestRateLimiter:
         else:
             client = str(address)
         now = time.monotonic()
-        # A full sweep runs at most once per second, including at capacity.
-        # New clients fail closed until space is available; existing counters
-        # are never evicted to make room for attacker-controlled addresses.
-        if now >= self._next_cleanup:
-            cutoff = now - self._window_seconds
-            self._clients = {
-                key: value for key, value in self._clients.items() if value[1] > cutoff
-            }
-            self._next_cleanup = now + 1.0
-        if client not in self._clients and len(self._clients) >= 4096:
-            return False
-        count, started = self._clients.get(client, (0, now))
-        if now - started >= self._window_seconds:
-            count, started = 0, now
+        cutoff = now - self._window_seconds
+        clients = self._clients
+        while clients:
+            oldest = next(iter(clients))
+            if clients[oldest][1] > cutoff:
+                break
+            del clients[oldest]
+        entry = clients.get(client)
+        if entry is None:
+            if len(clients) >= self._max_clients:
+                clients.popitem(last=False)
+            clients[client] = (1, now)
+            return True
+        count, started = entry
         count = min(count + 1, self._limit + 1)
-        self._clients[client] = (count, started)
+        clients[client] = (count, started)
         return count <= self._limit
 
 
@@ -265,7 +323,9 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
         elif not limiter.allowed(_client_ip(request)):
             response = web.Response(
                 status=429,
-                text="Za dużo żądań. Spróbuj ponownie za minutę.",
+                text="Za dużo prób w krótkim czasie. Poczekaj chwilę, strona odświeży się sama.",
+                # The result page polls; Refresh lets it recover on its own.
+                headers={"Refresh": str(RATE_LIMIT_REFRESH_SECONDS)},
             )
         else:
             try:
@@ -275,6 +335,15 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
                     status=error.status,
                     reason=error.reason,
                     headers=error.headers,
+                )
+            except Exception:
+                logger.exception("Unhandled error in RSO handler for %s", request.path)
+                response = _status_page(
+                    "Coś poszło nie tak",
+                    "Spróbuj ponownie za chwilę. Jeśli problem się powtarza, kliknij "
+                    "„Zweryfikuj konto” na Discordzie, a bot wyśle nowy link.",
+                    "error",
+                    status=500,
                 )
         response.headers.update(
             {
@@ -311,8 +380,12 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
 
 async def _http_client_context(app: web.Application) -> AsyncIterator[None]:
     settings = app[SETTINGS_KEY]
-    timeout = aiohttp.ClientTimeout(total=settings.rso_http_timeout_seconds)
-    connector = aiohttp.TCPConnector(limit=4, limit_per_host=2, ttl_dns_cache=300)
+    budget = settings.rso_http_timeout_seconds
+    # Token and userinfo share auth.riotgames.com. sock_connect and sock_read
+    # bound each request without counting time spent waiting for a pooled
+    # connection; total is only a hard cap against slowly dripping responses.
+    timeout = aiohttp.ClientTimeout(total=budget * 2, sock_connect=budget, sock_read=budget)
+    connector = aiohttp.TCPConnector(limit=16, limit_per_host=8, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         app[HTTP_CLIENT_KEY] = session
         app[RSO_CLIENT_KEY] = RiotRSOClient(settings, session)
@@ -325,6 +398,13 @@ async def health(_request: web.Request) -> web.Response:
 
 
 async def ready(request: web.Request) -> web.Response:
+    # Caddy blocks /readyz, but aiohttp normalizes paths such as
+    # /verify/%2e%2e/readyz. Proxied requests carry forwarding headers.
+    if any(
+        header in request.headers
+        for header in ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded")
+    ):
+        raise web.HTTPNotFound
     try:
         async with request.app[DATABASE_KEY].session() as session:
             await session.execute(text("SELECT 1"))
@@ -344,33 +424,53 @@ async def show_start(request: web.Request) -> web.Response:
         return _status_page("Nieprawidłowy link", NEW_LINK_HINT, "error")
     record = await request.app[REPOSITORY_KEY].get_by_start_token(token)
     if record is None:
-        return _status_page("Link nie istnieje", NEW_LINK_HINT, "error")
+        return _status_page("Ten link nie działa", NEW_LINK_HINT, "error")
     now = _utc_now()
     if as_utc(record.expires_at) <= now or record.status == VerificationSessionStatus.EXPIRED.value:
         return _status_page("Link wygasł", NEW_LINK_HINT, "error")
-    if record.status != VerificationSessionStatus.CREATED.value:
+    settings = request.app[SETTINGS_KEY]
+    browser_cookie = request.cookies.get(BROWSER_COOKIE, "")
+    has_browser_identity = TOKEN_PATTERN.fullmatch(browser_cookie) is not None
+    # The bound browser sees the start page again (for example after Back
+    # from Riot). Its button issues a fresh OAuth state; GET changes nothing.
+    retry_in_bound_browser = (
+        record.status == VerificationSessionStatus.AWAITING_RIOT.value
+        and has_browser_identity
+        and browser_matches(record, browser_cookie)
+    )
+    if record.status != VerificationSessionStatus.CREATED.value and not retry_in_bound_browser:
         redirect_response = _see_other("/verify/result")
-        _set_session_cookie(redirect_response, token, request.app[SETTINGS_KEY])
+        _set_session_cookie(redirect_response, token, settings)
         return redirect_response
 
     minutes = max(1, int((as_utc(record.expires_at) - now).total_seconds() // 60))
-    username = html.escape(record.discord_username or "")
-    guild_name = html.escape(record.discord_guild_name or "")
     user_id = html.escape(str(record.discord_user_id))
     guild_id = html.escape(str(record.guild_id))
+    if record.discord_username:
+        user = f"<strong>{html.escape(record.discord_username)}</strong> (ID: {user_id})"
+    else:
+        user = f"o ID <strong>{user_id}</strong>"
+    if record.discord_guild_name:
+        guild = f"<strong>{html.escape(record.discord_guild_name)}</strong> (ID: {guild_id})"
+    else:
+        guild = f"o ID <strong>{guild_id}</strong>"
     body = f"""
         {_avatar("start")}
         <h1>Połącz konto przez Riot</h1>
         <p class="lead">Zalogujesz się na stronie Riot Games. Moon Poro nie widzi Twojego hasła, a Riot przekaże nam Twoje Riot ID i region.</p>
-        <p class="identity">Łączysz konto Riot z kontem Discord: <strong>{username}</strong> (ID: {user_id})<br>Serwer: <strong>{guild_name}</strong> (ID: {guild_id})</p>
+        <p class="identity">Łączysz konto Riot z kontem Discord {user} na serwerze {guild}.</p>
         <p class="warning">Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę. Rozpocznij weryfikację samodzielnie w panelu bota.</p>
         <form method="post" action="/verify/start/{html.escape(token)}">
           <button type="submit">Przejdź do logowania Riot</button>
         </form>
-        <p class="fine">Link działa jeszcze około {minutes} min i tylko raz. Klikając, akceptujesz <a href="/terms/">warunki</a> i <a href="/privacy/">politykę prywatności</a>.</p>
+        <p class="fine">Link wygaśnie za około {minutes} min. Klikając, akceptujesz <a href="/terms/">warunki</a> i <a href="/privacy/">politykę prywatności</a>.</p>
     """
     response = _html_page("Połącz konto Riot", body)
-    _set_session_cookie(response, token, request.app[SETTINGS_KEY])
+    _set_session_cookie(response, token, settings)
+    if not has_browser_identity:
+        # Create the browser identity before the first POST, so a double
+        # click sends the same identity twice instead of two random ones.
+        _set_browser_cookie(response, secrets.token_urlsafe(32), settings)
     return response
 
 
@@ -390,21 +490,23 @@ async def begin_rso(request: web.Request) -> web.StreamResponse:
         )
     except SessionExpired:
         return _status_page("Link wygasł", NEW_LINK_HINT, "error")
-    except (SessionNotFound, SessionAlreadyUsed):
+    except SessionBrowserMismatch:
+        return _status_page(
+            "Logowanie trwa w innej przeglądarce",
+            "Dokończ logowanie w przeglądarce, w której zaczęła się weryfikacja. "
+            f"Jeśli to niemożliwe, {_lowercase_first(NEW_LINK_HINT)}",
+            "error",
+        )
+    except SessionNotFound:
+        return _status_page("Ten link nie działa", NEW_LINK_HINT, "error")
+    except SessionAlreadyUsed:
         return _status_page(
             "Link został już użyty", f"Każdy link działa tylko raz. {NEW_LINK_HINT}", "error"
         )
+    settings = request.app[SETTINGS_KEY]
     response = _see_other(request.app[RSO_CLIENT_KEY].authorization_url(state))
-    _set_session_cookie(response, token, request.app[SETTINGS_KEY])
-    response.set_cookie(
-        BROWSER_COOKIE,
-        browser_token,
-        max_age=request.app[SETTINGS_KEY].rso_session_ttl_seconds,
-        secure=request.app[SETTINGS_KEY].rso_public_base_url.scheme == "https",
-        httponly=True,
-        samesite="Lax",
-        path="/",
-    )
+    _set_session_cookie(response, token, settings)
+    _set_browser_cookie(response, browser_token, settings)
     return response
 
 
@@ -413,59 +515,89 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
     if not STATE_PATTERN.fullmatch(state):
         return _status_page(
             "Nieprawidłowa odpowiedź",
-            "Nie udało się potwierdzić logowania. Rozpocznij ponownie w Discordzie.",
+            "Nie udało się potwierdzić logowania. Zacznij jeszcze raz na Discordzie.",
             "error",
         )
+    repository = request.app[REPOSITORY_KEY]
     try:
-        record = await request.app[REPOSITORY_KEY].claim_callback(
+        record = await repository.claim_callback(
             state, browser_token=request.cookies.get(BROWSER_COOKIE, "")
         )
     except SessionBrowserMismatch:
         return _status_page(
             "Wróć do poprzedniej przeglądarki",
-            "Dokończ logowanie w przeglądarce, w której rozpoczęto weryfikację. "
-            "Jeśli to niemożliwe, rozpocznij ponownie w Discordzie.",
+            "Dokończ logowanie w przeglądarce, w której zaczęła się weryfikacja. "
+            f"Jeśli to niemożliwe, {_lowercase_first(NEW_LINK_HINT)}",
             "error",
         )
     except SessionExpired:
         return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
-    except (SessionNotFound, SessionAlreadyUsed):
+    except SessionAlreadyUsed:
+        # claim_callback checks the browser first, so this is the bound browser
+        # reloading the callback. The first request still finishes the work.
+        return _see_other("/verify/result")
+    except SessionNotFound:
         return _status_page(
-            "Sesja została już użyta",
-            f"Dla bezpieczeństwa zacznij od nowa. {NEW_LINK_HINT}",
+            "Ten link logowania jest nieaktualny",
+            "Użyj najnowszej karty z logowaniem Riot. Jeśli jej nie masz, "
+            f"{_lowercase_first(NEW_LINK_HINT)}",
             "error",
         )
 
+    # From here on the session is PROCESSING_RIOT and only this request can
+    # move it forward. Every exit must leave it in a state the result page
+    # can explain, or the page would poll until the session expires.
+    try:
+        return await _finish_callback(request, record)
+    except asyncio.CancelledError:
+        _start_failure(repository, record.id)
+        raise
+    except Exception:
+        logger.exception("RSO callback failed after the OAuth state was claimed")
+        await _record_failure(repository, record.id)
+        return _see_other("/verify/result")
+
+
+async def _finish_callback(request: web.Request, record: VerificationSession) -> web.Response:
+    repository = request.app[REPOSITORY_KEY]
     provider_error = request.query.get("error")
     if provider_error:
         error_code = "USER_CANCELLED" if provider_error == "access_denied" else "RIOT_AUTH_REJECTED"
-        await request.app[REPOSITORY_KEY].fail(record.id, error_code)
+        await repository.fail(record.id, error_code)
         return _see_other("/verify/result")
 
     code = request.query.get("code", "")
     if not code or len(code) > 4096:
-        await request.app[REPOSITORY_KEY].fail(record.id, "MISSING_AUTHORIZATION_CODE")
+        await repository.fail(record.id, "MISSING_AUTHORIZATION_CODE")
         return _see_other("/verify/result")
 
     try:
         access_token = await request.app[RSO_CLIENT_KEY].exchange_code(code)
         identity = await request.app[RSO_CLIENT_KEY].get_identity(access_token)
     except RiotRSOError as error:
-        await request.app[REPOSITORY_KEY].fail(record.id, error.code)
+        await repository.fail(record.id, error.code)
         return _see_other("/verify/result")
 
     try:
-        result = await request.app[REPOSITORY_KEY].reserve_link(
+        result = await repository.reserve_link(
             session_id=record.id,
             platform=identity.platform,
             puuid=identity.puuid,
             game_name=identity.game_name,
             tag_line=identity.tag_line,
         )
-    except (SessionExpired, SessionNotFound, SessionAlreadyUsed):
+    except SessionExpired:
+        await repository.fail(
+            record.id,
+            "SESSION_EXPIRED",
+            expected_status=VerificationSessionStatus.PROCESSING_RIOT.value,
+        )
+        return _see_other("/verify/result")
+    except (SessionNotFound, SessionAlreadyUsed):
+        # A newer link or a removal replaced this session during the Riot calls.
         return _status_page(
             "Ta weryfikacja nie jest już aktywna",
-            "Wróć do Discorda i użyj najnowszego linku weryfikacyjnego.",
+            "Wróć do Discorda i użyj najnowszego linku.",
             "error",
         )
     if result is not LinkReservationResult.RESERVED:
@@ -473,12 +605,43 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
     return _see_other("/verify/result")
 
 
+async def _record_failure(repository: VerificationSessionRepository, session_id: int) -> None:
+    # Shielded: a cancelled request must not abandon the status update halfway.
+    # Errors are logged by the task callback.
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_start_failure(repository, session_id))
+
+
+def _start_failure(
+    repository: VerificationSessionRepository, session_id: int
+) -> asyncio.Task[None]:
+    # Only PROCESSING_RIOT is failed: if an earlier commit (for example the
+    # link reservation) did succeed, its result must not be overwritten.
+    task = asyncio.ensure_future(
+        repository.fail(
+            session_id,
+            "INTERNAL_ERROR",
+            expected_status=VerificationSessionStatus.PROCESSING_RIOT.value,
+        )
+    )
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_forget_failure_task)
+    return task
+
+
+def _forget_failure_task(task: asyncio.Task[None]) -> None:
+    _BACKGROUND_TASKS.discard(task)
+    if not task.cancelled() and (error := task.exception()) is not None:
+        logger.error("RSO could not mark a session as failed", exc_info=error)
+
+
 async def verification_result(request: web.Request) -> web.Response:
     token = request.cookies.get(SESSION_COOKIE, "")
     if not TOKEN_PATTERN.fullmatch(token):
         return _status_page(
             "Sprawdź Discorda",
-            "Nie można odczytać tej sesji w przeglądarce. Status weryfikacji znajdziesz w Discordzie.",
+            "Nie możemy odczytać weryfikacji w tej przeglądarce. "
+            "Jej stan sprawdzisz na Discordzie.",
             "neutral",
         )
     record = await request.app[REPOSITORY_KEY].get_by_start_token(token)
@@ -487,7 +650,8 @@ async def verification_result(request: web.Request) -> web.Response:
     return _result_for_record(record)
 
 
-def _result_for_record(record: VerificationSession) -> web.Response:
+def _result_for_record(record: VerificationSession, *, now: datetime | None = None) -> web.Response:
+    now = now or _utc_now()
     status = record.status
     if status == VerificationSessionStatus.COMPLETED.value:
         account = "Twoje konto Riot"
@@ -495,24 +659,60 @@ def _result_for_record(record: VerificationSession) -> web.Response:
             account = f"<strong>{html.escape(record.riot_game_name)}#{html.escape(record.riot_tag_line)}</strong>"
         return _status_page(
             "Konto połączone",
-            f"{account} jest już połączone z Twoim Discordem. Role regionu i rangi czekają na serwerze.",
+            f"{account} jest już połączone z Twoim kontem Discord. "
+            "Role za region i rangę znajdziesz na serwerze.",
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),
         )
+    if (
+        status
+        in {
+            VerificationSessionStatus.CREATED.value,
+            VerificationSessionStatus.AWAITING_RIOT.value,
+            VerificationSessionStatus.PROCESSING_RIOT.value,
+        }
+        and as_utc(record.expires_at) <= now
+    ):
+        # The daily purge may not have run yet; a dead session must not poll forever.
+        return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
     if status == VerificationSessionStatus.PROCESSING_RIOT.value:
         return _status_page(
             "Potwierdzamy logowanie w Riot",
-            "Poczekaj chwilę. Ta strona odświeży się automatycznie.",
+            "Poczekaj chwilę, strona odświeży się sama.",
             "pending",
             refresh_seconds=2,
+        )
+    if status == VerificationSessionStatus.AWAITING_RIOT.value:
+        return _status_page(
+            "Logowanie w Riot jeszcze trwa",
+            "Dokończ je w karcie, w której zaczęła się weryfikacja. Ta strona odświeży się sama.",
+            "pending",
+            refresh_seconds=10,
+        )
+    if status == VerificationSessionStatus.CREATED.value:
+        return _status_page(
+            "Logowanie jeszcze się nie zaczęło",
+            "Otwórz link od bota i kliknij „Przejdź do logowania Riot”.",
+            "neutral",
         )
     if status in {
         VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value,
         VerificationSessionStatus.APPLYING_DISCORD.value,
     }:
+        # Waiting on the bot is legitimate; never report it as a failure.
+        confirmed_at = as_utc(record.verification_link_created_at or record.updated_at)
+        if now - confirmed_at >= DISCORD_PENDING_SLOW_AFTER:
+            return _status_page(
+                "Riot potwierdził konto",
+                "Bot jeszcze kończy weryfikację na Discordzie. Możesz zamknąć tę kartę, "
+                "role pojawią się same. Jeśli nie zobaczysz ich w ciągu kilku minut, "
+                "napisz do moderacji.",
+                "pending",
+                refresh_seconds=30,
+            )
         return _status_page(
             "Riot potwierdził konto",
-            "Kończymy weryfikację na Discordzie. Ta strona odświeży się sama.",
+            "Kończymy weryfikację na Discordzie. Strona odświeży się sama.",
             "pending",
             refresh_seconds=2,
         )
@@ -523,28 +723,47 @@ def _result_for_record(record: VerificationSession) -> web.Response:
             "na Discordzie. Jeśli problem się powtarza, skontaktuj się z moderacją.",
             "error",
         )
-    if status == VerificationSessionStatus.CANCELLED.value or record.error_code == "USER_CANCELLED":
-        return _status_page(
-            "Logowanie anulowane",
-            "Nic nie zostało połączone. Możesz zamknąć tę kartę albo zacząć jeszcze raz na Discordzie.",
-            "neutral",
-        )
-    if status == VerificationSessionStatus.EXPIRED.value:
+    if status == VerificationSessionStatus.EXPIRED.value or record.error_code == "SESSION_EXPIRED":
         return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
+    cancelled = (
+        "Logowanie anulowane",
+        "Nic nie zostało połączone. Możesz zamknąć tę kartę albo zacząć jeszcze raz na Discordzie.",
+    )
+    if status == VerificationSessionStatus.CANCELLED.value:
+        cancelled_copy = {
+            "SUPERSEDED": (
+                "Masz już nowszy link",
+                "Ten link już nie działa. Użyj najnowszego linku od bota na Discordzie.",
+            ),
+            "USER_REMOVED_LINK": (
+                "Połączenie zostało usunięte",
+                "Połączenie konta usunięto na Discordzie. Możesz zamknąć tę kartę.",
+            ),
+            "VERIFICATION_LINK_CHANGED": (
+                "Połączenie konta się zmieniło",
+                "W trakcie weryfikacji zmieniło się połączenie konta. "
+                "Sprawdź „Moje konto” na Discordzie.",
+            ),
+        }
+        title, message = cancelled_copy.get(record.error_code or "", cancelled)
+        return _status_page(title, message, "neutral")
+    if record.error_code == "USER_CANCELLED":
+        return _status_page(*cancelled, "neutral")
 
+    riot_unavailable = "Riot teraz nie odpowiada. Spróbuj ponownie za kilka minut."
     error_copy = {
         "DISCORD_ALREADY_LINKED": (
-            "Twoje konto Discord ma już połączone konto Riot. Żeby podłączyć inne, "
+            "Twoje konto Discord jest już połączone z kontem Riot. Aby połączyć inne, "
             "najpierw usuń obecne w „Moje konto”."
         ),
         "RIOT_ALREADY_LINKED": "To konto Riot jest już połączone z innym kontem Discord.",
-        "LINK_CONFLICT": "To konto zostało właśnie połączone w innej weryfikacji.",
-        "UNSUPPORTED_PLATFORM": "Ten region League of Legends nie jest obecnie obsługiwany.",
-        "MISSING_PLATFORM": (
-            "Nie udało się ustalić obsługiwanego regionu League of Legends dla tego konta."
-        ),
-        "MEMBER_LEFT_GUILD": "Nie ma Cię już na serwerze Discord, więc powiązanie zostało cofnięte.",
-        "USER_REMOVED_LINK": "Powiązanie zostało usunięte w Discordzie.",
+        "LINK_CONFLICT": "To konto Riot zostało przed chwilą połączone w innej weryfikacji.",
+        "UNSUPPORTED_PLATFORM": "Nie obsługujemy jeszcze tego regionu League of Legends.",
+        "MISSING_PLATFORM": "Nie udało się ustalić regionu League of Legends dla tego konta.",
+        "MEMBER_LEFT_GUILD": "Nie ma Cię już na serwerze, więc połączenie zostało cofnięte.",
+        "USER_REMOVED_LINK": "Połączenie konta usunięto na Discordzie.",
+        "RIOT_AUTH_UNAVAILABLE": riot_unavailable,
+        "RIOT_IDENTITY_UNAVAILABLE": riot_unavailable,
     }
     message = error_copy.get(
         record.error_code or "",
@@ -560,6 +779,7 @@ def _status_page(
     *,
     button: tuple[str, str] | None = None,
     refresh_seconds: int | None = None,
+    status: int = 200,
 ) -> web.Response:
     action = ""
     if button:
@@ -571,7 +791,7 @@ def _status_page(
         <p class="lead">{message}</p>
         {action}
     """
-    response = _html_page(title, body)
+    response = _html_page(title, body, status=status)
     if refresh_seconds is not None:
         response.headers["Refresh"] = str(refresh_seconds)
     return response
@@ -589,7 +809,7 @@ def _avatar(kind: str) -> str:
     )
 
 
-def _html_page(title: str, body: str) -> web.Response:
+def _html_page(title: str, body: str, *, status: int = 200) -> web.Response:
     document = f"""<!doctype html>
 <html lang="pl">
 <head>
@@ -631,7 +851,7 @@ def _html_page(title: str, body: str) -> web.Response:
 </head>
 <body><main>{body}</main><footer>Moon Poro<a href="/privacy/">Prywatność</a><a href="/terms/">Warunki</a></footer></body>
 </html>"""
-    return web.Response(text=document, content_type="text/html", charset="utf-8")
+    return web.Response(text=document, status=status, content_type="text/html", charset="utf-8")
 
 
 def _set_session_cookie(response: web.StreamResponse, token: str, settings: RSOSettings) -> None:
@@ -644,6 +864,24 @@ def _set_session_cookie(response: web.StreamResponse, token: str, settings: RSOS
         samesite="Lax",
         path="/verify",
     )
+
+
+def _set_browser_cookie(
+    response: web.StreamResponse, browser_token: str, settings: RSOSettings
+) -> None:
+    response.set_cookie(
+        BROWSER_COOKIE,
+        browser_token,
+        max_age=settings.rso_session_ttl_seconds,
+        secure=settings.rso_public_base_url.scheme == "https",
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
+
+
+def _lowercase_first(sentence: str) -> str:
+    return sentence[:1].lower() + sentence[1:]
 
 
 def _same_origin(request: web.Request) -> bool:

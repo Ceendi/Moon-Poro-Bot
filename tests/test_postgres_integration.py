@@ -2035,3 +2035,196 @@ async def test_verification_deletion_lifecycle_migration_preserves_existing_link
                 )
         finally:
             await cleanup.close()
+
+
+async def _start_rso_web_against_postgres(settings_factory: Callable[..., Settings]):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from moon_poro.rso_web import create_app
+    from moon_poro.settings import RSOSettings
+
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    database_settings = {
+        "postgres_user": os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        "postgres_password": os.getenv(
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),  # pragma: allowlist secret
+        "postgres_host": os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        "postgres_port": int(os.environ["TEST_POSTGRES_PORT"]),
+        "postgres_db": os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        "guild_id": guild_id,
+    }
+    await upgrade_database(settings_factory(**database_settings))
+    rso_settings = RSOSettings(
+        _env_file=None,
+        rso_client_id="moon-poro-client",
+        rso_client_auth_method="private_key_jwt",
+        rso_client_assertion="signed-client-assertion",  # pragma: allowlist secret
+        rso_public_base_url="http://localhost:8080",
+        **database_settings,
+    )
+    database = Database(rso_settings)
+    client = TestClient(TestServer(create_app(rso_settings, database)))
+    await client.start_server()
+    return guild_id, database, client
+
+
+async def _stop_rso_web_against_postgres(guild_id: int, database: Database, client) -> None:
+    try:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+            await connection.execute(
+                text("DELETE FROM verification_sessions WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+    finally:
+        await client.close()
+
+
+def _oauth_state(response) -> str:
+    from urllib.parse import parse_qs, urlsplit
+
+    return parse_qs(urlsplit(response.headers["Location"]).query)["state"][0]
+
+
+async def test_rso_double_click_on_postgres_reaches_riot_with_newest_state(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from urllib.parse import urlsplit
+
+    import aiohttp
+
+    from moon_poro.rso_web import BROWSER_COOKIE, REPOSITORY_KEY, RSO_CLIENT_KEY, RiotIdentity
+    from moon_poro.verification_sessions import hash_secret
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        app = client.server.app
+        repository = app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        path = f"/verify/start/{created.token}"
+        host = {"Host": "localhost:8080"}
+        origin = {**host, "Origin": "http://localhost:8080"}
+        landing = await client.get(path, headers=host)
+        browser = landing.cookies[BROWSER_COOKIE].value
+
+        # Hold the session row so both clicks queue on the same row lock.
+        async with database.engine.connect() as blocker:
+            await blocker.begin()
+            await blocker.execute(
+                text("SELECT id FROM verification_sessions WHERE guild_id=:guild FOR UPDATE"),
+                {"guild": guild_id},
+            )
+            clicks = [
+                asyncio.create_task(client.post(path, headers=origin, allow_redirects=False))
+                for _click in range(2)
+            ]
+            await asyncio.sleep(0.2)
+            assert not any(click.done() for click in clicks)
+            await blocker.rollback()
+        responses = await asyncio.wait_for(asyncio.gather(*clicks), timeout=5)
+
+        assert [response.status for response in responses] == [303, 303]
+        assert all(
+            urlsplit(response.headers["Location"]).netloc == "auth.riotgames.com"
+            for response in responses
+        )
+        states = [_oauth_state(response) for response in responses]
+        assert states[0] != states[1]
+        stored = await repository.get_by_start_token(created.token)
+        assert stored is not None and stored.status == "AWAITING_RIOT"
+        assert stored.browser_binding_hash == hash_secret(browser)
+        newest = [state for state in states if hash_secret(state) == stored.oauth_state_hash]
+        stale = [state for state in states if hash_secret(state) != stored.oauth_state_hash]
+        assert len(newest) == len(stale) == 1
+
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as foreign:
+            rejected = await foreign.post(
+                client.make_url(path),
+                headers={**origin, "Cookie": f"{BROWSER_COOKIE}={'f' * 43}"},
+                allow_redirects=False,
+            )
+            assert rejected.status == 200
+            assert "Logowanie trwa w innej przeglądarce" in await rejected.text()
+
+        monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", AsyncMock(return_value="t"))
+        monkeypatch.setattr(
+            app[RSO_CLIENT_KEY],
+            "get_identity",
+            AsyncMock(return_value=RiotIdentity(f"click-{guild_id}", "Moon", "EUNE", "EUN1")),
+        )
+        old = await client.get(f"/oauth2/callback?state={stale[0]}&code=code", headers=host)
+        assert "Ten link logowania jest nieaktualny" in await old.text()
+        done = await client.get(
+            f"/oauth2/callback?state={newest[0]}&code=code", headers=host, allow_redirects=False
+        )
+        assert done.status == 303 and done.headers["Location"] == "/verify/result"
+        finished = await repository.get_by_start_token(created.token)
+        assert finished is not None and finished.status == "VERIFIED_PENDING_DISCORD"
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
+
+
+async def test_rso_callback_reload_on_postgres_waits_for_first_request(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aiohttp
+
+    from moon_poro.rso_web import BROWSER_COOKIE, REPOSITORY_KEY, RSO_CLIENT_KEY, RiotIdentity
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        app = client.server.app
+        repository = app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        path = f"/verify/start/{created.token}"
+        host = {"Host": "localhost:8080"}
+        await client.get(path, headers=host)
+        started = await client.post(
+            path, headers={**host, "Origin": "http://localhost:8080"}, allow_redirects=False
+        )
+        callback = f"/oauth2/callback?state={_oauth_state(started)}&code=code"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_exchange(_code: str) -> str:
+            entered.set()
+            await release.wait()
+            return "temporary-token"
+
+        exchange = AsyncMock(side_effect=slow_exchange)
+        monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", exchange)
+        monkeypatch.setattr(
+            app[RSO_CLIENT_KEY],
+            "get_identity",
+            AsyncMock(return_value=RiotIdentity(f"reload-{guild_id}", "Moon", "EUNE", "EUN1")),
+        )
+        first = asyncio.create_task(client.get(callback, headers=host, allow_redirects=False))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            reloaded = await client.get(callback, headers=host, allow_redirects=False)
+            assert reloaded.status == 303
+            assert reloaded.headers["Location"] == "/verify/result"
+            pending = await client.get("/verify/result", headers=host)
+            assert "Potwierdzamy logowanie w Riot" in await pending.text()
+            assert pending.headers["Refresh"] == "2"
+            async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as foreign:
+                rejected = await foreign.get(
+                    client.make_url(callback),
+                    headers={**host, "Cookie": f"{BROWSER_COOKIE}={'f' * 43}"},
+                    allow_redirects=False,
+                )
+                assert "Wróć do poprzedniej przeglądarki" in await rejected.text()
+        finally:
+            release.set()
+        response = await asyncio.wait_for(first, timeout=5)
+
+        assert response.status == 303 and response.headers["Location"] == "/verify/result"
+        exchange.assert_awaited_once_with("code")
+        finished = await repository.get_by_start_token(created.token)
+        assert finished is not None and finished.status == "VERIFIED_PENDING_DISCORD"
+        page = await client.get("/verify/result", headers=host)
+        assert "Riot potwierdził konto" in await page.text()
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
