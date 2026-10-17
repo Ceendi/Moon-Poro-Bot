@@ -44,6 +44,7 @@ from moon_poro.riot import (
     RANK_TO_ROLE,
     RIOT_LEAGUE_AUTH_SCOPE,
     SERVER_TRANSLATION,
+    RiotAPIInvalidResponse,
     RiotAPINotFound,
     RiotAPIUnavailable,
     get_discord_rank_role,
@@ -226,10 +227,16 @@ async def _apply_verified_roles(
     # A missing cache is unknown, not a Riot-confirmed unranked account.
     rank_role = None
     if leagues is not None:
-        rank = get_rank_from_leagues(leagues)
-        rank_role = get_discord_rank_role(member.guild, rank, settings)
-        if rank_role is None:
-            _warn_missing_role(member.guild, RANK_TO_ROLE.get(rank.upper(), "Unranked"))
+        try:
+            rank = get_rank_from_leagues(leagues)
+        except RiotAPIInvalidResponse:
+            # Fresh Riot data is validated by the client, so only a corrupt cached
+            # tier lands here. Treat it as unknown rather than failing the restore.
+            logger.warning("Ignoring an unknown cached rank for Discord user %s", member.id)
+        else:
+            rank_role = get_discord_rank_role(member.guild, rank, settings)
+            if rank_role is None:
+                _warn_missing_role(member.guild, RANK_TO_ROLE.get(rank.upper(), "Unranked"))
     server_name = SERVER_TRANSLATION[platform]
     server_role = _find_verification_role(member.guild, server_name, bot)
     verified_role = _find_verification_role(member.guild, settings.verified_role_name, bot)
@@ -852,7 +859,9 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
         )
         return
     except RiotAPIUnavailable as error:
-        if error.status in {401, 403} or not bot.riot_auth_breaker.can_attempt(
+        # A single 403 does not open the league gate, so it backs off like any
+        # other failure instead of putting the same link straight back in the queue.
+        if error.status == 401 or not bot.riot_auth_breaker.can_attempt(
             scope=RIOT_LEAGUE_AUTH_SCOPE
         ):
             await bot.verifications.release_rank_refresh_claim(

@@ -261,6 +261,43 @@ async def test_apply_verified_roles_replaces_managed_roles(
     assert added == {rank, server, verified, member_role}
 
 
+async def test_apply_verified_roles_treats_a_corrupt_cached_tier_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeRole("EUNE")
+    verified = FakeRole("Verified")
+    member_role = FakeRole("Member")
+    settings = SimpleNamespace(
+        lol_ranks=["Gold"],
+        lol_servers=["EUNE"],
+        verified_role_name="Verified",
+        member_role_name="Member",
+    )
+    member = SimpleNamespace(
+        id=101,
+        guild=SimpleNamespace(fetch_member=AsyncMock()),
+        roles=[],
+        remove_roles=AsyncMock(),
+        add_roles=AsyncMock(),
+    )
+    member.guild.fetch_member.return_value = member
+    monkeypatch.setattr(
+        verification,
+        "find_role",
+        Mock(side_effect=[server, verified, member_role]),
+    )
+    monkeypatch.setattr(verification, "member_roles_named", lambda *_args: [])
+
+    await _apply_verified_roles(
+        SimpleNamespace(settings=settings),
+        member,
+        "EUN1",
+        [{"queueType": "RANKED_SOLO_5x5", "tier": "WOOD"}],
+    )
+
+    assert set(member.add_roles.await_args.args) == {server, verified, member_role}
+
+
 async def test_remove_verified_roles_removes_every_managed_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -682,6 +719,41 @@ async def test_rank_refresh_worker_releases_only_its_claim_after_auth_failure(
         expected_claimed_at=_RANK_REFRESH_CLAIMED_AT,
     )
     verifications.retry_rank_refresh.assert_not_awaited()
+
+
+async def test_rank_refresh_worker_backs_off_after_a_single_forbidden_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = SimpleNamespace(id=101)
+    link = SimpleNamespace(
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        rank_refresh_claimed_at=_RANK_REFRESH_CLAIMED_AT,
+    )
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    verifications = SimpleNamespace(
+        claim_due_rank_refreshes=AsyncMock(return_value=[link]),
+        release_rank_refresh_claim=AsyncMock(return_value=True),
+        retry_rank_refresh=AsyncMock(return_value=300),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+        riot_auth_breaker=RiotAuthBreaker(),
+    )
+    monkeypatch.setattr(
+        verification,
+        "_get_leagues",
+        AsyncMock(side_effect=verification.RiotAPIUnavailable(status=403)),
+    )
+
+    await _refresh_next_verified(SimpleNamespace(bot=bot))
+
+    verifications.release_rank_refresh_claim.assert_not_awaited()
+    verifications.retry_rank_refresh.assert_awaited_once()
 
 
 async def test_rank_refresh_worker_rejects_a_claim_without_ownership_token(

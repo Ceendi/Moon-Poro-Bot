@@ -135,7 +135,7 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 ## 6. Kolejność pierwszego wdrożenia
 
 1. Przed zatrzymaniem starego bota wykonaj snapshot oraz zweryfikowany logiczny backup bazy.
-2. Ustaw `VERIFICATION_MODE=legacy_icon` i potwierdź działanie weryfikacji ikoną. Nie uruchamiaj
+2. Jeśli przenosisz starą instalację z weryfikacją ikoną, najpierw potwierdź, że działa. Nie uruchamiaj
    jeszcze usługi RSO.
 3. Po otrzymaniu danych klienta wdróż kod RSO oraz zbudowany poza VM katalog `site/dist`.
 4. Zatrzymaj legacy bota na czas finalnego przełączenia i uruchom migracje kontem właściciela
@@ -178,7 +178,7 @@ Orientacyjny cel, nie gwarantowany limit:
 
 Dla PostgreSQL zacznij od `shared_buffers=64MB`, `work_mem=2MB`,
 `maintenance_work_mem=32MB`, `max_connections=20` i monitoruj, zamiast ślepo zwiększać cache. Utrzymuj
-pulę bota na maksymalnie 5 połączeń oraz callbacku na 2. Skonfiguruj 1-2 GB swap jako zabezpieczenie
+pulę bota na maksymalnie 10 połączeń (domyślnie 5 + 5) oraz callbacku na 2. Skonfiguruj 1-2 GB swap jako zabezpieczenie
 przed OOM (nie jako zamiennik RAM), alert dla pamięci >85%, dysku >80% i restartów usług.
 
 Static Astro nie zużywa pamięci aplikacyjnej. Caddy kompresuje pliki raz przy odpowiedzi, a strona
