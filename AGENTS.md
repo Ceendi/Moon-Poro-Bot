@@ -6,7 +6,7 @@ Ten plik jest dla agentów i osób, które zmieniają kod, stronę albo teksty b
 
 - Pisz naturalną polszczyzną, prosto i krótko, zwracając się do użytkownika na „Ty”. Humor tylko w 2-3 miejscach na całej stronie, np. Poro-Snaxy czy strona 404.
 - Żadnych tekstów, które brzmią jak AI: bez sloganów, pustych obietnic i lania wody. Każde zdanie ma mówić, co się stanie albo co zrobić.
-- Nigdzie nie używaj pauzy (—) ani półpauzy (–), także w kodzie, komentarzach i dokumentacji. Zamiast nich używaj przecinka, dwukropka, nawiasu albo zwykłego łącznika (-).
+- Nigdzie nie używaj pauzy (em dash, U+2014) ani półpauzy (en dash, U+2013), także w kodzie, komentarzach i dokumentacji. Zamiast nich używaj przecinka, dwukropka, nawiasu albo zwykłego łącznika (-).
 - Terminy z LoL-a i Riot, które gracze znają, są w porządku: Riot ID, PUUID, LP, Solo/Duo, boosting, ranga, region. Unikaj dziwnych anglicyzmów i żargonu z kodu, np. „orchestrator”, „widok”, „finalizacja”, „rekord w bazie”.
 - Formy neutralne płciowo: „Ta osoba zaczęła…”, nie „Użytkownik rozpoczął…”.
 - Przy liczbach pisz tak, żeby odmiana zawsze była poprawna, np. „Zmienione osoby: 3”, a nie „Zaktualizowano 3 użytkowników”.
