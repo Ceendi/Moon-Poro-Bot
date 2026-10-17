@@ -2479,3 +2479,39 @@ async def test_stalled_role_operation_releases_the_link_lock_and_keeps_retry_sta
     finally:
         await _delete_verification_link(repository, guild_id, 811)
         await database.close()
+
+
+async def test_rso_shutdown_finishes_pending_failure_update_on_postgres(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    from moon_poro.rso_web import REPOSITORY_KEY, _start_failure
+
+    guild_id, database, client = await _start_rso_web_against_postgres(settings_factory)
+    try:
+        repository = client.server.app[REPOSITORY_KEY]
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        state, browser = "p" * 64, "b" * 43
+        await repository.begin_oauth(token=created.token, state=state, browser_token=browser)
+        claimed = await repository.claim_callback(state, browser_token=browser)
+
+        # The failure update queues on the row lock while the app shuts down.
+        async with database.engine.connect() as blocker:
+            await blocker.begin()
+            await blocker.execute(
+                text("SELECT id FROM verification_sessions WHERE id=:id FOR UPDATE"),
+                {"id": claimed.id},
+            )
+            task = _start_failure(repository, claimed.id)
+            shutdown = asyncio.create_task(client.close())
+            await asyncio.sleep(0.3)
+            assert not task.done() and not shutdown.done()
+            await blocker.rollback()
+        await asyncio.wait_for(shutdown, timeout=5)
+
+        assert task.done() and task.exception() is None
+        stored = await repository.get_by_start_token(created.token)
+        assert stored is not None
+        assert (stored.status, stored.error_code) == ("FAILED", "INTERNAL_ERROR")
+    finally:
+        await _stop_rso_web_against_postgres(guild_id, database, client)
+        await database.close()

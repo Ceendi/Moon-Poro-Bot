@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import aiohttp
 import pytest
 import pytest_asyncio
-from aiohttp import ClientResponse, StreamReader
+from aiohttp import ClientResponse, StreamReader, web
 from aiohttp.base_protocol import BaseProtocol
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
@@ -23,17 +24,21 @@ from moon_poro.models import Base, VerificationSessionStatus
 from moon_poro.rso_web import (
     _BACKGROUND_TASKS,
     BROWSER_COOKIE,
+    DATABASE_KEY,
     HTTP_CLIENT_KEY,
     MAX_RIOT_RESPONSE_BYTES,
     NEW_LINK_HINT,
     REPOSITORY_KEY,
     RSO_CLIENT_KEY,
+    SECURE_BROWSER_COOKIE,
     RequestRateLimiter,
     RiotIdentity,
     RiotRSOClient,
     RiotRSOError,
+    _http_error_response,
     _read_riot_json,
     _result_for_record,
+    _start_failure,
     create_app,
 )
 from moon_poro.settings import RSOSettings
@@ -70,16 +75,22 @@ class SQLiteTestDatabase:
         await self.engine.dispose()
 
 
-@pytest_asyncio.fixture
-async def rso_test_client() -> AsyncIterator[TestClient]:
+async def start_sqlite_client(settings: RSOSettings, **client_options: object) -> TestClient:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     database = cast(Database, SQLiteTestDatabase(factory, engine))
-    settings = make_rso_settings(rso_public_base_url="http://localhost:8080")
-    client = TestClient(TestServer(create_app(settings, database)))
+    client = TestClient(TestServer(create_app(settings, database)), **client_options)
     await client.start_server()
+    return client
+
+
+@pytest_asyncio.fixture
+async def rso_test_client() -> AsyncIterator[TestClient]:
+    client = await start_sqlite_client(
+        make_rso_settings(rso_public_base_url="http://localhost:8080")
+    )
     try:
         yield client
     finally:
@@ -200,7 +211,9 @@ def test_completed_result_escapes_riot_id() -> None:
     response = _result_for_record(record)
 
     assert "<script>" not in response.text
-    assert "&lt;script&gt;#tag&amp;line" in response.text
+    assert "Konto Riot <strong>&lt;script&gt;#tag&amp;line</strong> jest już połączone" in (
+        response.text
+    )
     assert "https://discord.com/channels/123" in response.text
 
 
@@ -506,7 +519,9 @@ async def test_cancelled_provider_flow_and_reused_link(rso_test_client: TestClie
 
     assert cancelled.status == 303
     assert reused.status == 200
-    assert "Każdy link działa tylko raz" in await reused.text()
+    reused_html = await reused.text()
+    assert "Link został już użyty" in reused_html
+    assert "Każdy link działa tylko raz" not in reused_html
     assert "Logowanie anulowane" in await result.text()
 
 
@@ -529,7 +544,9 @@ async def test_invalid_tokens_and_origin_are_rejected(rso_test_client: TestClien
     assert "Nie udało się potwierdzić logowania" in invalid_state_html
     assert "Stan logowania" not in invalid_state_html
     assert "Nie udało się rozpocząć" in await bad_origin.text()
-    assert "Sprawdź Discorda" in await missing_cookie.text()
+    missing_cookie_html = await missing_cookie.text()
+    assert "Sprawdź Discorda" in missing_cookie_html
+    assert "Ta przeglądarka nie ma danych tej weryfikacji." in missing_cookie_html
 
 
 @pytest.mark.parametrize("origin", ["null", "https://evil.example"])
@@ -694,7 +711,12 @@ async def test_start_page_creates_browser_identity_once(rso_test_client: TestCli
     assert cookie["path"] == "/" and cookie["httponly"] and cookie["samesite"] == "Lax"
     assert first.cookies["moon_poro_rso"]["path"] == "/verify"
     second = await rso_test_client.get(path, headers=HOST)
-    assert BROWSER_COOKIE not in second.cookies
+    # The same identity is sent again with a fresh lifetime, so it cannot
+    # expire between the page and the click.
+    resent = second.cookies[BROWSER_COOKIE]
+    assert resent.value == cookie.value
+    assert resent["max-age"] == "600" and resent["path"] == "/"
+    assert not resent["secure"]
 
     started = await rso_test_client.post(path, headers=ORIGIN, allow_redirects=False)
     assert started.status == 303
@@ -1019,7 +1041,9 @@ async def test_riot_client_pool_and_timeouts(rso_test_client: TestClient) -> Non
     assert connector.limit == 16 and connector.limit_per_host == 8
     timeout = session.timeout
     assert timeout.sock_connect == 10 and timeout.sock_read == 10
-    assert timeout.connect is None and timeout.total == 20
+    # connect bounds the pool queue plus the socket; total leaves a full
+    # budget for Riot's answer after it.
+    assert timeout.connect == 10 and timeout.total == 20
 
 
 @pytest.mark.parametrize(
@@ -1054,3 +1078,286 @@ async def test_riot_rejection_logs_endpoint_and_oauth_error_without_secrets(
     assert "RSO userinfo endpoint returned HTTP 400" in caplog.text
     assert expected in caplog.text
     assert "abcdefghijklmnopqrstuvwxyz0123" not in caplog.text
+
+
+async def test_unhandled_error_logs_route_template_but_never_the_start_token(
+    rso_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = rso_test_client.server.app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    monkeypatch.setattr(
+        repository, "get_by_start_token", AsyncMock(side_effect=RuntimeError("database down"))
+    )
+
+    with caplog.at_level(logging.ERROR, logger="moon_poro.rso"):
+        response = await rso_test_client.get(f"/verify/start/{created.token}", headers=HOST)
+
+    assert response.status == 500
+    assert "Coś poszło nie tak" in await response.text()
+    assert "Unhandled error in RSO handler for GET /verify/start/{token}" in caplog.text
+    assert created.token not in caplog.text
+
+
+async def test_unhandled_callback_error_never_logs_oauth_query(
+    rso_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = rso_test_client.server.app[REPOSITORY_KEY]
+    monkeypatch.setattr(
+        repository, "claim_callback", AsyncMock(side_effect=RuntimeError("database down"))
+    )
+    state = "s" * 64
+    code = "secret-authorization-code-value"
+
+    with caplog.at_level(logging.ERROR, logger="moon_poro.rso"):
+        response = await rso_test_client.get(
+            f"/oauth2/callback?state={state}&code={code}", headers=HOST
+        )
+
+    assert response.status == 500
+    assert "for GET /oauth2/callback" in caplog.text
+    assert state not in caplog.text and code not in caplog.text
+
+
+@pytest.mark.parametrize("path", ["/verify/start/", "/verify/start/a/b", "/nothing-here"])
+async def test_unknown_page_renders_polish_404_with_security_headers(
+    rso_test_client: TestClient, path: str
+) -> None:
+    response = await rso_test_client.get(path, headers=HOST)
+
+    assert response.status == 404
+    assert response.content_type == "text/html"
+    document = await response.text()
+    assert "Nie ma takiej strony" in document
+    assert "Jeśli weryfikujesz konto, kliknij „Zweryfikuj konto” na Discordzie" in document
+    assert "404: Not Found" not in document
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+
+
+async def test_wrong_method_renders_polish_405_and_keeps_allow(
+    rso_test_client: TestClient,
+) -> None:
+    response = await rso_test_client.post("/oauth2/callback", headers=HOST)
+
+    assert response.status == 405
+    assert response.headers["Allow"] == "GET,HEAD"
+    document = await response.text()
+    assert "Nie udało się otworzyć strony" in document
+    assert "Wróć do Discorda i otwórz link od bota jeszcze raz." in document
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
+
+
+async def test_proxied_readiness_probe_gets_the_polish_404_page(
+    rso_test_client: TestClient,
+) -> None:
+    response = await rso_test_client.get("/readyz", headers={**HOST, "Forwarded": "for=x"})
+
+    assert response.status == 404
+    assert "Nie ma takiej strony" in await response.text()
+
+
+def test_http_redirect_exception_keeps_location_without_text_body() -> None:
+    response = _http_error_response(web.HTTPFound("/verify/result"))
+
+    assert response.status == 302
+    assert response.headers["Location"] == "/verify/result"
+    assert not response.body
+
+
+async def test_riot_burst_above_pool_limit_waits_instead_of_failing() -> None:
+    slow = web.Application()
+
+    async def answer(_request: web.Request) -> web.Response:
+        await asyncio.sleep(0.5)
+        return web.json_response({"ok": True})
+
+    slow.router.add_get("/", answer)
+    riot = TestServer(slow)
+    await riot.start_server()
+    client = await start_sqlite_client(
+        make_rso_settings(rso_public_base_url="http://localhost:8080", rso_http_timeout_seconds=2)
+    )
+    try:
+        session = client.server.app[HTTP_CLIENT_KEY]
+
+        async def call() -> int:
+            async with session.get(riot.make_url("/")) as response:
+                await response.read()
+                return response.status
+
+        # Three waves on the 8 pooled connections; the last call queues for
+        # about 1 s and still gets its full budget for the answer.
+        assert await asyncio.gather(*(call() for _call in range(17))) == [200] * 17
+    finally:
+        await client.close()
+        await riot.close()
+
+
+async def test_shutdown_waits_for_background_failure_updates_before_closing_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = await start_sqlite_client(
+        make_rso_settings(rso_public_base_url="http://localhost:8080")
+    )
+    app = client.server.app
+    repository = app[REPOSITORY_KEY]
+    database = app[DATABASE_KEY]
+    events: list[str] = []
+
+    async def slow_fail(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(0.05)
+        events.append("failed")
+
+    close_database = database.close
+
+    async def record_close() -> None:
+        events.append("closed")
+        await close_database()
+
+    monkeypatch.setattr(repository, "fail", slow_fail)
+    monkeypatch.setattr(database, "close", record_close)
+    task = _start_failure(repository, 1)
+
+    await client.close()
+
+    assert task.done()
+    assert events == ["failed", "closed"]
+    assert task not in _BACKGROUND_TASKS
+
+
+async def test_shutdown_gives_up_on_stuck_failure_update_after_timeout(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("moon_poro.rso_web.BACKGROUND_DRAIN_TIMEOUT_SECONDS", 0.05)
+    client = await start_sqlite_client(
+        make_rso_settings(rso_public_base_url="http://localhost:8080")
+    )
+    app = client.server.app
+    repository = app[REPOSITORY_KEY]
+    database = app[DATABASE_KEY]
+    closed = asyncio.Event()
+    close_database = database.close
+
+    async def record_close() -> None:
+        closed.set()
+        await close_database()
+
+    async def stuck_fail(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(repository, "fail", stuck_fail)
+    monkeypatch.setattr(database, "close", record_close)
+    task = _start_failure(repository, 1)
+    try:
+        with caplog.at_level(logging.WARNING, logger="moon_poro.rso"):
+            await asyncio.wait_for(client.close(), timeout=5)
+        assert closed.is_set() and not task.done()
+        assert "RSO shut down before 1 session failure update(s) finished" in caplog.text
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def test_failed_link_changed_explains_what_happened() -> None:
+    response = _result_for_record(result_record("FAILED", error_code="VERIFICATION_LINK_CHANGED"))
+
+    assert "W trakcie weryfikacji zmieniło się połączenie konta." in response.text
+    assert "Sprawdź „Moje konto” na Discordzie." in response.text
+    assert "Coś poszło nie tak po drodze" not in response.text
+
+
+def test_discord_already_linked_names_the_my_account_section() -> None:
+    response = _result_for_record(result_record("FAILED", error_code="DISCORD_ALREADY_LINKED"))
+
+    assert "najpierw usuń obecne w sekcji „Moje konto”." in response.text
+
+
+HTTPS_HOST = {"Host": "bot.example.com"}
+HTTPS_ORIGIN = {**HTTPS_HOST, "Origin": "https://bot.example.com"}
+
+
+@pytest_asyncio.fixture
+async def https_rso_client() -> AsyncIterator[TestClient]:
+    # The test server speaks plain HTTP, so the client must not drop Secure
+    # cookies on its own; each test sends its cookies explicitly.
+    client = await start_sqlite_client(make_rso_settings(), cookie_jar=aiohttp.DummyCookieJar())
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+async def test_https_browser_cookie_uses_host_prefix(https_rso_client: TestClient) -> None:
+    repository = https_rso_client.server.app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    path = f"/verify/start/{created.token}"
+
+    landing = await https_rso_client.get(path, headers=HTTPS_HOST)
+
+    assert landing.status == 200
+    assert SECURE_BROWSER_COOKIE == "__Host-moon_poro_rso_browser"
+    assert BROWSER_COOKIE not in landing.cookies
+    cookie = landing.cookies[SECURE_BROWSER_COOKIE]
+    # Browsers drop a __Host- cookie unless all of these hold.
+    assert cookie["secure"] and cookie["path"] == "/" and not cookie["domain"]
+    assert cookie["httponly"] and cookie["samesite"] == "Lax"
+    assert landing.cookies["moon_poro_rso"]["secure"]
+
+    again = await https_rso_client.get(
+        path, headers={**HTTPS_HOST, "Cookie": f"{SECURE_BROWSER_COOKIE}={cookie.value}"}
+    )
+    assert again.cookies[SECURE_BROWSER_COOKIE].value == cookie.value
+
+
+async def test_https_flow_reads_only_the_host_prefixed_cookie(
+    https_rso_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = https_rso_client.server.app
+    repository = app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    path = f"/verify/start/{created.token}"
+    browser = "b" * 43
+    secure_cookie = {"Cookie": f"{SECURE_BROWSER_COOKIE}={browser}"}
+
+    started = await https_rso_client.post(
+        path, headers={**HTTPS_ORIGIN, **secure_cookie}, allow_redirects=False
+    )
+    assert started.status == 303
+    assert started.cookies[SECURE_BROWSER_COOKIE].value == browser
+
+    # A cookie under the unprefixed name (for example tossed from a
+    # subdomain) is not the browser identity over HTTPS.
+    tossed = await https_rso_client.post(
+        path,
+        headers={**HTTPS_ORIGIN, "Cookie": f"{BROWSER_COOKIE}={browser}"},
+        allow_redirects=False,
+    )
+    assert "Logowanie trwa w innej przeglądarce" in await tossed.text()
+    monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", AsyncMock(return_value="token"))
+    monkeypatch.setattr(
+        app[RSO_CLIENT_KEY],
+        "get_identity",
+        AsyncMock(return_value=RiotIdentity("https-puuid", "Moon", "EUNE", "EUN1")),
+    )
+    rejected = await https_rso_client.get(
+        f"/oauth2/callback?state={_state(started)}&code=code",
+        headers={**HTTPS_HOST, "Cookie": f"{BROWSER_COOKIE}={browser}"},
+        allow_redirects=False,
+    )
+    assert "Wróć do poprzedniej przeglądarki" in await rejected.text()
+
+    accepted = await https_rso_client.get(
+        f"/oauth2/callback?state={_state(started)}&code=code",
+        headers={**HTTPS_HOST, **secure_cookie},
+        allow_redirects=False,
+    )
+    assert accepted.status == 303 and accepted.headers["Location"] == "/verify/result"
+    record = await repository.get_by_start_token(created.token)
+    assert record is not None and record.status == "VERIFIED_PENDING_DISCORD"
