@@ -38,6 +38,7 @@ class VerificationSessionStatus(StrEnum):
     PROCESSING_RIOT = "PROCESSING_RIOT"
     VERIFIED_PENDING_DISCORD = "VERIFIED_PENDING_DISCORD"
     APPLYING_DISCORD = "APPLYING_DISCORD"
+    DISCORD_RETRY_PAUSED = "DISCORD_RETRY_PAUSED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
@@ -153,6 +154,8 @@ class VerificationSession(Base):
     )
     guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_username: Mapped[str | None] = mapped_column(String(100))
+    discord_guild_name: Mapped[str | None] = mapped_column(String(100))
     start_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     oauth_state_hash: Mapped[str | None] = mapped_column(String(64))
     browser_binding_hash: Mapped[str | None] = mapped_column(String(64))

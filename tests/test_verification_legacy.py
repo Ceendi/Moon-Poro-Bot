@@ -254,14 +254,16 @@ async def test_legacy_start_explains_pending_deletion(
     interaction = SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        response=SimpleNamespace(
+            send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()
+        ),
+        edit_original_response=AsyncMock(),
     )
 
     await view.begin_verification(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(
-        "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
-        ephemeral=True,
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
     )
     interaction.response.send_modal.assert_not_awaited()
 
@@ -281,14 +283,16 @@ async def test_legacy_start_explains_incomplete_previous_link(
     interaction = SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        response=SimpleNamespace(
+            send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()
+        ),
+        edit_original_response=AsyncMock(),
     )
 
     await view.begin_verification(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(
-        "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
-        ephemeral=True,
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
     )
     interaction.response.send_modal.assert_not_awaited()
 
@@ -842,7 +846,8 @@ async def test_rank_refresh_claims_only_configured_guild_records() -> None:
 
     await LegacyVerificationCog.refresh_verified.coro(cog)
 
-    bot.verification_sessions.claim_audit_reconciliations.assert_awaited_once_with(limit=5)
+    bot.verification_sessions.claim_audit_reconciliations.assert_not_awaited()
+    bot.verification_sessions.claim_audit_cleanups.assert_not_awaited()
     assert bot.get_guild.call_args_list == [call(123), call(123), call(123), call(123)]
     verifications.claim_due_rank_refreshes.assert_awaited_once_with(
         123,
@@ -1491,7 +1496,7 @@ async def test_manual_rank_change_prioritizes_stale_cache_with_durable_cooldown(
     )
 
 
-async def test_manual_rank_change_without_cache_restores_previous_roles_and_schedules_refresh() -> (
+async def test_manual_rank_change_without_cache_removes_unknown_rank_and_schedules_refresh() -> (
     None
 ):
     emerald = FakeRole(1, "Emerald")
@@ -1506,6 +1511,8 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
         remove_roles=AsyncMock(),
         add_roles=AsyncMock(),
     )
+    guild.roles = [emerald, iron, verified]
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1533,7 +1540,8 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
 
     await cog.on_member_update(before, after)
 
-    after.remove_roles.assert_awaited_once_with(iron, reason="Ochrona ról weryfikacji Riot")
+    assert set(after.remove_roles.await_args.args) == {emerald, iron}
+    assert after.remove_roles.await_args.kwargs == {"reason": "Synchronizacja weryfikacji Riot"}
     after.add_roles.assert_not_awaited()
     verifications.request_rank_refresh.assert_awaited_once_with(
         123,

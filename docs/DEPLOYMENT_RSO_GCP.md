@@ -44,6 +44,9 @@ Weryfikacja ikoną również zapisuje trwałe zadanie finalizacji przed publikac
 Po przełączeniu na RSO bot może dokończyć już zaakceptowane wyzwania ikoną. Po powrocie
 do legacy finalizuje tylko wyzwania ikoną, ale sprząta nierozstrzygnięte audyty obu metod.
 
+Migracja `20261017_0010` dodaje tylko dwie opcjonalne nazwy do sesji: konto Discord i serwer.
+Nie zmienia istniejących powiązań ani rangi. Stare sesje bez tych nazw nadal pokazują identyfikatory.
+
 ## 2. Budowa strony poza VM
 
 Node.js jest potrzebny tylko na komputerze budującym. Produkcyjna VM otrzymuje katalog `dist`:
@@ -155,7 +158,7 @@ Caddy automatycznie uzyska certyfikat po poprawnym DNS i dostępie z Internetu d
 ```bash
 systemctl status moon-poro moon-poro-rso caddy
 curl --fail https://moonporo.pl/healthz
-curl --fail https://moonporo.pl/readyz
+curl --fail http://127.0.0.1:8080/readyz
 journalctl -u moon-poro-rso --since today
 ```
 
@@ -212,8 +215,10 @@ użytkownika na serwerze odkłada sprawdzenie o siedem dni. Przycisk odświeżan
 
 Sukces Riot i synchronizacja Discord są zapisywane osobno. Błąd nadawania roli korzysta z trwałego
 retry na podstawie cache i nie ponawia zapytania Riot. Błędy sieciowe i 5xx mają wykładniczy backoff
-z jitterem 20%. Regionalny breaker nadal respektuje `Retry-After` po 429. Po 401 lub 403 globalny
-breaker zatrzymuje masową kolejkę i dopuszcza pojedynczą próbę kontrolną co 15 minut.
+z jitterem 20%. Regionalny breaker nadal respektuje `Retry-After` po 429. Odpowiedź 401 otwiera
+globalną blokadę autoryzacji. Odpowiedź 403 blokuje rodzinę endpointów, która ją zwróciła,
+bez zatrzymywania pozostałych API. Oba mechanizmy dopuszczają pojedynczą próbę kontrolną
+co 15 minut. Kolejka rang i profil sprawdzają również blokadę League-v4.
 
 Transport Riot ma limit 15 sekund na pojedyncze żądanie, 5 sekund na połączenie i 10 sekund
 bez odbierania danych. Limit nie obejmuje oczekiwania limitera ani `Retry-After`; ponowienia
@@ -223,6 +228,31 @@ Zmiana ról sprawdza pod blokadą zarówno tożsamość powiązania, jak i wersj
 Lokalna blokada użytkownika jest zawsze pobierana przed blokadą rekordu bazy. Panel ról
 korzysta ze świeżego stanu Discorda oraz jawnego wyniku wykonanych operacji, a nie zakłada,
 że `add_roles` od razu zmieni obiekt `Member` w pamięci.
+
+Jeśli nie ma jeszcze potwierdzonego snapshotu rangi, bot nie zgaduje rangi na podstawie
+zdarzenia Discorda. Przywraca role wynikające z powiązania i usuwa niepotwierdzone role rang
+do czasu odświeżenia przez istniejącą kolejkę. Opóźnione zdarzenie wywołane przez samego bota
+nie odwraca wtedy poprzedniej operacji.
+
+Publikacja audytu ma limit 10 sekund obejmujący oczekiwanie na blokady i operacje Discorda.
+Trwała intencja publikacji jest zapisana wcześniej. Timeout nie potwierdza częściowego wyniku
+ani nie kasuje intencji. Ponowienie nadal sprawdza historię, aby nie duplikować wiadomości.
+Sprzątanie audytu działa w osobnej pętli asynchronicznej tego samego procesu, niezależnie od kolejki rang.
+
+Po ośmiu nieudanych próbach finalizacja przechodzi do `DISCORD_RETRY_PAUSED` i zapisuje błąd
+w logu operatora. Powiązanie i intencje audytu pozostają zachowane. Po naprawieniu uprawnień,
+kanału lub konfiguracji użytkownik może kliknąć „Zweryfikuj konto”, aby wznowić tę samą
+potwierdzoną weryfikację bez nowego logowania Riot. Usunięcie powiązania nadal anuluje tę pracę.
+
+Publiczne Caddy zwraca 404 dla `/readyz`; sprawdzenie bazy jest dostępne bezpośrednio
+na lokalnym porcie procesu RSO. `/healthz` pozostaje lekkim publicznym sprawdzeniem procesu.
+Limiter RSO grupuje IPv6 po prefiksie /64, ma twardy limit 4096 wpisów i odrzuca nowe adresy
+przy pełnym limicie do wygaśnięcia wpisów. Nie jest zabezpieczeniem przed rozproszonym atakiem DDoS.
+
+Strona logowania pokazuje konto Discord i serwer zapisane przy wystawieniu linku oraz
+ostrzeżenie przed linkami otrzymanymi od innych osób. To świadomie wybrana ochrona interfejsu,
+nie uwierzytelnienie konta Discord w przeglądarce. Przekazany link pozostaje sekretem jednorazowym;
+pełne sprawdzenie odbiorcy wymagałoby dodatkowego logowania Discord, którego nie wdrażamy.
 
 Usuwanie powiązania najpierw zapisuje trwały stan oczekującego usunięcia. Ten stan blokuje nowe
 odświeżenia i synchronizacje ról dla rekordu. Bot usuwa rolę Zweryfikowany, sprząta wiadomość
@@ -250,7 +280,7 @@ Po problemie z RSO ustaw `VERIFICATION_MODE=legacy_icon`, zatrzymaj `moon-poro-r
 weryfikacji ikoną. Nie cofaj migracji `20260810_0002`, `20260814_0003` ani `20260815_0005`, jeżeli
 istnieją już rekordy produkcyjne. Problem analizuj na kopii bazy.
 
-Nie cofaj również migracji `0008` i `0009` przy zmianie samego trybu weryfikacji.
+Nie cofaj również migracji `0008`, `0009` i `0010` przy zmianie samego trybu weryfikacji.
 Tryb `legacy_icon` kończy wyłącznie sesje z potwierdzeniem ikoną. Sesje RSO,
 które już potwierdziły konto i czekają na dokończenie w Discordzie, pozostają w bazie:
 ich finalizacja wróci po ponownym uruchomieniu trybu RSO. Nie rozpoczynaj dla nich

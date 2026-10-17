@@ -265,6 +265,76 @@ async def test_auth_breaker_allows_only_one_probe_and_recovers() -> None:
     assert not breaker.snapshot().blocked
 
 
+async def test_forbidden_api_family_does_not_pause_other_riot_apis() -> None:
+    now = [100.0]
+    breaker = RiotAuthBreaker(clock=lambda: now[0])
+    transport = AsyncMock(side_effect=[RiotResponse(403), RiotResponse(200), RiotResponse(200)])
+    middleware = riot_auth_breaker_middleware(breaker)(transport)
+    summoner = Invocation(
+        "GET",
+        "https://{region}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}",
+        {"region": "EUN1", "puuid": "test-puuid"},
+    )
+    league = Invocation(
+        "GET",
+        "https://{region}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}",
+        {"region": "EUN1", "puuid": "test-puuid"},
+    )
+    await middleware(summoner)
+    assert breaker.can_attempt()
+    assert not breaker.can_attempt(scope="/lol/summoner/v4")
+    assert breaker.can_attempt(scope=riot.RIOT_LEAGUE_AUTH_SCOPE)
+    assert breaker.snapshot(scope="/lol/summoner/v4").blocked
+    assert not breaker.snapshot(scope=riot.RIOT_LEAGUE_AUTH_SCOPE).blocked
+    with pytest.raises(RiotAuthCircuitOpen):
+        await middleware(summoner)
+    assert (await middleware(league)).status == 200
+    now[0] += 900
+    assert (await middleware(summoner)).status == 200
+    assert not breaker.snapshot(scope="/lol/summoner/v4").blocked
+    assert transport.await_count == 3
+    assert set(breaker._endpoint_breakers) == {"/lol/summoner/v4", "/lol/league/v4"}
+
+
+async def test_unauthorized_api_family_still_pauses_all_riot_apis() -> None:
+    breaker = RiotAuthBreaker()
+    middleware = riot_auth_breaker_middleware(breaker)(AsyncMock(return_value=RiotResponse(401)))
+    await middleware(Invocation("GET", "https://example.invalid/lol/summoner/v4/item", {}))
+    assert not breaker.can_attempt(scope=riot.RIOT_LEAGUE_AUTH_SCOPE)
+    with pytest.raises(RiotAuthCircuitOpen):
+        await middleware(Invocation("GET", "https://example.invalid/lol/league/v4/item", {}))
+
+
+async def test_cancelled_auth_probe_releases_both_gates() -> None:
+    import asyncio
+
+    now = [100.0]
+    breaker = RiotAuthBreaker(clock=lambda: now[0])
+    scope = riot.RIOT_LEAGUE_AUTH_SCOPE
+    breaker.record_status(401, was_probe=False)
+    breaker.for_scope(scope).record_status(403, was_probe=False)
+    now[0] += 900
+    transport = AsyncMock(side_effect=asyncio.CancelledError)
+    middleware = riot_auth_breaker_middleware(breaker)(transport)
+    with pytest.raises(asyncio.CancelledError):
+        await middleware(Invocation("GET", "https://example.invalid/lol/league/v4/item", {}))
+    assert not breaker.snapshot().probe_in_flight
+    assert not breaker.snapshot(scope=scope).probe_in_flight
+    now[0] += 900
+    assert breaker.can_attempt(scope=scope)
+
+
+async def test_forbidden_recovery_probe_does_not_hold_global_credential_gate() -> None:
+    now = [100.0]
+    breaker = RiotAuthBreaker(clock=lambda: now[0])
+    breaker.record_status(401, was_probe=False)
+    now[0] += 900
+    middleware = riot_auth_breaker_middleware(breaker)(AsyncMock(return_value=RiotResponse(403)))
+    await middleware(Invocation("GET", "https://example.invalid/lol/summoner/v4/item", {}))
+    assert breaker.can_attempt(scope=riot.RIOT_LEAGUE_AUTH_SCOPE)
+    assert not breaker.can_attempt(scope="/lol/summoner/v4")
+
+
 def test_auth_breaker_ignores_late_success_but_closes_on_non_auth_probe_response() -> None:
     now = [100.0]
     breaker = RiotAuthBreaker(probe_interval_seconds=900, clock=lambda: now[0])

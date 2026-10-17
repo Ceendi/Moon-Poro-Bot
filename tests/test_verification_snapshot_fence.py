@@ -254,6 +254,7 @@ async def test_rso_snapshot_conflict_retries_without_failing_valid_link(
         1,
         error_code="RANK_SNAPSHOT_CONFLICT",
         delay_seconds=5,
+        max_attempts=8,
     )
     bot.verification_sessions.fail_discord.assert_not_awaited()
     cog._publish_rso_audit.assert_not_awaited()
@@ -530,6 +531,60 @@ async def test_marker_cleanup_rechecks_replacement_after_waiting_for_member_lock
     await asyncio.wait_for(cleanup, timeout=2)
     env.http.remove_role.assert_not_awaited()
     assert env.selected() == {"Gold", "EUNE", "Member", "Verified"}
+
+
+async def test_unknown_rank_delayed_bot_gateway_events_converge_without_role_oscillation(
+    repository: VerificationRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await repository.create(
+        guild_id=123, user_id=456, message_id=None, platform="EUN1", puuid="puuid"
+    )
+    bot, guild = role_context(repository)
+    bot.settings.rank_refresh_manual_priority_cooldown_seconds = 3600
+    request_refresh = AsyncMock()
+    monkeypatch.setattr(repository, "request_rank_refresh", request_refresh)
+    bot.settings.no_lol_role_name = "No LoL"
+    iron = Role(6, "Iron")
+    no_lol = Role(7, "No LoL")
+    unranked = Role(8, "Unranked")
+    guild.roles.extend([iron, no_lol, unranked])
+    bot.settings.lol_ranks.extend([iron.name, unranked.name])
+    guild.actual = {iron, no_lol}
+    queued_events: list[tuple[Member, Member]] = []
+
+    class EventMember(Member):
+        async def remove_roles(self, *roles: Role, reason: str) -> None:
+            before = Member(guild, list(guild.actual))
+            await super().remove_roles(*roles, reason=reason)
+            queued_events.append((before, Member(guild, list(guild.actual))))
+
+        async def add_roles(self, *roles: Role, reason: str) -> None:
+            before = Member(guild, list(guild.actual))
+            await super().add_roles(*roles, reason=reason)
+            queued_events.append((before, Member(guild, list(guild.actual))))
+
+    async def fetch_member(_user_id: int) -> Member:
+        return EventMember(guild, list(guild.actual))
+
+    guild.fetch_member = AsyncMock(side_effect=fetch_member)
+    cog = object.__new__(VerificationCog)
+    cog.bot = bot
+    cog._managed_role_updates = set()
+    await _reconcile_cached_role_change(cog, Member(guild, []), Member(guild, [iron, no_lol]))
+    assert cog._managed_role_updates == set()
+    assert len(queued_events) == 2
+    # Deliver HTTP-generated Gateway events after the transient managed flag was
+    # cleared, preserving their obsolete snapshots just as Discord does.
+    for before, after in list(queued_events):
+        await _reconcile_cached_role_change(cog, before, after)
+    assert len(queued_events) == 2
+    assert {role.name for role in guild.actual} == {"EUNE", "Verified", "Member"}
+    assert not {iron, unranked} & set(guild.added)
+    current = await repository.get_by_user(123, 456)
+    assert current is not None and current.last_known_rank is None
+    assert request_refresh.await_count == 3
+    request_refresh.assert_awaited_with(123, 456, cooldown_seconds=3600, source="role_tamper")
     async with repository._sessions() as session:
         assert await session.get(VerificationMarkerCleanup, (123, 456)) is None
 

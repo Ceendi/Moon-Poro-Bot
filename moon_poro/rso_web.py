@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import logging
 import re
@@ -200,22 +201,46 @@ class RequestRateLimiter:
     """Small fixed-window limiter; no external cache is needed on a single e2-micro."""
 
     def __init__(self, *, limit: int = 60, window_seconds: int = 60) -> None:
+        if limit < 1 or window_seconds < 1:
+            raise ValueError("Rate limit and window must be positive")
         self._limit = limit
         self._window_seconds = window_seconds
         self._clients: dict[str, tuple[int, float]] = {}
+        self._next_cleanup = 0.0
 
     def allowed(self, client: str) -> bool:
+        # IPv6 privacy addresses within one /64 share a budget. IPv4-mapped
+        # addresses must use the same budget as their plain IPv4 spelling.
+        if len(client) > 64:
+            return False
+        try:
+            address = ipaddress.ip_address(client)
+        except ValueError:
+            return False
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.ipv4_mapped is not None:
+                client = str(address.ipv4_mapped)
+            else:
+                client = str(ipaddress.IPv6Network((address, 64), strict=False))
+        else:
+            client = str(address)
         now = time.monotonic()
+        # A full sweep runs at most once per second, including at capacity.
+        # New clients fail closed until space is available; existing counters
+        # are never evicted to make room for attacker-controlled addresses.
+        if now >= self._next_cleanup:
+            cutoff = now - self._window_seconds
+            self._clients = {
+                key: value for key, value in self._clients.items() if value[1] > cutoff
+            }
+            self._next_cleanup = now + 1.0
+        if client not in self._clients and len(self._clients) >= 4096:
+            return False
         count, started = self._clients.get(client, (0, now))
         if now - started >= self._window_seconds:
             count, started = 0, now
-        count += 1
+        count = min(count + 1, self._limit + 1)
         self._clients[client] = (count, started)
-        if len(self._clients) > 4096:
-            cutoff = now - self._window_seconds
-            self._clients = {
-                key: value for key, value in self._clients.items() if value[1] >= cutoff
-            }
         return count <= self._limit
 
 
@@ -329,10 +354,16 @@ async def show_start(request: web.Request) -> web.Response:
         return redirect_response
 
     minutes = max(1, int((as_utc(record.expires_at) - now).total_seconds() // 60))
+    username = html.escape(record.discord_username or "")
+    guild_name = html.escape(record.discord_guild_name or "")
+    user_id = html.escape(str(record.discord_user_id))
+    guild_id = html.escape(str(record.guild_id))
     body = f"""
         {_avatar("start")}
         <h1>Połącz konto przez Riot</h1>
         <p class="lead">Zalogujesz się na stronie Riot Games. Moon Poro nie widzi Twojego hasła, a Riot przekaże nam Twoje Riot ID i region.</p>
+        <p class="identity">Łączysz konto Riot z kontem Discord: <strong>{username}</strong> (ID: {user_id})<br>Serwer: <strong>{guild_name}</strong> (ID: {guild_id})</p>
+        <p class="warning">Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę. Rozpocznij weryfikację samodzielnie w panelu bota.</p>
         <form method="post" action="/verify/start/{html.escape(token)}">
           <button type="submit">Przejdź do logowania Riot</button>
         </form>
@@ -481,9 +512,16 @@ def _result_for_record(record: VerificationSession) -> web.Response:
     }:
         return _status_page(
             "Riot potwierdził konto",
-            "Bot nadaje teraz role na Discordzie. Ta strona odświeży się sama.",
+            "Kończymy weryfikację na Discordzie. Ta strona odświeży się sama.",
             "pending",
             refresh_seconds=2,
+        )
+    if status == VerificationSessionStatus.DISCORD_RETRY_PAUSED.value:
+        return _status_page(
+            "Weryfikacja wymaga pomocy",
+            "Nie możemy teraz dokończyć weryfikacji. Kliknij ponownie „Zweryfikuj konto” "
+            "na Discordzie. Jeśli problem się powtarza, skontaktuj się z moderacją.",
+            "error",
         )
     if status == VerificationSessionStatus.CANCELLED.value or record.error_code == "USER_CANCELLED":
         return _status_page(
@@ -577,6 +615,8 @@ def _html_page(title: str, body: str) -> web.Response:
     @keyframes blink {{ 0%,80%,100% {{ opacity:.25; }} 40% {{ opacity:1; }} }}
     h1 {{ margin:0 0 12px; font-size:clamp(28px,6vw,36px); font-weight:800; line-height:1.15; text-wrap:balance; }}
     .lead {{ margin:0 0 28px; color:var(--muted); text-wrap:pretty; }}
+    .identity {{ width:100%; margin:0 0 16px; overflow-wrap:anywhere; }}
+    .warning {{ margin:0 0 24px; padding:14px 16px; border:1px solid var(--pink); border-radius:16px; color:var(--text); text-wrap:pretty; }}
     form {{ width:100%; margin:0; }}
     button,.button {{ display:inline-flex; align-items:center; justify-content:center; width:100%; min-height:52px; padding:12px 24px; border:0; border-radius:999px; color:#241a3f; background:linear-gradient(180deg,#fff0cc,var(--moon)); box-shadow:0 6px 24px rgba(255,226,163,.18); font:800 17px "Nunito",system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .15s ease; }}
     button:hover,.button:hover {{ transform:translateY(-2px); }}

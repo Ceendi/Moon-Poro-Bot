@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Self, cast, overload
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -29,6 +30,7 @@ logger = logging.getLogger("moon_poro.riot")
 
 DEFAULT_RETRY_AFTER_SECONDS = 1.0
 RIOT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+RIOT_LEAGUE_AUTH_SCOPE = "/lol/league/v4"
 
 SERVER_TRANSLATION = {"EUN1": "EUNE", "EUW1": "EUW", "NA1": "NA"}
 SERVERS = {"eune": "EUN1", "euw": "EUW1", "na": "NA1"}
@@ -183,11 +185,24 @@ class RiotAuthBreaker:
         self._last_status: int | None = None
         self._next_probe_at = 0.0
         self._probe_in_flight = False
+        self._endpoint_breakers: dict[str, RiotAuthBreaker] = {}
 
-    def can_attempt(self) -> bool:
-        return not self._blocked or (
+    def for_scope(self, scope: str) -> RiotAuthBreaker:
+        """Separate endpoint permissions from failures of the shared credential."""
+        breaker = self._endpoint_breakers.get(scope)
+        if breaker is None:
+            breaker = RiotAuthBreaker(
+                probe_interval_seconds=self._probe_interval_seconds, clock=self._clock
+            )
+            self._endpoint_breakers[scope] = breaker
+        return breaker
+
+    def can_attempt(self, *, scope: str | None = None) -> bool:
+        global_allowed = not self._blocked or (
             not self._probe_in_flight and self._clock() >= self._next_probe_at
         )
+        endpoint = self._endpoint_breakers.get(scope) if scope is not None else None
+        return global_allowed and (endpoint is None or endpoint.can_attempt())
 
     def acquire(self) -> bool:
         """Return whether this request is the single auth recovery probe."""
@@ -230,7 +245,10 @@ class RiotAuthBreaker:
             self._next_probe_at = self._clock() + self._probe_interval_seconds
             self._probe_in_flight = False
 
-    def snapshot(self) -> RiotAuthBreakerSnapshot:
+    def snapshot(self, *, scope: str | None = None) -> RiotAuthBreakerSnapshot:
+        endpoint = self._endpoint_breakers.get(scope) if scope is not None else None
+        if not self._blocked and endpoint is not None:
+            return endpoint.snapshot()
         retry_after = max(0.0, self._next_probe_at - self._clock()) if self._blocked else 0.0
         return RiotAuthBreakerSnapshot(
             blocked=self._blocked,
@@ -288,15 +306,30 @@ def riot_api_monitoring_middleware(monitor: RiotAPIMonitor) -> Middleware:
 def riot_auth_breaker_middleware(auth_breaker: RiotAuthBreaker) -> Middleware:
     def constructor(next_call: MiddlewareCallable) -> MiddlewareCallable:
         async def middleware(invocation: Invocation) -> Any:
-            was_probe = auth_breaker.acquire()
+            # Use the fixed API-family path, never a formatted URL containing a
+            # user's PUUID or Riot ID. A forbidden endpoint must not stop other APIs.
+            parts = [part for part in urlsplit(invocation.urlformat).path.split("/") if part]
+            scope = "/" + "/".join(parts[:3]) if parts else "/unknown"
+            endpoint = auth_breaker.for_scope(scope)
+            endpoint_probe = endpoint.acquire()
+            try:
+                was_probe = auth_breaker.acquire()
+            except BaseException:
+                endpoint.record_probe_exception(was_probe=endpoint_probe)
+                raise
             try:
                 response = await next_call(invocation)
-            except Exception:
+            except BaseException:
                 auth_breaker.record_probe_exception(was_probe=was_probe)
+                endpoint.record_probe_exception(was_probe=endpoint_probe)
                 raise
             status = getattr(response, "status", None)
             if isinstance(status, int):
-                auth_breaker.record_status(status, was_probe=was_probe)
+                # 401 is credential-wide. 403 is permission/resource-specific;
+                # an invalid credential returning 403 will close each used gate,
+                # without repeatedly sending requests for the queued users.
+                auth_breaker.record_status(404 if status == 403 else status, was_probe=was_probe)
+                endpoint.record_status(500 if status == 401 else status, was_probe=endpoint_probe)
             return response
 
         return middleware

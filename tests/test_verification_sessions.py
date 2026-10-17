@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from moon_poro.models import (
     Base,
@@ -20,6 +24,7 @@ from moon_poro.verification_sessions import (
     SessionBrowserMismatch,
     SessionExpired,
     VerificationSessionRepository,
+    as_utc,
     hash_secret,
 )
 
@@ -270,7 +275,12 @@ async def test_expired_session_cannot_start(
         )
 
     expired, purged = await session_repository.expire_and_purge(retention_days=7)
-    assert (expired, purged) == (1, 0)
+    assert (expired, purged) == (0, 0)
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None
+    assert stored.status == VerificationSessionStatus.EXPIRED.value
+    assert stored.error_code == "SESSION_EXPIRED"
+    assert stored.completed_at is not None
 
 
 async def test_same_riot_account_cannot_link_to_two_discord_users(
@@ -563,3 +573,314 @@ async def test_fail_discord_preserves_link_with_pending_delete_tombstone(
         link = await session.get(VerificationLink, (123, 456))
         assert link is not None
         assert link.deletion_requested_at is not None
+
+
+async def reserve_completion(
+    repository: VerificationSessionRepository,
+) -> tuple[CreatedVerificationSession, VerificationSession]:
+    created, record = await authorize_session(
+        repository, guild_id=123, user_id=456, state="completion-state"
+    )
+    await repository.reserve_link(
+        session_id=record.id, platform="EUN1", puuid="puuid", game_name="Moon", tag_line="EUNE"
+    )
+    claimed = await repository.claim_pending()
+    return created, claimed[0]
+
+
+async def test_discord_snapshots_are_optional_bounded_and_durable(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    legacy = await session_repository.create(guild_id=123, user_id=1, ttl_seconds=600)
+    named = await session_repository.create(
+        guild_id=123,
+        user_id=2,
+        ttl_seconds=600,
+        discord_username="u" * 110,
+        discord_guild_name="g" * 110,
+    )
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    old = await restarted.get_by_start_token(legacy.token)
+    current = await restarted.get_by_start_token(named.token)
+    assert old is not None and old.discord_username is None and old.discord_guild_name is None
+    assert current is not None
+    assert current.discord_username == "u" * 100
+    assert current.discord_guild_name == "g" * 100
+
+
+async def test_callback_expiry_is_persisted_only_for_bound_browser(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    record = await session_repository.begin_oauth(
+        token=created.token, state="expired-callback", browser_token="correct"
+    )
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, record.id)
+        assert stored is not None
+        stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(SessionBrowserMismatch):
+        await session_repository.claim_callback("expired-callback", browser_token="foreign")
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "AWAITING_RIOT"
+    assert stored.completed_at is None and stored.error_code is None
+    with pytest.raises(SessionExpired):
+        await session_repository.claim_callback("expired-callback", browser_token="correct")
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "EXPIRED"
+    assert stored.completed_at is not None and stored.error_code == "SESSION_EXPIRED"
+
+
+@pytest.mark.parametrize("entrypoint", ["start", "callback"])
+async def test_used_session_is_never_rewritten_as_expired(
+    session_repository: VerificationSessionRepository,
+    entrypoint: str,
+) -> None:
+    created, record = await authorize_session(
+        session_repository, guild_id=123, user_id=456, state="used-state"
+    )
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, record.id)
+        assert stored is not None
+        stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(SessionAlreadyUsed):
+        if entrypoint == "start":
+            await session_repository.begin_oauth(
+                token=created.token, state="another-state", browser_token="test-browser"
+            )
+        else:
+            await session_repository.claim_callback("used-state", browser_token="test-browser")
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "PROCESSING_RIOT"
+    assert stored.completed_at is None and stored.error_code is None
+
+
+async def test_retry_cap_pauses_once_retains_link_and_requires_explicit_resume(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created, claimed = await reserve_completion(session_repository)
+    assert not await session_repository.retry_discord(
+        claimed.id, error_code="RETRY", delay_seconds=3600, max_attempts=2
+    )
+    assert await session_repository.claim_pending() == []
+    # A duplicate retry without a cap preserves the already scheduled backoff.
+    await session_repository.retry_discord(claimed.id, error_code="RETRY", delay_seconds=0)
+    assert await session_repository.claim_pending() == []
+    async with session_repository._sessions.begin() as session:
+        due = await session.get(VerificationSession, claimed.id)
+        assert due is not None
+        due.next_attempt_at = datetime.now(UTC)
+    assert [r.id for r in await session_repository.claim_pending()] == [claimed.id]
+    assert await session_repository.retry_discord(
+        claimed.id, error_code="RETRY_CAP", delay_seconds=0, max_attempts=2
+    )
+    assert not await session_repository.retry_discord(
+        claimed.id, error_code="SECOND_CALL", delay_seconds=0, max_attempts=2
+    )
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, claimed.id)
+        assert stored is not None
+        stored.completed_at = datetime.now(UTC) - timedelta(days=10)
+        stored.expires_at = datetime.now(UTC) - timedelta(days=10)
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    assert await restarted.expire_and_purge(retention_days=7) == (0, 0)
+    assert await restarted.claim_pending(method=None) == []
+    assert await restarted.claim_audit_reconciliations() == []
+    stored = await restarted.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "DISCORD_RETRY_PAUSED"
+    assert stored.error_code == "RETRY_CAP" and stored.next_attempt_at is None
+    assert stored.completion_attempts == 2
+    async with restarted._sessions() as session:
+        assert await session.get(VerificationLink, (123, 456)) is not None
+    with pytest.raises(SessionAlreadyUsed):
+        await restarted.create(guild_id=123, user_id=456, ttl_seconds=600)
+    assert not await restarted.resume_paused_for_user(123, 999)
+    assert await restarted.resume_paused_for_user(123, 456)
+    assert not await restarted.resume_paused_for_user(123, 456)
+    stored = await restarted.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "VERIFIED_PENDING_DISCORD"
+    assert stored.completion_attempts == 0 and stored.error_code is None
+    assert [r.id for r in await restarted.claim_pending()] == [claimed.id]
+
+
+@pytest.mark.parametrize("changed", ["puuid", "platform", "generation", "deleting", "absent"])
+async def test_resume_paused_cancels_stale_session_preserves_replacement_link(
+    session_repository: VerificationSessionRepository,
+    changed: str,
+) -> None:
+    created, claimed = await reserve_completion(session_repository)
+    assert await session_repository.retry_discord(
+        claimed.id, error_code="RETRY", delay_seconds=0, max_attempts=1
+    )
+    async with session_repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None
+        if changed == "puuid":
+            link.puuid = "replacement"
+        elif changed == "platform":
+            link.platform = "EUW1"
+        elif changed == "generation":
+            link.created_at += timedelta(seconds=1)
+        elif changed == "deleting":
+            link.deletion_requested_at = datetime.now(UTC)
+        else:
+            await session.delete(link)
+    assert not await session_repository.resume_paused_for_user(123, 456)
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "CANCELLED"
+    assert stored.error_code == "VERIFICATION_LINK_CHANGED"
+    async with session_repository._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert (link is None) == (changed == "absent")
+        if changed == "puuid":
+            assert link is not None and link.puuid == "replacement"
+
+
+async def test_paused_cancellation_preserves_audit_reconciliation(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created, claimed = await reserve_completion(session_repository)
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, claimed.id)
+        assert stored is not None
+        stored.audit_pending_channel_id = 654
+    assert await session_repository.retry_discord(
+        claimed.id, error_code="RETRY", delay_seconds=0, max_attempts=1
+    )
+    await session_repository.cancel_for_user(123, 456, created_at_or_before=claimed.created_at)
+    assert not await session_repository.resume_paused_for_user(123, 456)
+    assert not await session_repository.retry_discord(
+        claimed.id, error_code="AUDIT_RETRY", delay_seconds=0, max_attempts=1
+    )
+    assert [r.id for r in await session_repository.claim_audit_reconciliations()] == [claimed.id]
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "CANCELLED"
+
+
+@pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+@pytest.mark.parametrize("cancel_after", [False, True])
+async def test_audit_interruption_retains_intent_and_reconciles_accepted_message(
+    session_repository: VerificationSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: str,
+    cancel_after: bool,
+) -> None:
+    created, claimed = await reserve_completion(session_repository)
+    monkeypatch.setattr(
+        "moon_poro.verification_sessions.AUDIT_RECONCILIATION_TIMEOUT_SECONDS", 0.02
+    )
+    accepted: list[int] = []
+    sent = asyncio.Event()
+
+    async def blocked(record: VerificationSession, active: bool) -> list[int]:
+        assert active and record.audit_pending_channel_id == 654
+        accepted.append(987)
+        sent.set()
+        await asyncio.Event().wait()
+        return accepted
+
+    task = asyncio.create_task(
+        session_repository.publish_audit(claimed.id, channel_id=654, operation=blocked)
+    )
+    await sent.wait()
+    if interrupt == "cancel":
+        task.cancel()
+    with pytest.raises(TimeoutError if interrupt == "timeout" else asyncio.CancelledError):
+        await task
+    monkeypatch.setattr("moon_poro.verification_sessions.AUDIT_RECONCILIATION_TIMEOUT_SECONDS", 10)
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.audit_pending_channel_id == 654
+    assert stored.status == "APPLYING_DISCORD"
+    if cancel_after:
+        await session_repository.cancel_for_user(123, 456, created_at_or_before=claimed.created_at)
+        async with session_repository._sessions.begin() as session:
+            link = await session.get(VerificationLink, (123, 456), with_for_update=True)
+            assert link is not None
+            await session.delete(link)
+
+    async def reconcile(record: VerificationSession, active: bool) -> list[int]:
+        assert active is not cancel_after
+        assert record.audit_pending_channel_id == 654
+        return accepted
+
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    assert (
+        await restarted.publish_audit(claimed.id, channel_id=654, operation=reconcile)
+        is not cancel_after
+    )
+    assert accepted == [987]
+    stored = await restarted.get_by_start_token(created.token)
+    assert stored is not None and stored.audit_pending_channel_id is None
+    if cancel_after:
+        cleanup = await restarted.claim_audit_cleanups(limit=5, claim_timeout_seconds=300)
+        assert [(item.channel_id, item.message_id) for item in cleanup] == [(654, 987)]
+    else:
+        async with restarted._sessions() as session:
+            link = await session.get(VerificationLink, (123, 456))
+            assert link is not None and link.message_id == 987
+
+
+@pytest.mark.parametrize("generation_delta", [0, 1])
+@pytest.mark.parametrize("deleting", [False, True])
+async def test_fail_discord_real_roundtrip_generation_and_deletion_guards(
+    session_repository: VerificationSessionRepository,
+    generation_delta: int,
+    deleting: bool,
+) -> None:
+    _, claimed = await reserve_completion(session_repository)
+    async with session_repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None
+        link.created_at += timedelta(seconds=generation_delta)
+        if deleting:
+            link.deletion_requested_at = datetime.now(UTC)
+    await session_repository.fail_discord(claimed.id, "FAILED")
+    async with session_repository._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert (link is not None) == (bool(generation_delta) or deleting)
+
+
+@pytest.mark.parametrize("generation_delta", [0, 1])
+@pytest.mark.parametrize("offset_minutes", [-300, 120])
+async def test_fail_discord_accepts_driver_offset_but_preserves_new_generation(
+    session_repository: VerificationSessionRepository,
+    generation_delta: int,
+    offset_minutes: int,
+) -> None:
+    _, claimed = await reserve_completion(session_repository)
+    async with session_repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None
+        link.created_at += timedelta(seconds=generation_delta)
+
+    def driver_offset(_session: Session, instance: object) -> None:
+        # Emulate an aware driver returning a non-UTC offset while the session
+        # generation still has SQLite's naive-UTC round-trip representation.
+        if isinstance(instance, VerificationLink):
+            set_committed_value(
+                instance,
+                "created_at",
+                as_utc(instance.created_at).astimezone(timezone(timedelta(minutes=offset_minutes))),
+            )
+
+    event.listen(Session, "loaded_as_persistent", driver_offset)
+    try:
+        await session_repository.fail_discord(claimed.id, "FAILED")
+    finally:
+        event.remove(Session, "loaded_as_persistent", driver_offset)
+    async with session_repository._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert (link is not None) == bool(generation_delta)
+
+
+async def test_pending_at_retry_cap_pauses_without_a_new_worker_claim(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    _, claimed = await reserve_completion(session_repository)
+    assert not await session_repository.retry_discord(
+        claimed.id, error_code="RETRY", delay_seconds=3600
+    )
+    assert await session_repository.retry_discord(
+        claimed.id, error_code="PAUSED", delay_seconds=0, max_attempts=1
+    )
+    assert await session_repository.claim_pending() == []

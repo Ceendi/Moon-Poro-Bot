@@ -189,12 +189,113 @@ def test_processing_riot_does_not_claim_identity_has_been_confirmed() -> None:
     assert response.headers["Refresh"] == "2"
 
 
+@pytest.mark.parametrize("status", ["VERIFIED_PENDING_DISCORD", "APPLYING_DISCORD"])
+def test_pending_discord_does_not_claim_roles_are_still_being_applied(status: str) -> None:
+    response = _result_for_record(SimpleNamespace(status=status, error_code=None))
+
+    assert "Kończymy weryfikację na Discordzie" in response.text
+    assert "Bot nadaje teraz role" not in response.text
+    assert response.headers["Refresh"] == "2"
+
+
+def test_paused_discord_result_requests_explicit_resume_without_refresh() -> None:
+    response = _result_for_record(
+        SimpleNamespace(
+            status=VerificationSessionStatus.DISCORD_RETRY_PAUSED.value, error_code=None
+        )
+    )
+
+    assert "Weryfikacja wymaga pomocy" in response.text
+    assert "Kliknij ponownie „Zweryfikuj konto” na Discordzie" in response.text
+    assert "skontaktuj się z moderacją" in response.text
+    assert "Refresh" not in response.headers
+    assert "Konto połączone" not in response.text
+
+
 def test_rate_limiter_rejects_request_after_limit() -> None:
     limiter = RequestRateLimiter(limit=2, window_seconds=60)
 
     assert limiter.allowed("127.0.0.1")
     assert limiter.allowed("127.0.0.1")
     assert not limiter.allowed("127.0.0.1")
+
+
+def test_rate_limiter_shares_ipv6_64_but_keeps_other_networks_independent() -> None:
+    limiter = RequestRateLimiter(limit=2)
+
+    assert limiter.allowed("2001:db8:1234:5678::1")
+    assert limiter.allowed("2001:0db8:1234:5678:ffff:ffff:ffff:ffff")
+    assert not limiter.allowed("2001:db8:1234:5678::2")
+    assert limiter.allowed("2001:db8:1234:5679::1")
+    assert len(limiter._clients) == 2
+
+
+def test_rate_limiter_maps_ipv4_and_rejects_invalid_addresses_without_allocating() -> None:
+    limiter = RequestRateLimiter(limit=1)
+
+    assert limiter.allowed("192.0.2.5")
+    assert not limiter.allowed("::ffff:c000:205")
+    assert not limiter.allowed("::ffff:192.0.2.5")
+    assert limiter.allowed("192.0.2.6")
+    for client in ("unknown", "invalid-address", "x" * 1000):
+        assert not limiter.allowed(client)
+    assert len(limiter._clients) == 2
+
+
+def test_rate_limiter_caps_clients_preserves_counters_and_prunes_at_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("moon_poro.rso_web.time.monotonic", lambda: clock[0])
+    limiter = RequestRateLimiter(limit=1, window_seconds=60)
+    for index in range(4096):
+        assert limiter.allowed(f"10.0.{index // 256}.{index % 256}")
+
+    assert not limiter.allowed("10.0.0.0")
+    for index in range(1000):
+        assert not limiter.allowed(f"10.1.{index // 256}.{index % 256}")
+    assert len(limiter._clients) == 4096
+    assert not limiter.allowed("10.0.0.0")
+
+    clock[0] = 159.999
+    assert not limiter.allowed("10.1.0.0")
+    assert not limiter.allowed("10.0.0.0")
+    # An existing bucket resets at the exact boundary even when the periodic
+    # sweep is not due yet. New buckets can enter after the next sweep.
+    clock[0] = 160.0
+    assert limiter.allowed("10.0.0.0")
+    clock[0] = 161.0
+    assert limiter.allowed("10.1.0.0")
+    assert len(limiter._clients) == 2
+    assert not limiter.allowed("10.0.0.0")
+
+
+def test_rate_limiter_never_scans_all_clients_for_each_capacity_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("moon_poro.rso_web.time.monotonic", lambda: clock[0])
+    limiter = RequestRateLimiter()
+    for index in range(4096):
+        assert limiter.allowed(f"10.0.{index // 256}.{index % 256}")
+
+    class CountedClients(dict):
+        scans = 0
+
+        def items(self):
+            self.scans += 1
+            return super().items()
+
+    clients = CountedClients(limiter._clients)
+    limiter._clients = clients
+    for index in range(1000):
+        assert not limiter.allowed(f"10.1.{index // 256}.{index % 256}")
+    clock[0] = 100.999
+    assert not limiter.allowed("10.1.0.0")
+    assert clients.scans == 0
+    clock[0] = 101.0
+    assert not limiter.allowed("10.1.0.0")
+    assert clients.scans == 1
 
 
 async def test_health_readiness_and_security_headers(rso_test_client: TestClient) -> None:
@@ -232,6 +333,48 @@ async def test_request_limit_returns_a_clear_polish_message(
 
     assert responses[-1].status == 429
     assert await responses[-1].text() == "Za dużo żądań. Spróbuj ponownie za minutę."
+    ready = await rso_test_client.get("/readyz", headers=headers)
+    assert ready.status == 429
+
+
+@pytest.mark.parametrize(
+    ("username", "guild_name"),
+    [(None, None), ('<img src=x onerror="alert(1)">&', "<script>guild</script>&")],
+    ids=["legacy-id-fallback", "escaped-names"],
+)
+async def test_landing_identifies_discord_target_before_riot_button(
+    rso_test_client: TestClient, username: str | None, guild_name: str | None
+) -> None:
+    repository = rso_test_client.server.app[REPOSITORY_KEY]
+    created = await repository.create(
+        guild_id=123,
+        user_id=456,
+        ttl_seconds=600,
+        discord_username=username,
+        discord_guild_name=guild_name,
+    )
+    response = await rso_test_client.get(
+        f"/verify/start/{created.token}", headers={"Host": "localhost:8080"}
+    )
+    document = await response.text()
+
+    assert response.status == 200
+    assert "Łączysz konto Riot z kontem Discord:" in document
+    assert "Serwer:" in document
+    assert "ID: 456" in document and "ID: 123" in document
+    warning = "Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę."
+    assert warning in document
+    assert "Rozpocznij weryfikację samodzielnie w panelu bota." in document
+    assert document.index("Łączysz konto Riot") < document.index("<button")
+    assert document.index(warning) < document.index("<button")
+    if username is not None:
+        assert username not in document and guild_name not in document
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;" in document
+        assert "&lt;script&gt;guild&lt;/script&gt;&amp;" in document
+    else:
+        assert "None" not in document
+    assert 'src="/moon-poro.png"' in document
+    assert "/fonts/nunito-latin.woff2" in document
 
 
 async def test_complete_browser_flow_from_landing_to_result(

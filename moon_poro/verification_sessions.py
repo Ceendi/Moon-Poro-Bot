@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 from collections.abc import Awaitable, Callable
@@ -27,6 +28,7 @@ ACTIVE_SESSION_STATUSES = (
     VerificationSessionStatus.PROCESSING_RIOT.value,
     VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value,
     VerificationSessionStatus.APPLYING_DISCORD.value,
+    VerificationSessionStatus.DISCORD_RETRY_PAUSED.value,
 )
 EXPIRABLE_SESSION_STATUSES = (
     VerificationSessionStatus.CREATED.value,
@@ -39,6 +41,7 @@ TERMINAL_SESSION_STATUSES = (
     VerificationSessionStatus.EXPIRED.value,
     VerificationSessionStatus.CANCELLED.value,
 )
+AUDIT_RECONCILIATION_TIMEOUT_SECONDS = 10
 
 
 class SessionError(RuntimeError):
@@ -99,7 +102,14 @@ class VerificationSessionRepository:
             await session.execute(select(func.pg_advisory_xact_lock(key)))
 
     async def create(
-        self, *, guild_id: int, user_id: int, ttl_seconds: int, method: str = "RSO"
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        ttl_seconds: int,
+        method: str = "RSO",
+        discord_username: str | None = None,
+        discord_guild_name: str | None = None,
     ) -> CreatedVerificationSession:
         if method not in ("RSO", "PROFILE_ICON"):
             raise ValueError("Unsupported verification method")
@@ -108,6 +118,8 @@ class VerificationSessionRepository:
         record = VerificationSession(
             guild_id=guild_id,
             discord_user_id=user_id,
+            discord_username=discord_username[:100] if discord_username is not None else None,
+            discord_guild_name=discord_guild_name[:100] if discord_guild_name is not None else None,
             verification_method=method,
             start_token_hash=hash_secret(token),
             status=VerificationSessionStatus.CREATED.value,
@@ -127,6 +139,7 @@ class VerificationSessionRepository:
                         (
                             VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value,
                             VerificationSessionStatus.APPLYING_DISCORD.value,
+                            VerificationSessionStatus.DISCORD_RETRY_PAUSED.value,
                         )
                     ),
                 )
@@ -166,7 +179,7 @@ class VerificationSessionRepository:
     async def begin_oauth(
         self, *, token: str, state: str, browser_token: str
     ) -> VerificationSession:
-        now = datetime.now(UTC)
+        expired = False
         async with self._sessions.begin() as session:
             record = await session.scalar(
                 select(VerificationSession)
@@ -175,25 +188,31 @@ class VerificationSessionRepository:
             )
             if record is None:
                 raise SessionNotFound
-            if as_utc(record.expires_at) <= now:
-                record.status = VerificationSessionStatus.EXPIRED.value
-                record.error_code = "SESSION_EXPIRED"
-                record.updated_at = now
-                record.completed_at = now
+            if record.status == VerificationSessionStatus.EXPIRED.value:
                 raise SessionExpired
             if (
                 record.verification_method != "RSO"
                 or record.status != VerificationSessionStatus.CREATED.value
             ):
                 raise SessionAlreadyUsed
-            record.oauth_state_hash = hash_secret(state)
-            record.browser_binding_hash = hash_secret(browser_token)
-            record.status = VerificationSessionStatus.AWAITING_RIOT.value
-            record.updated_at = now
-            return record
+            now = datetime.now(UTC)
+            if as_utc(record.expires_at) <= now:
+                record.status = VerificationSessionStatus.EXPIRED.value
+                record.error_code = "SESSION_EXPIRED"
+                record.updated_at = now
+                record.completed_at = now
+                expired = True
+            else:
+                record.oauth_state_hash = hash_secret(state)
+                record.browser_binding_hash = hash_secret(browser_token)
+                record.status = VerificationSessionStatus.AWAITING_RIOT.value
+                record.updated_at = now
+        if expired:
+            raise SessionExpired
+        return record
 
     async def claim_callback(self, state: str, *, browser_token: str) -> VerificationSession:
-        now = datetime.now(UTC)
+        expired = False
         async with self._sessions.begin() as session:
             record = await session.scalar(
                 select(VerificationSession)
@@ -211,20 +230,26 @@ class VerificationSessionRepository:
             ):
                 # A foreign browser must not consume even a valid OAuth state.
                 raise SessionBrowserMismatch
-            if as_utc(record.expires_at) <= now:
-                record.status = VerificationSessionStatus.EXPIRED.value
-                record.error_code = "SESSION_EXPIRED"
-                record.updated_at = now
-                record.completed_at = now
+            if record.status == VerificationSessionStatus.EXPIRED.value:
                 raise SessionExpired
             if (
                 record.verification_method != "RSO"
                 or record.status != VerificationSessionStatus.AWAITING_RIOT.value
             ):
                 raise SessionAlreadyUsed
-            record.status = VerificationSessionStatus.PROCESSING_RIOT.value
-            record.updated_at = now
-            return record
+            now = datetime.now(UTC)
+            if as_utc(record.expires_at) <= now:
+                record.status = VerificationSessionStatus.EXPIRED.value
+                record.error_code = "SESSION_EXPIRED"
+                record.updated_at = now
+                record.completed_at = now
+                expired = True
+            else:
+                record.status = VerificationSessionStatus.PROCESSING_RIOT.value
+                record.updated_at = now
+        if expired:
+            raise SessionExpired
+        return record
 
     async def reserve_link(
         self,
@@ -379,12 +404,33 @@ class VerificationSessionRepository:
                 record.updated_at = now
             return records
 
-    async def retry_discord(self, session_id: int, *, error_code: str, delay_seconds: int) -> None:
+    async def retry_discord(
+        self,
+        session_id: int,
+        *,
+        error_code: str,
+        delay_seconds: int,
+        max_attempts: int | None = None,
+    ) -> bool:
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
             record = await session.get(VerificationSession, session_id, with_for_update=True)
             if record is None:
-                return
+                return False
+            if (
+                record.status
+                in (
+                    VerificationSessionStatus.APPLYING_DISCORD.value,
+                    VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value,
+                )
+                and max_attempts is not None
+                and record.completion_attempts >= max_attempts
+            ):
+                record.status = VerificationSessionStatus.DISCORD_RETRY_PAUSED.value
+                record.error_code = error_code[:64]
+                record.next_attempt_at = None
+                record.updated_at = now
+                return True
             if record.status == VerificationSessionStatus.APPLYING_DISCORD.value:
                 record.status = VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value
                 record.error_code = error_code[:64]
@@ -392,9 +438,49 @@ class VerificationSessionRepository:
                 record.status not in TERMINAL_SESSION_STATUSES
                 or record.audit_pending_channel_id is None
             ):
-                return
+                return False
             record.next_attempt_at = now + timedelta(seconds=delay_seconds)
             record.updated_at = now
+            return False
+
+    async def resume_paused_for_user(self, guild_id: int, user_id: int) -> bool:
+        """Resume only the paused completion that owns the current reserved link."""
+
+        async with self._sessions.begin() as session:
+            records = list(
+                await session.scalars(
+                    select(VerificationSession)
+                    .where(
+                        VerificationSession.guild_id == guild_id,
+                        VerificationSession.discord_user_id == user_id,
+                        VerificationSession.status
+                        == VerificationSessionStatus.DISCORD_RETRY_PAUSED.value,
+                    )
+                    .order_by(VerificationSession.id)
+                    .with_for_update()
+                )
+            )
+            if not records:
+                return False
+            link = await session.get(VerificationLink, (guild_id, user_id), with_for_update=True)
+            now = datetime.now(UTC)
+            resumed = False
+            for record in records:
+                if not resumed and self._link_identity_matches(record, link):
+                    record.status = VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value
+                    record.completion_attempts = 0
+                    record.next_attempt_at = now
+                    record.error_code = None
+                    record.completed_at = None
+                    resumed = True
+                else:
+                    record.status = VerificationSessionStatus.CANCELLED.value
+                    record.error_code = "VERIFICATION_LINK_CHANGED"
+                    record.completed_at = now
+                    # Preserve any publication intent for terminal reconciliation.
+                    record.next_attempt_at = now if record.audit_pending_channel_id else None
+                record.updated_at = now
+            return resumed
 
     async def claim_audit_reconciliations(
         self, *, limit: int = 5, method: str | None = None
@@ -424,7 +510,13 @@ class VerificationSessionRepository:
     def _link_matches(record: VerificationSession, link: VerificationLink | None) -> bool:
         return bool(
             record.status == VerificationSessionStatus.APPLYING_DISCORD.value
-            and link is not None
+            and VerificationSessionRepository._link_identity_matches(record, link)
+        )
+
+    @staticmethod
+    def _link_identity_matches(record: VerificationSession, link: VerificationLink | None) -> bool:
+        return bool(
+            link is not None
             and link.deletion_requested_at is None
             and record.puuid is not None
             and link.puuid == record.puuid
@@ -451,7 +543,10 @@ class VerificationSessionRepository:
                     return record.status == VerificationSessionStatus.COMPLETED.value
                 record.audit_pending_channel_id = channel_id
 
-        async with self._sessions.begin() as session:
+        async with (
+            asyncio.timeout(AUDIT_RECONCILIATION_TIMEOUT_SECONDS),
+            self._sessions.begin() as session,
+        ):
             record = await session.get(VerificationSession, session_id, with_for_update=True)
             if record is None:
                 return False
@@ -633,7 +728,7 @@ class VerificationSessionRepository:
                 and link.puuid == record.puuid
                 and link.platform == record.platform
                 and record.verification_link_created_at is not None
-                and link.created_at == record.verification_link_created_at
+                and as_utc(link.created_at) == as_utc(record.verification_link_created_at)
                 and link.message_id is None
             ):
                 await session.delete(link)
@@ -665,6 +760,7 @@ class VerificationSessionRepository:
                     error_code="USER_REMOVED_LINK",
                     updated_at=now,
                     completed_at=now,
+                    next_attempt_at=now,
                 )
             )
 

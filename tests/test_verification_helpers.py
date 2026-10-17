@@ -284,8 +284,8 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
     member = Mock(spec=verification.discord.Member)
     member.id = 101
     member.roles = []
-    guild = SimpleNamespace(id=123)
-    response = SimpleNamespace(send_message=AsyncMock())
+    guild = SimpleNamespace(id=123, name="Moon Poro")
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
     bot = SimpleNamespace(
         settings=SimpleNamespace(
             guild_id=123,
@@ -311,6 +311,7 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
         guild=guild,
         guild_id=123,
         response=response,
+        edit_original_response=AsyncMock(),
     )
     button = view.children[0]
 
@@ -320,26 +321,29 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
         guild_id=123,
         user_id=101,
         ttl_seconds=600,
+        discord_username=str(member),
+        discord_guild_name="Moon Poro",
     )
-    response.send_message.assert_awaited_once()
-    sent_view = response.send_message.await_args.kwargs["view"]
+    response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    response.send_message.assert_not_awaited()
+    sent_view = interaction.edit_original_response.await_args.kwargs["view"]
     assert sent_view.children[0].url == "https://bot.example.com/verify/start/" + "a" * 43
     assert sent_view.children[0].label == "Zaloguj się przez Riot"
-    sent_embed = response.send_message.await_args.kwargs["embed"]
+    sent_embed = interaction.edit_original_response.await_args.kwargs["embed"]
     assert sent_embed.title == "Połącz konto Riot"
     assert sent_embed.description == (
         "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
         "Moon Poro nie zobaczy Twojego hasła. Jednorazowy link wygaśnie za 10 min."
     )
     assert "token" not in sent_embed.description.lower()
-    assert response.send_message.await_args.kwargs["ephemeral"] is True
+    assert interaction.edit_original_response.await_args.kwargs["content"] is None
 
 
 async def test_verification_start_is_rate_limited() -> None:
     member = Mock(spec=verification.discord.Member)
     member.id = 101
     member.roles = []
-    response = SimpleNamespace(send_message=AsyncMock())
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
     bot = SimpleNamespace(
         settings=SimpleNamespace(
             guild_id=123,
@@ -362,15 +366,16 @@ async def test_verification_start_is_rate_limited() -> None:
     view = VerificationStartView(bot)
     interaction = SimpleNamespace(
         user=member,
-        guild=SimpleNamespace(id=123),
+        guild=SimpleNamespace(id=123, name="Moon Poro"),
         guild_id=123,
         response=response,
+        edit_original_response=AsyncMock(),
     )
 
     await view.children[0].callback(interaction)
     await view.children[0].callback(interaction)
 
-    assert "Spróbuj ponownie" in response.send_message.await_args_list[1].args[0]
+    assert "Spróbuj ponownie" in response.send_message.await_args.args[0]
 
 
 def _rank_refresh_settings() -> SimpleNamespace:
@@ -382,6 +387,19 @@ def _rank_refresh_settings() -> SimpleNamespace:
         rank_refresh_policy="adaptive",
         rank_refresh_rollout_percent=100,
     )
+
+
+async def test_completion_retry_logs_only_the_fresh_pause(caplog: pytest.LogCaptureFixture) -> None:
+    sessions = SimpleNamespace(retry_discord=AsyncMock(side_effect=[True, False]))
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = SimpleNamespace(verification_sessions=sessions)
+    record = SimpleNamespace(id=99, completion_attempts=8)
+    await cog._retry_rso_completion(record, "DISCORD_AUDIT_UNAVAILABLE")
+    await cog._retry_rso_completion(record, "DISCORD_AUDIT_UNAVAILABLE")
+    assert sessions.retry_discord.await_args.kwargs["max_attempts"] == 8
+    alerts = [item for item in caplog.records if item.levelname == "ERROR"]
+    assert len(alerts) == 1
+    assert "paused" in alerts[0].message
 
 
 _RANK_REFRESH_CLAIMED_AT = datetime(2026, 8, 14, 12, tzinfo=UTC)
@@ -1382,13 +1400,14 @@ async def test_rso_completion_retries_if_rank_worker_owns_the_snapshot(
         2,
         error_code="RANK_SNAPSHOT_CONFLICT",
         delay_seconds=5,
+        max_attempts=8,
     )
     sessions.fail_discord.assert_not_awaited()
     sessions.complete_discord.assert_not_awaited()
     cog.apply_verified_roles.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failure_stage", ["roles", "audit"])
+@pytest.mark.parametrize("failure_stage", ["roles", "audit", "audit_timeout"])
 async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
@@ -1454,7 +1473,13 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
     )
     cog._publish_rso_audit = AsyncMock(
         return_value=True,
-        side_effect=[FakeHTTPException(), True] if failure_stage == "audit" else None,
+        side_effect=(
+            [FakeHTTPException(), True]
+            if failure_stage == "audit"
+            else [TimeoutError(), True]
+            if failure_stage == "audit_timeout"
+            else None
+        ),
     )
     riot_call = AsyncMock()
     monkeypatch.setattr(verification, "_get_leagues", riot_call)
@@ -1478,7 +1503,7 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
     verifications.record_rank_snapshot.assert_not_awaited()
     assert verifications.retry_rank_role_sync.await_count == (failure_stage == "roles")
     sessions.retry_discord.assert_awaited_once()
-    assert cog._publish_rso_audit.await_count == (2 if failure_stage == "audit" else 1)
+    assert cog._publish_rso_audit.await_count == (1 if failure_stage == "roles" else 2)
     member.send.assert_awaited_once()
 
 

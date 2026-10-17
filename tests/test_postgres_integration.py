@@ -18,6 +18,8 @@ from moon_poro.models import (
     Base,
     VerificationLink,
     VerificationMarkerCleanup,
+    VerificationSession,
+    VerificationSessionStatus,
     Warning,
     WarningStatus,
 )
@@ -40,6 +42,7 @@ from moon_poro.time_utils import timestamps_match
 from moon_poro.verification_sessions import (
     LinkReservationResult,
     SessionAlreadyUsed,
+    SessionExpired,
     VerificationSessionRepository,
 )
 
@@ -157,6 +160,149 @@ async def test_rso_start_and_reservation_serialize_on_postgres(
         await database.close()
 
 
+async def test_paused_completion_expiry_and_audit_deadline_against_postgres(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),  # pragma: allowlist secret
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationSessionRepository(database.session_factory)
+    peer = VerificationSessionRepository(database.session_factory)
+    links = VerificationRepository(database.session_factory)
+    try:
+        expired = await repository.create(guild_id=guild_id, user_id=1, ttl_seconds=-1)
+        with pytest.raises(SessionExpired):
+            await repository.begin_oauth(
+                token=expired.token, state="expired", browser_token="browser"
+            )
+        saved_expired = await repository.get_by_start_token(expired.token)
+        assert saved_expired is not None and saved_expired.status == "EXPIRED"
+
+        created = await repository.create(
+            guild_id=guild_id,
+            user_id=2,
+            ttl_seconds=600,
+            discord_username="test-user",
+            discord_guild_name="Test server",
+        )
+        await repository.begin_oauth(token=created.token, state="valid", browser_token="browser")
+        callback = await repository.claim_callback("valid", browser_token="browser")
+        assert (
+            await repository.reserve_link(
+                session_id=callback.id,
+                platform="EUN1",
+                puuid=f"paused-{guild_id}",
+                game_name="Moon",
+                tag_line="Test",
+            )
+            == LinkReservationResult.RESERVED
+        )
+        for attempt in range(2):
+            claimed = await repository.claim_pending()
+            assert [item.id for item in claimed] == [callback.id]
+            assert await repository.retry_discord(
+                callback.id,
+                error_code="DISCORD_AUDIT_UNAVAILABLE",
+                delay_seconds=0,
+                max_attempts=2,
+            ) is (attempt == 1)
+        paused = await repository.get_by_start_token(created.token)
+        assert paused is not None and paused.status == "DISCORD_RETRY_PAUSED"
+        assert paused.discord_username == "test-user" and paused.discord_guild_name == "Test server"
+        assert await repository.claim_pending() == []
+        assert await links.get_by_user(guild_id, 2) is not None
+        resumed = await asyncio.wait_for(
+            asyncio.gather(
+                repository.resume_paused_for_user(guild_id, 2),
+                peer.resume_paused_for_user(guild_id, 2),
+            ),
+            timeout=3,
+        )
+        assert sorted(resumed) == [False, True]
+
+        assert len(await repository.claim_pending()) == 1
+        monkeypatch.setattr(
+            "moon_poro.verification_sessions.AUDIT_RECONCILIATION_TIMEOUT_SECONDS", 0.05
+        )
+        operation = AsyncMock(return_value=[987])
+        async with database.session_factory.begin() as blocker:
+            await blocker.get(VerificationLink, (guild_id, 2), with_for_update=True)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(
+                    repository.publish_audit(
+                        callback.id,
+                        channel_id=654,
+                        operation=operation,
+                    ),
+                    timeout=2,
+                )
+        operation.assert_not_awaited()
+        pending_audit = await repository.get_by_start_token(created.token)
+        assert pending_audit is not None and pending_audit.audit_pending_channel_id == 654
+        monkeypatch.setattr(
+            "moon_poro.verification_sessions.AUDIT_RECONCILIATION_TIMEOUT_SECONDS", 10
+        )
+        assert await repository.publish_audit(callback.id, channel_id=654, operation=operation)
+
+        # A persisted pause must not be resurrected when deletion wins before
+        # the waiting resume obtains the session lock.
+        second = await repository.create(guild_id=guild_id, user_id=3, ttl_seconds=600)
+        await repository.begin_oauth(token=second.token, state="second", browser_token="browser")
+        second_record = await repository.claim_callback("second", browser_token="browser")
+        await repository.reserve_link(
+            session_id=second_record.id,
+            platform="EUN1",
+            puuid=f"delete-paused-{guild_id}",
+            game_name="Moon",
+            tag_line="Test",
+        )
+        assert len(await repository.claim_pending()) == 1
+        assert await repository.retry_discord(
+            second_record.id,
+            error_code="DISCORD_ROLES_UNAVAILABLE",
+            delay_seconds=0,
+            max_attempts=1,
+        )
+        link = await links.get_by_user(guild_id, 3)
+        assert link is not None
+        async with database.session_factory.begin() as blocker:
+            await blocker.get(VerificationSession, second_record.id, with_for_update=True)
+            waiting_resume = asyncio.create_task(peer.resume_paused_for_user(guild_id, 3))
+            await asyncio.sleep(0.05)
+            assert not waiting_resume.done()
+            deleted = await links.request_verification_deletion_with_identity(
+                guild_id,
+                3,
+                identity=VerificationLinkIdentity.from_link(link),
+                policy=VerificationDeletionPolicy.USER,
+            )
+            assert deleted.status is VerificationDeletionRequestStatus.REQUESTED
+        assert not await asyncio.wait_for(waiting_resume, timeout=3)
+        saved = await repository.get_by_start_token(second.token)
+        assert saved is not None and saved.status == VerificationSessionStatus.CANCELLED.value
+        retained = await links.get_by_user(guild_id, 3)
+        assert retained is not None and retained.deletion_requested_at is not None
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+            await connection.execute(
+                text("DELETE FROM verification_sessions WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+        await database.close()
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 pytestmark = pytest.mark.skipif(
@@ -252,6 +398,8 @@ async def test_migrations_and_repositories_against_postgres(
         assert "verification_link_created_at" in verification_session_columns
         assert "browser_binding_hash" in verification_session_columns
         assert "verification_method" in verification_session_columns
+        assert "discord_username" in verification_session_columns
+        assert "discord_guild_name" in verification_session_columns
         assert "audit_pending_channel_id" in verification_session_columns
         assert "verification_audit_cleanups" in table_names
         assert "verification_marker_cleanups" in table_names

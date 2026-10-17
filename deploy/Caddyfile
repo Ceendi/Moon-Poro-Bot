@@ -34,7 +34,8 @@ moonporo.pl {
 	}
 
 	handle /readyz {
-		reverse_proxy 127.0.0.1:8080
+		# Readiness checks query the database and are only available locally.
+		respond 404
 	}
 
 	handle {

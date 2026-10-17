@@ -329,15 +329,9 @@ async def test_cancelled_audit_is_recovered_after_rollback_to_legacy(
     )
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = audit_cog(audit_repository, channel).bot
-    for helper in (
-        "_retry_next_verified_marker_cleanup",
-        "_retry_next_rso_audit_cleanup",
-        "_retry_next_verification_deletion",
-        "_retry_next_rank_role_sync",
-        "_refresh_next_verified",
-    ):
-        monkeypatch.setattr(verification, helper, AsyncMock())
-    await LegacyVerificationCog.refresh_verified.coro(cog)
+    audit_worker = LegacyVerificationCog.reconcile_verification_audits.coro
+    monkeypatch.setitem(audit_worker.__globals__, "_retry_next_rso_audit_cleanup", AsyncMock())
+    await audit_worker(cog)
     channel.send.assert_not_awaited()
     cleanups = await audit_repository.claim_audit_cleanups(limit=5, claim_timeout_seconds=300)
     assert [item.message_id for item in cleanups] == [987]

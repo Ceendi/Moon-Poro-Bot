@@ -29,7 +29,7 @@ const email = siteConfig.contactEmail;
     <section>
       <h2>2. Jakie dane przetwarzamy</h2>
       <ul>
-        <li><strong>Discord:</strong> identyfikator Twojego konta i serwera oraz role nadawane przez bota.</li>
+        <li><strong>Discord:</strong> identyfikator Twojego konta i serwera oraz role nadawane przez bota. W przygotowanej weryfikacji RSO sesja zapisuje także nazwę konta Discord i serwera, żeby pokazać, które konto jest łączone.</li>
         <li><strong>Konto Riot:</strong> PUUID (stały identyfikator konta Riot), Riot ID, region i ranga Solo/Duo (dywizja, LP, wygrane, przegrane, nieaktywność), data i sposób weryfikacji oraz terminy i stan odświeżania rangi. Podczas weryfikacji ikoną odczytujemy też ikonę profilu, ale nie zapisujemy jej w aktywnym powiązaniu.</li>
         <li><strong>Sesje weryfikacji:</strong> przygotowana aktualizacja zapisuje stan, czas i ewentualny kod błędu sesji dla obu metod: ikony profilu i Riot Sign On. Pozwala to dokończyć nadawanie ról i obsługę audytu po przerwaniu operacji.</li>
         <li><strong>Logowanie przez Riot po uruchomieniu RSO:</strong> od Riot otrzymamy PUUID, Riot ID i region, bez hasła ani adresu e-mail. Krótkotrwały token dostępu będzie używany tylko w pamięci procesu i odrzucany po odczycie danych. Nie prosimy o dostęp offline ani nie zapisujemy tokenu odświeżania.</li>

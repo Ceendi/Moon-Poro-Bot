@@ -227,28 +227,41 @@ class LegacyVerificationStartView(discord.ui.View):
         existing_link = await self.bot.verifications.get_by_user(
             interaction.guild_id, interaction.user.id
         )
+        # A modal must be the initial response for a new account. An existing
+        # link instead has a deferred response so its paused completion can be
+        # resumed without opening another proof or changing the linked account.
+        if existing_link is not None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
         if (
             existing_link is not None
             and getattr(existing_link, "deletion_requested_at", None) is not None
         ):
-            await interaction.response.send_message(
-                "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content="Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
             )
             return
         if existing_link is not None and not getattr(existing_link, "puuid", None):
-            await interaction.response.send_message(
-                "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content="Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
             )
             return
-        if (
-            member_has_role(
-                interaction.user,
-                self.bot.settings.verified_role_name,
-                self.bot.settings,
+        if existing_link is not None:
+            resumed = await self.bot.verification_sessions.resume_paused_for_user(
+                interaction.guild_id, interaction.user.id
             )
-            or existing_link is not None
+            await interaction.edit_original_response(
+                content=(
+                    "Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+                    if resumed
+                    else "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
+                    "obecne powiązanie w sekcji „Moje konto”."
+                )
+            )
+            return
+        if member_has_role(
+            interaction.user,
+            self.bot.settings.verified_role_name,
+            self.bot.settings,
         ):
             await interaction.response.send_message(
                 "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
@@ -785,6 +798,7 @@ class LegacyVerificationCog(VerificationCog):
             seconds=bot.settings.riot_monitoring_interval_seconds
         )
         self.refresh_verified.start()
+        self.reconcile_verification_audits.start()
         self.complete_legacy_verifications.start()
         self.verification_maintenance.start()
         self.report_riot_monitoring.start()
@@ -793,6 +807,7 @@ class LegacyVerificationCog(VerificationCog):
         self.rate_limiter.clear_challenges()
         self.complete_legacy_verifications.cancel()
         self.refresh_verified.cancel()
+        self.reconcile_verification_audits.cancel()
         self.verification_maintenance.cancel()
         self.report_riot_monitoring.cancel()
 

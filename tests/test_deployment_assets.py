@@ -24,3 +24,15 @@ def test_static_404_fallback_uses_error_handler_without_overriding_rso_headers()
     assert "handle /verify/*" in production
     assert "handle /oauth2/callback" in production
     assert production.count("import moon_poro_static_headers") == 2
+
+
+def test_caddy_blocks_exact_public_readiness_and_keeps_cheap_health_proxy() -> None:
+    production = (ROOT / "deploy/Caddyfile").read_text(encoding="utf-8")
+    readiness = production.split("handle /readyz {", 1)[1].split("}", 1)[0]
+    assert "respond 404" in readiness
+    assert "reverse_proxy" not in readiness
+    assert "handle /readyz*" not in production
+    for route in ("/healthz", "/verify/*", "/oauth2/callback"):
+        handler = production.split(f"handle {route} {{", 1)[1].split("}", 1)[0]
+        assert "reverse_proxy 127.0.0.1:8080" in handler
+        assert "import moon_poro_static_headers" not in handler
