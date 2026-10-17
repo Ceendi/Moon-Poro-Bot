@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
@@ -19,8 +19,8 @@ from moon_poro.cogs.verification_legacy import (
     _profile_icon_id,
     _riot_id_validation_error,
 )
-from moon_poro.rank_refresh import RankSnapshot
 from moon_poro.riot import RiotAPIUnavailable, RiotAuthBreaker
+from moon_poro.verification_sessions import LinkReservationResult
 
 
 class FakeRole:
@@ -141,6 +141,9 @@ async def test_legacy_modal_challenge_excludes_current_icon(
 ) -> None:
     bot = _modal_bot()
     bot.verifications = SimpleNamespace(get_by_puuid=AsyncMock(return_value=None))
+    bot.verification_sessions = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(token="challenge-token"))
+    )
     modal = LegacyVerificationModal(bot, _rate_limiter())
     modal.game_name._value = "Moon Poro"
     modal.tag_line._value = "EUNE"
@@ -251,14 +254,16 @@ async def test_legacy_start_explains_pending_deletion(
     interaction = SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        response=SimpleNamespace(
+            send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()
+        ),
+        edit_original_response=AsyncMock(),
     )
 
     await view.begin_verification(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(
-        "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
-        ephemeral=True,
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę.",
     )
     interaction.response.send_modal.assert_not_awaited()
 
@@ -278,14 +283,16 @@ async def test_legacy_start_explains_incomplete_previous_link(
     interaction = SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        response=SimpleNamespace(
+            send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()
+        ),
+        edit_original_response=AsyncMock(),
     )
 
     await view.begin_verification(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(
-        "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
-        ephemeral=True,
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
     )
     interaction.response.send_modal.assert_not_awaited()
 
@@ -324,6 +331,130 @@ def test_legacy_rate_limiter_applies_per_user_and_scope() -> None:
 
     now[0] += 30
     assert limiter.update_rate_limit("account", 101, user_cooldown_seconds=30) is None
+
+
+def _challenge(
+    bot: SimpleNamespace, limiter: LegacyVerificationRateLimiter
+) -> LegacyIconConfirmationView:
+    return LegacyIconConfirmationView(
+        bot,
+        limiter,
+        owner_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+        expected_icon_id=8,
+        session_token="challenge-token",
+    )
+
+
+async def test_icon_challenge_has_hard_deadline_even_with_repeated_rate_limited_clicks() -> None:
+    now = [100.0]
+    limiter = _rate_limiter(clock=lambda: now[0])
+    view = _challenge(_modal_bot(), limiter)
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=101), response=SimpleNamespace(send_message=AsyncMock())
+    )
+    for instant in (100, 150, 219):
+        now[0] = instant
+        assert await view.interaction_check(interaction)
+        limiter.update_rate_limit("icon", 101, user_cooldown_seconds=200)
+    now[0] = 220
+    await view.children[0].callback(interaction)
+    assert "wygasło" in interaction.response.send_message.await_args.args[0]
+    assert view.deadline == 220
+
+
+async def test_new_icon_challenge_stops_old_and_foreign_user_cannot_confirm() -> None:
+    limiter = _rate_limiter()
+    bot = _modal_bot()
+    previous = _challenge(bot, limiter)
+    latest = _challenge(bot, limiter)
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=101), response=SimpleNamespace(send_message=AsyncMock())
+    )
+    assert previous.is_finished()
+    assert not await previous.interaction_check(interaction)
+    interaction.user.id = 202
+    assert not await latest.interaction_check(interaction)
+    assert "innej osoby" in interaction.response.send_message.await_args.args[0]
+
+
+async def test_challenge_registry_is_bounded_and_unload_invalidates_live_views() -> None:
+    limiter = _rate_limiter()
+    bot = _modal_bot()
+    first = _challenge(bot, limiter)
+    for user_id in range(102, 1102):
+        LegacyIconConfirmationView(
+            bot,
+            limiter,
+            owner_id=user_id,
+            platform="EUN1",
+            puuid="puuid",
+            game_name="Moon",
+            tag_line="EUNE",
+            expected_icon_id=8,
+            session_token=f"challenge-{user_id}",
+        )
+    assert len(limiter._challenges) == 1000
+    assert first.is_finished()
+    latest = next(reversed(limiter._challenges.values()))
+    limiter.clear_challenges()
+    assert not latest._is_current()
+    assert not limiter._challenges
+
+
+@pytest.mark.parametrize("invalidate", ["deadline", "superseded", "foreign_session"])
+async def test_inflight_icon_check_cannot_finish_after_challenge_invalidation(
+    monkeypatch: pytest.MonkeyPatch, invalidate: str
+) -> None:
+    class FakeMember:
+        id = 101
+
+    now = [100.0]
+    limiter = _rate_limiter(clock=lambda: now[0])
+    bot = _modal_bot()
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=None), get_by_puuid=AsyncMock(return_value=None)
+    )
+    bot.verification_sessions = SimpleNamespace(
+        get_by_start_token=AsyncMock(
+            return_value=SimpleNamespace(
+                id=1,
+                guild_id=123,
+                discord_user_id=202,
+                verification_method="PROFILE_ICON",
+                status="CREATED",
+                expires_at=datetime.now(UTC) + timedelta(seconds=120),
+            )
+        ),
+        reserve_link=AsyncMock(),
+    )
+    view = _challenge(bot, limiter)
+
+    async def leagues(*_args: object) -> list[object]:
+        if invalidate == "deadline":
+            now[0] = 221
+        elif invalidate == "superseded":
+            _challenge(bot, limiter)
+        return []
+
+    monkeypatch.setattr(verification_legacy.discord, "Member", FakeMember)
+    monkeypatch.setattr(
+        verification_legacy, "_get_summoner", AsyncMock(return_value={"profileIconId": 8})
+    )
+    monkeypatch.setattr(verification_legacy, "_get_leagues", leagues)
+    interaction = SimpleNamespace(
+        guild=object(),
+        guild_id=123,
+        user=FakeMember(),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await view.children[0].callback(interaction)
+    bot.verification_sessions.reserve_link.assert_not_awaited()
+    assert "wygasło" in interaction.followup.send.await_args.args[0]
 
 
 def test_legacy_rate_limiter_applies_global_window_without_consuming_denied_attempt() -> None:
@@ -543,6 +674,7 @@ async def test_member_join_does_not_restore_roles_for_pending_delete(
 ) -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -577,6 +709,7 @@ async def test_member_join_cleans_pending_delete_without_legacy_puuid(
 ) -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -611,6 +744,7 @@ async def test_member_join_removes_all_verification_roles_for_pending_admin_dele
 ) -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -648,6 +782,7 @@ async def test_member_join_compensates_when_delete_wins_during_cached_apply(
 ) -> None:
     guild = SimpleNamespace(id=123)
     member = SimpleNamespace(id=101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -664,7 +799,7 @@ async def test_member_join_compensates_when_delete_wins_during_cached_apply(
     cog.bot = SimpleNamespace(
         settings=SimpleNamespace(guild_id=123),
         verifications=_guarded_verifications(
-            get_by_user=AsyncMock(side_effect=[link, None, None]),
+            get_by_user=AsyncMock(side_effect=[link, None, None, None]),
             schedule_rank_refresh_now=AsyncMock(),
             enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
             acknowledge_verified_marker_cleanup=AsyncMock(),
@@ -702,6 +837,7 @@ async def test_rank_refresh_claims_only_configured_guild_records() -> None:
         verifications=verifications,
         verification_sessions=SimpleNamespace(
             claim_audit_cleanups=AsyncMock(return_value=[]),
+            claim_audit_reconciliations=AsyncMock(return_value=[]),
         ),
         riot_auth_breaker=RiotAuthBreaker(),
     )
@@ -710,6 +846,8 @@ async def test_rank_refresh_claims_only_configured_guild_records() -> None:
 
     await LegacyVerificationCog.refresh_verified.coro(cog)
 
+    bot.verification_sessions.claim_audit_reconciliations.assert_not_awaited()
+    bot.verification_sessions.claim_audit_cleanups.assert_not_awaited()
     assert bot.get_guild.call_args_list == [call(123), call(123), call(123), call(123)]
     verifications.claim_due_rank_refreshes.assert_awaited_once_with(
         123,
@@ -782,6 +920,7 @@ async def test_icon_confirmation_explains_pending_deletion(
         game_name="Moon",
         tag_line="EUNE",
         expected_icon_id=42,
+        session_token="challenge-token",
     )
     interaction = SimpleNamespace(
         guild=object(),
@@ -857,6 +996,7 @@ async def test_legacy_icon_mismatch_or_invalid_payload_does_not_create_link_or_a
         game_name="Moon",
         tag_line="EUNE",
         expected_icon_id=8,
+        session_token="challenge-token",
     )
 
     await view.children[0].callback(interaction)
@@ -867,8 +1007,22 @@ async def test_legacy_icon_mismatch_or_invalid_payload_does_not_create_link_or_a
     verifications.create.assert_not_awaited()
 
 
-async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        None,
+        "other_puuid",
+        "same_puuid_new_generation",
+        "other_platform",
+        "deleting",
+        "removed",
+        "newer_snapshot",
+        "snapshot_after_read",
+    ],
+)
+async def test_legacy_confirmation_reserves_durable_work_and_fences_snapshot_generation(
     monkeypatch: pytest.MonkeyPatch,
+    replacement: str | None,
 ) -> None:
     class FakeHTTPException(Exception):
         pass
@@ -891,13 +1045,70 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
         puuid="puuid",
         platform="EUN1",
         created_at=created_at,
-        rank_last_checked_at=checked_at,
+        rank_last_checked_at=None,
+        last_known_rank=None,
+        deletion_requested_at=None,
     )
+    current_link = None
+    record = SimpleNamespace(
+        id=1,
+        guild_id=123,
+        discord_user_id=101,
+        verification_method="PROFILE_ICON",
+        status="CREATED",
+        expires_at=datetime.now(UTC) + timedelta(seconds=120),
+        verification_link_created_at=None,
+        puuid=None,
+        platform=None,
+    )
+    reserved_record = SimpleNamespace(**vars(record))
+
+    async def get_by_user(*_args: object) -> SimpleNamespace | None:
+        return current_link
+
+    async def reserve_link(**_kwargs: object) -> LinkReservationResult:
+        nonlocal current_link
+        reserved_record.verification_link_created_at = created_at
+        reserved_record.puuid = "puuid"
+        reserved_record.platform = "EUN1"
+        reserved_record.status = "VERIFIED_PENDING_DISCORD"
+        current_link = link
+        if replacement is not None:
+            # Deterministically replace A after reservation, before the caller's
+            # first reread. A same-account relink still has a distinct generation.
+            current_link = SimpleNamespace(**vars(link))
+            current_link.last_known_rank = "DIAMOND"
+            if replacement == "other_puuid":
+                current_link.puuid = "replacement-puuid"
+            elif replacement == "same_puuid_new_generation":
+                current_link.created_at = created_at + timedelta(seconds=1)
+            elif replacement == "other_platform":
+                current_link.platform = "EUW1"
+            elif replacement == "deleting":
+                current_link.deletion_requested_at = checked_at
+            elif replacement == "removed":
+                current_link = None
+            elif replacement == "newer_snapshot":
+                current_link.rank_last_checked_at = checked_at
+            else:
+                current_link.last_known_rank = None
+        return LinkReservationResult.RESERVED
+
+    async def concurrent_snapshot(*_args: object, **kwargs: object) -> None:
+        # The detached read was still empty; the worker commits B immediately
+        # before the repository checks the caller's expected snapshot version.
+        assert kwargs["expected_rank_last_checked_at"] is None
+        current_link.rank_last_checked_at = checked_at
+        current_link.last_known_rank = "DIAMOND"
+        return None
+
     verifications = _guarded_verifications(
-        get_by_user=AsyncMock(return_value=None),
+        get_by_user=AsyncMock(side_effect=get_by_user),
         get_by_puuid=AsyncMock(return_value=None),
         create=AsyncMock(return_value=link),
         retry_rank_role_sync=AsyncMock(return_value=300),
+        delete_by_user=AsyncMock(),
+        record_rank_snapshot=AsyncMock(side_effect=concurrent_snapshot),
     )
     bot = SimpleNamespace(
         settings=SimpleNamespace(
@@ -907,8 +1118,14 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
             zweryfikowani_channel_id=789,
             rank_refresh_interval_hours=24,
             rank_refresh_retry_base_seconds=300,
+            rank_refresh_policy="fixed",
+            rank_refresh_rollout_percent=0,
         ),
         verifications=verifications,
+        verification_sessions=SimpleNamespace(
+            get_by_start_token=AsyncMock(side_effect=[record, reserved_record]),
+            reserve_link=AsyncMock(side_effect=reserve_link),
+        ),
     )
     cog = object.__new__(LegacyVerificationCog)
     cog.bot = bot
@@ -934,6 +1151,10 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
         AsyncMock(return_value={"profileIconId": 42}),
     )
     monkeypatch.setattr(verification_legacy, "_get_leagues", AsyncMock(return_value=leagues))
+    record_leagues = AsyncMock(return_value=(leagues, checked_at))
+    if replacement == "snapshot_after_read":
+        record_leagues.side_effect = verification._record_leagues
+    monkeypatch.setattr(verification_legacy, "_record_leagues", record_leagues)
     view = LegacyIconConfirmationView(
         bot,
         _rate_limiter(),
@@ -943,26 +1164,46 @@ async def test_legacy_discord_failure_keeps_link_and_enqueues_cached_role_retry(
         game_name="Moon",
         tag_line="EUNE",
         expected_icon_id=42,
+        session_token="challenge-token",
     )
 
     await view.children[0].callback(interaction)
 
-    verifications.create.assert_awaited_once()
-    assert verifications.create.await_args.kwargs["rank_snapshot"] == RankSnapshot("EMERALD")
-    assert verifications.create.await_args.kwargs["audit_channel_id"] == 789
-    assert verifications.create.await_args.kwargs["riot_game_name"] == "Moon"
-    assert verifications.create.await_args.kwargs["riot_tag_line"] == "EUNE"
-    verifications.retry_rank_role_sync.assert_awaited_once_with(
-        123,
-        101,
-        base_delay_seconds=300,
-        expected_rank_last_checked_at=checked_at,
-        expected_puuid="puuid",
-        expected_platform="EUN1",
-        expected_created_at=created_at,
+    bot.verification_sessions.reserve_link.assert_awaited_once_with(
+        session_id=1, platform="EUN1", puuid="puuid", game_name="Moon", tag_line="EUNE"
     )
+    if replacement is None:
+        record_leagues.assert_awaited_once_with(bot, link, leagues, expected_claimed_at=None)
+        assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
+    elif replacement in ("newer_snapshot", "snapshot_after_read"):
+        if replacement == "newer_snapshot":
+            record_leagues.assert_not_awaited()
+        else:
+            record_leagues.assert_awaited_once()
+            assert (
+                verifications.record_rank_snapshot.await_args.kwargs[
+                    "expected_rank_last_checked_at"
+                ]
+                is None
+            )
+        assert current_link.created_at == reserved_record.verification_link_created_at
+        assert current_link.rank_last_checked_at == checked_at
+        assert current_link.last_known_rank == "DIAMOND"
+        assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
+    else:
+        record_leagues.assert_not_awaited()
+        assert "Powiązanie konta zmieniło się" in followup.send.await_args.args[0]
+        assert current_link is not link
+        if replacement == "removed":
+            assert current_link is None
+        else:
+            assert current_link.last_known_rank == "DIAMOND"
+    verifications.create.assert_not_awaited()
+    verifications.delete_by_user.assert_not_awaited()
+    channel.send.assert_not_awaited()
+    verifications.retry_rank_role_sync.assert_not_awaited()
+    cog.apply_verified_roles.assert_not_awaited()
     audit_message.delete.assert_not_awaited()
-    assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
 
 
 async def test_manual_rank_change_is_reconciled_from_cached_rank() -> None:
@@ -1028,6 +1269,7 @@ async def test_member_update_does_not_restore_roles_for_pending_delete(
     guild = SimpleNamespace(id=123)
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1072,6 +1314,7 @@ async def test_member_update_cleans_pending_delete_without_legacy_puuid(
     guild = SimpleNamespace(id=123)
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1116,6 +1359,7 @@ async def test_member_update_removes_all_verification_roles_for_pending_admin_de
     guild = SimpleNamespace(id=123)
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1163,6 +1407,7 @@ async def test_member_update_compensates_when_delete_wins_during_cached_apply(
     guild = SimpleNamespace(id=123)
     before = SimpleNamespace(id=101, guild=guild, roles=[emerald])
     after = SimpleNamespace(id=101, guild=guild, roles=[iron])
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1187,7 +1432,7 @@ async def test_member_update_compensates_when_delete_wins_during_cached_apply(
             role_ids={},
         ),
         verifications=_guarded_verifications(
-            get_by_user=AsyncMock(side_effect=[link, None, None]),
+            get_by_user=AsyncMock(side_effect=[link, None, None, None]),
             request_rank_refresh=AsyncMock(),
             enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
             acknowledge_verified_marker_cleanup=AsyncMock(),
@@ -1251,7 +1496,7 @@ async def test_manual_rank_change_prioritizes_stale_cache_with_durable_cooldown(
     )
 
 
-async def test_manual_rank_change_without_cache_restores_previous_roles_and_schedules_refresh() -> (
+async def test_manual_rank_change_without_cache_removes_unknown_rank_and_schedules_refresh() -> (
     None
 ):
     emerald = FakeRole(1, "Emerald")
@@ -1266,6 +1511,8 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
         remove_roles=AsyncMock(),
         add_roles=AsyncMock(),
     )
+    guild.roles = [emerald, iron, verified]
+    guild.fetch_member = AsyncMock(return_value=after)
     link = SimpleNamespace(
         guild_id=123,
         discord_user_id=101,
@@ -1293,7 +1540,8 @@ async def test_manual_rank_change_without_cache_restores_previous_roles_and_sche
 
     await cog.on_member_update(before, after)
 
-    after.remove_roles.assert_awaited_once_with(iron, reason="Ochrona ról weryfikacji Riot")
+    assert set(after.remove_roles.await_args.args) == {emerald, iron}
+    assert after.remove_roles.await_args.kwargs == {"reason": "Synchronizacja weryfikacji Riot"}
     after.add_roles.assert_not_awaited()
     verifications.request_rank_refresh.assert_awaited_once_with(
         123,

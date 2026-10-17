@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import pytest_asyncio
+from aiohttp import ClientResponse, StreamReader
+from aiohttp.base_protocol import BaseProtocol
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -14,12 +17,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from moon_poro.database import Database
 from moon_poro.models import Base, VerificationSessionStatus
 from moon_poro.rso_web import (
+    BROWSER_COOKIE,
+    MAX_RIOT_RESPONSE_BYTES,
     REPOSITORY_KEY,
     RSO_CLIENT_KEY,
     RequestRateLimiter,
     RiotIdentity,
     RiotRSOClient,
     RiotRSOError,
+    _read_riot_json,
     _result_for_record,
     create_app,
 )
@@ -176,12 +182,120 @@ def test_completed_result_escapes_riot_id() -> None:
     assert "https://discord.com/channels/123" in response.text
 
 
+def test_processing_riot_does_not_claim_identity_has_been_confirmed() -> None:
+    response = _result_for_record(SimpleNamespace(status="PROCESSING_RIOT", error_code=None))
+    assert "Potwierdzamy logowanie w Riot" in response.text
+    assert "Riot potwierdził konto" not in response.text
+    assert response.headers["Refresh"] == "2"
+
+
+@pytest.mark.parametrize("status", ["VERIFIED_PENDING_DISCORD", "APPLYING_DISCORD"])
+def test_pending_discord_does_not_claim_roles_are_still_being_applied(status: str) -> None:
+    response = _result_for_record(SimpleNamespace(status=status, error_code=None))
+
+    assert "Kończymy weryfikację na Discordzie" in response.text
+    assert "Bot nadaje teraz role" not in response.text
+    assert response.headers["Refresh"] == "2"
+
+
+def test_paused_discord_result_requests_explicit_resume_without_refresh() -> None:
+    response = _result_for_record(
+        SimpleNamespace(
+            status=VerificationSessionStatus.DISCORD_RETRY_PAUSED.value, error_code=None
+        )
+    )
+
+    assert "Weryfikacja wymaga pomocy" in response.text
+    assert "Kliknij ponownie „Zweryfikuj konto” na Discordzie" in response.text
+    assert "skontaktuj się z moderacją" in response.text
+    assert "Refresh" not in response.headers
+    assert "Konto połączone" not in response.text
+
+
 def test_rate_limiter_rejects_request_after_limit() -> None:
     limiter = RequestRateLimiter(limit=2, window_seconds=60)
 
     assert limiter.allowed("127.0.0.1")
     assert limiter.allowed("127.0.0.1")
     assert not limiter.allowed("127.0.0.1")
+
+
+def test_rate_limiter_shares_ipv6_64_but_keeps_other_networks_independent() -> None:
+    limiter = RequestRateLimiter(limit=2)
+
+    assert limiter.allowed("2001:db8:1234:5678::1")
+    assert limiter.allowed("2001:0db8:1234:5678:ffff:ffff:ffff:ffff")
+    assert not limiter.allowed("2001:db8:1234:5678::2")
+    assert limiter.allowed("2001:db8:1234:5679::1")
+    assert len(limiter._clients) == 2
+
+
+def test_rate_limiter_maps_ipv4_and_rejects_invalid_addresses_without_allocating() -> None:
+    limiter = RequestRateLimiter(limit=1)
+
+    assert limiter.allowed("192.0.2.5")
+    assert not limiter.allowed("::ffff:c000:205")
+    assert not limiter.allowed("::ffff:192.0.2.5")
+    assert limiter.allowed("192.0.2.6")
+    for client in ("unknown", "invalid-address", "x" * 1000):
+        assert not limiter.allowed(client)
+    assert len(limiter._clients) == 2
+
+
+def test_rate_limiter_caps_clients_preserves_counters_and_prunes_at_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("moon_poro.rso_web.time.monotonic", lambda: clock[0])
+    limiter = RequestRateLimiter(limit=1, window_seconds=60)
+    for index in range(4096):
+        assert limiter.allowed(f"10.0.{index // 256}.{index % 256}")
+
+    assert not limiter.allowed("10.0.0.0")
+    for index in range(1000):
+        assert not limiter.allowed(f"10.1.{index // 256}.{index % 256}")
+    assert len(limiter._clients) == 4096
+    assert not limiter.allowed("10.0.0.0")
+
+    clock[0] = 159.999
+    assert not limiter.allowed("10.1.0.0")
+    assert not limiter.allowed("10.0.0.0")
+    # An existing bucket resets at the exact boundary even when the periodic
+    # sweep is not due yet. New buckets can enter after the next sweep.
+    clock[0] = 160.0
+    assert limiter.allowed("10.0.0.0")
+    clock[0] = 161.0
+    assert limiter.allowed("10.1.0.0")
+    assert len(limiter._clients) == 2
+    assert not limiter.allowed("10.0.0.0")
+
+
+def test_rate_limiter_never_scans_all_clients_for_each_capacity_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("moon_poro.rso_web.time.monotonic", lambda: clock[0])
+    limiter = RequestRateLimiter()
+    for index in range(4096):
+        assert limiter.allowed(f"10.0.{index // 256}.{index % 256}")
+
+    class CountedClients(dict):
+        scans = 0
+
+        def items(self):
+            self.scans += 1
+            return super().items()
+
+    clients = CountedClients(limiter._clients)
+    limiter._clients = clients
+    for index in range(1000):
+        assert not limiter.allowed(f"10.1.{index // 256}.{index % 256}")
+    clock[0] = 100.999
+    assert not limiter.allowed("10.1.0.0")
+    assert clients.scans == 0
+    clock[0] = 101.0
+    assert not limiter.allowed("10.1.0.0")
+    assert clients.scans == 1
 
 
 async def test_health_readiness_and_security_headers(rso_test_client: TestClient) -> None:
@@ -195,6 +309,15 @@ async def test_health_readiness_and_security_headers(rso_test_client: TestClient
     assert await ready.json() == {"status": "ready"}
     assert health.headers["X-Frame-Options"] == "DENY"
     assert health.headers["Cache-Control"] == "no-store, max-age=0"
+    # no-referrer makes browsers send Origin: null on ordinary form POSTs.
+    # same-origin preserves local form checks without leaking tokens to Riot.
+    assert health.headers["Referrer-Policy"] == "same-origin"
+    assert (
+        "form-action 'self' https://auth.riotgames.com https://authenticate.riotgames.com;"
+        in health.headers["Content-Security-Policy"]
+    )
+    assert "img-src 'self' data:;" in health.headers["Content-Security-Policy"]
+    assert "font-src 'self';" in health.headers["Content-Security-Policy"]
     assert invalid_host.status == 400
     assert await invalid_host.text() == "Nieprawidłowy adres."
 
@@ -210,6 +333,48 @@ async def test_request_limit_returns_a_clear_polish_message(
 
     assert responses[-1].status == 429
     assert await responses[-1].text() == "Za dużo żądań. Spróbuj ponownie za minutę."
+    ready = await rso_test_client.get("/readyz", headers=headers)
+    assert ready.status == 429
+
+
+@pytest.mark.parametrize(
+    ("username", "guild_name"),
+    [(None, None), ('<img src=x onerror="alert(1)">&', "<script>guild</script>&")],
+    ids=["legacy-id-fallback", "escaped-names"],
+)
+async def test_landing_identifies_discord_target_before_riot_button(
+    rso_test_client: TestClient, username: str | None, guild_name: str | None
+) -> None:
+    repository = rso_test_client.server.app[REPOSITORY_KEY]
+    created = await repository.create(
+        guild_id=123,
+        user_id=456,
+        ttl_seconds=600,
+        discord_username=username,
+        discord_guild_name=guild_name,
+    )
+    response = await rso_test_client.get(
+        f"/verify/start/{created.token}", headers={"Host": "localhost:8080"}
+    )
+    document = await response.text()
+
+    assert response.status == 200
+    assert "Łączysz konto Riot z kontem Discord:" in document
+    assert "Serwer:" in document
+    assert "ID: 456" in document and "ID: 123" in document
+    warning = "Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę."
+    assert warning in document
+    assert "Rozpocznij weryfikację samodzielnie w panelu bota." in document
+    assert document.index("Łączysz konto Riot") < document.index("<button")
+    assert document.index(warning) < document.index("<button")
+    if username is not None:
+        assert username not in document and guild_name not in document
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;" in document
+        assert "&lt;script&gt;guild&lt;/script&gt;&amp;" in document
+    else:
+        assert "None" not in document
+    assert 'src="/moon-poro.png"' in document
+    assert "/fonts/nunito-latin.woff2" in document
 
 
 async def test_complete_browser_flow_from_landing_to_result(
@@ -253,7 +418,7 @@ async def test_complete_browser_flow_from_landing_to_result(
     monkeypatch.setattr(app[RSO_CLIENT_KEY], "get_identity", get_identity)
     callback = await rso_test_client.get(
         f"/oauth2/callback?state={state}&code=authorization-code",
-        headers=headers,
+        headers={**headers, "Cookie": f"{BROWSER_COOKIE}={start.cookies[BROWSER_COOKIE].value}"},
         allow_redirects=False,
     )
     assert callback.status == 303
@@ -292,7 +457,10 @@ async def test_cancelled_provider_flow_and_reused_link(rso_test_client: TestClie
 
     cancelled = await rso_test_client.get(
         f"/oauth2/callback?state={state}&error=access_denied",
-        headers={"Host": "localhost:8080"},
+        headers={
+            "Host": "localhost:8080",
+            "Cookie": f"{BROWSER_COOKIE}={start.cookies[BROWSER_COOKIE].value}",
+        },
         allow_redirects=False,
     )
     reused = await rso_test_client.post(path, headers=headers, allow_redirects=False)
@@ -327,3 +495,132 @@ async def test_invalid_tokens_and_origin_are_rejected(rso_test_client: TestClien
     assert "Stan logowania" not in invalid_state_html
     assert "Nie udało się rozpocząć" in await bad_origin.text()
     assert "Sprawdź Discorda" in await missing_cookie.text()
+
+
+@pytest.mark.parametrize("origin", ["null", "https://evil.example"])
+async def test_rejected_origin_does_not_consume_verification_link(
+    rso_test_client: TestClient, origin: str
+) -> None:
+    repository = rso_test_client.server.app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    path = f"/verify/start/{created.token}"
+
+    rejected = await rso_test_client.post(
+        path,
+        headers={"Host": "localhost:8080", "Origin": origin},
+        allow_redirects=False,
+    )
+    assert "Nie udało się rozpocząć" in await rejected.text()
+    untouched = await repository.get_by_start_token(created.token)
+    assert untouched is not None
+    assert untouched.status == VerificationSessionStatus.CREATED.value
+
+    started = await rso_test_client.post(
+        path,
+        headers={"Host": "localhost:8080", "Origin": "http://localhost:8080"},
+        allow_redirects=False,
+    )
+    assert started.status == 303
+    assert urlsplit(started.headers["Location"]).netloc == "auth.riotgames.com"
+
+
+@pytest.mark.parametrize("foreign_cookie", [None, "x" * 43])
+async def test_callback_rejects_foreign_browser_before_contacting_riot(
+    rso_test_client: TestClient, monkeypatch: pytest.MonkeyPatch, foreign_cookie: str | None
+) -> None:
+    app = rso_test_client.server.app
+    repository = app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    started = await rso_test_client.post(
+        f"/verify/start/{created.token}",
+        headers={"Host": "localhost:8080", "Origin": "http://localhost:8080"},
+        allow_redirects=False,
+    )
+    cookie = started.cookies[BROWSER_COOKIE]
+    assert cookie["path"] == "/" and cookie["httponly"] and cookie["samesite"] == "Lax"
+    state = parse_qs(urlsplit(started.headers["Location"]).query)["state"][0]
+    exchange = AsyncMock(return_value="temporary-token")
+    monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", exchange)
+    headers = {"Host": "localhost:8080"}
+    if foreign_cookie is not None:
+        headers["Cookie"] = f"{BROWSER_COOKIE}={foreign_cookie}"
+    rso_test_client.session.cookie_jar.clear()
+    rejected = await rso_test_client.get(
+        f"/oauth2/callback?state={state}&code=valid-code",
+        headers=headers,
+        allow_redirects=False,
+    )
+    assert "Wróć do poprzedniej przeglądarki" in await rejected.text()
+    exchange.assert_not_awaited()
+    record = await repository.get_by_start_token(created.token)
+    assert record is not None and record.status == "AWAITING_RIOT"
+
+
+async def test_superseded_callback_returns_polish_page_instead_of_500(
+    rso_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = rso_test_client.server.app
+    repository = app[REPOSITORY_KEY]
+    created = await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    started = await rso_test_client.post(
+        f"/verify/start/{created.token}",
+        headers={"Host": "localhost:8080"},
+        allow_redirects=False,
+    )
+    state = parse_qs(urlsplit(started.headers["Location"]).query)["state"][0]
+
+    async def supersede(_access_token: str) -> RiotIdentity:
+        await repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+        return RiotIdentity("not-linked", "Moon", "EUNE", "EUN1")
+
+    monkeypatch.setattr(app[RSO_CLIENT_KEY], "exchange_code", AsyncMock(return_value="token"))
+    monkeypatch.setattr(app[RSO_CLIENT_KEY], "get_identity", supersede)
+    response = await rso_test_client.get(
+        f"/oauth2/callback?state={state}&code=code",
+        headers={
+            "Host": "localhost:8080",
+            "Cookie": f"{BROWSER_COOKIE}={started.cookies[BROWSER_COOKIE].value}",
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 200
+    assert "Ta weryfikacja nie jest już aktywna" in await response.text()
+
+
+async def test_riot_json_waits_for_all_network_chunks() -> None:
+    loop = asyncio.get_running_loop()
+    protocol = Mock(spec=BaseProtocol, connected=True, _reading_paused=False)
+    reader = StreamReader(protocol, limit=MAX_RIOT_RESPONSE_BYTES, loop=loop)
+    reader.feed_data(b'{"access_')
+
+    async def finish_response() -> None:
+        await asyncio.sleep(0.01)
+        reader.feed_data(b'token":"valid","token_type":"Bearer"}')
+        reader.feed_eof()
+
+    producer = asyncio.create_task(finish_response())
+    try:
+        payload = await _read_riot_json(
+            cast(ClientResponse, SimpleNamespace(status=200, content=reader)), expected_status=200
+        )
+        assert payload == {"access_token": "valid", "token_type": "Bearer"}
+    finally:
+        await producer
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"{}" + b" " * MAX_RIOT_RESPONSE_BYTES, b"{broken", b"[]"],
+    ids=["too-large", "broken-json", "not-an-object"],
+)
+async def test_riot_json_rejects_oversized_or_invalid_payload(body: bytes) -> None:
+    loop = asyncio.get_running_loop()
+    protocol = Mock(spec=BaseProtocol, connected=True, _reading_paused=False)
+    reader = StreamReader(protocol, limit=MAX_RIOT_RESPONSE_BYTES, loop=loop)
+    reader.feed_data(body)
+    reader.feed_eof()
+    with pytest.raises(RiotRSOError):
+        await _read_riot_json(
+            cast(ClientResponse, SimpleNamespace(status=200, content=reader)), expected_status=200
+        )

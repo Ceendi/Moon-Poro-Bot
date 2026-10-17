@@ -3,11 +3,11 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import { siteConfig } from "../../config";
 ---
 
-<BaseLayout lang="en" canonicalPath="/en/" title="Your LoL rank on Discord" description="Moon Poro is the bot of the League of Legends PL Discord server. Sign in with Riot and get roles with your region and Solo/Duo rank.">
+<BaseLayout lang="en" canonicalPath="/en/" title="Your LoL rank on Discord" description="Moon Poro is the bot of the League of Legends PL Discord server. Link your Riot account and get region and Solo/Duo rank roles.">
   <section class="hero">
     <div class="hero-text">
       <h1>Show your rank on the server</h1>
-      <p class="lead">Moon Poro is the bot of the League of Legends PL server. Sign in with Riot and the bot gives you roles with your region and Solo/Duo rank. After that, it keeps your rank up to date.</p>
+      <p class="lead">Moon Poro is the bot of the League of Legends PL server. Link your Riot account to get region and Solo/Duo rank roles. After that, the bot keeps your rank up to date.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Join the server</a>
         <a class="button ghost" href="#how">How to verify</a>
@@ -27,19 +27,19 @@ import { siteConfig } from "../../config";
     <ol class="steps">
       <li>
         <h3>Click “Zweryfikuj konto”</h3>
-        <p>That's “Verify account”, under the verification panel on the server. The bot sends you a private link.</p>
+        <p>That's “Verify account”, under the verification panel on the server. Enter your Riot ID and region.</p>
       </li>
       <li>
-        <h3>Open the link</h3>
-        <p>Click “Zaloguj się przez Riot” (“Sign in with Riot”), then “Przejdź do logowania Riot”. The link works once and only for a few minutes.</p>
+        <h3>Change your profile icon</h3>
+        <p>In the League of Legends client, select the icon shown by the bot. You have 2 minutes.</p>
       </li>
       <li>
-        <h3>Sign in to your Riot account</h3>
-        <p>You sign in on the Riot Games website with the same account you play on. Riot shares your Riot ID and region with us.</p>
+        <h3>Confirm the change</h3>
+        <p>Return to Discord and click the confirmation button. The bot checks the account and assigns your roles.</p>
       </li>
       <li>
         <h3>Done</h3>
-        <p>Go back to Discord. You now have the “Zweryfikowany” (Verified) and “Użytkownik” (Member) roles plus region and rank roles.</p>
+        <p>After verification, you receive the “Zweryfikowany” (Verified) and “Użytkownik” (Member) roles plus region and rank roles.</p>
       </li>
     </ol>
   </section>
@@ -71,7 +71,7 @@ import { siteConfig } from "../../config";
       </li>
       <li>
         <p class="feature-key"><span class="discord-button blurple">Odśwież rangę</span></p>
-        <p>Your rank refreshes on its own. After a promotion you don't have to wait: click “Refresh rank” in “Moje konto”.</p>
+        <p>The bot updates your rank automatically. You can also request a refresh in “Moje konto”, once every 30 minutes.</p>
       </li>
       <li>
         <p class="feature-key"><span class="discord-button red">Usuń powiązanie</span> <span class="or">or</span> <code>/usun_weryfikacje</code></p>
@@ -85,7 +85,8 @@ import { siteConfig } from "../../config";
       <img src="/moon-poro.png" alt="" width="72" height="72" />
       <div>
         <h2>Your password goes to Riot only</h2>
-        <p>You sign in on riotgames.com. Moon Poro never sees your password, and the bot will never ask for it on Discord. Poros prefer Poro-Snax. If someone asks for your password “on behalf of Moon Poro”, it's a scam. Report it to the moderators.</p>
+        <p>Riot sign-in will replace the profile-icon check. Access has been approved, and we are testing the new verification before its public launch. Sign-in will take place on riotgames.com.</p>
+        <p>Moon Poro never sees your password and will never ask for it on Discord. If someone asks for your password “on behalf of Moon Poro”, report it to the moderators.</p>
         <p>We only store what's needed for roles: your Discord account ID, Riot ID, region and rank. Details are in the <a href="/en/privacy/">privacy policy</a>.</p>
       </div>
     </div>
@@ -95,8 +96,8 @@ import { siteConfig } from "../../config";
     <h2>FAQ</h2>
     <div class="faq">
       <details>
-        <summary>The link doesn't work or has expired</summary>
-        <p>Each link works once and only for a few minutes. Click “Zweryfikuj konto” again and the bot sends a new one.</p>
+        <summary>Verification has expired</summary>
+        <p>You have 2 minutes to change the icon. Click “Zweryfikuj konto” again and start over.</p>
       </details>
       <details>
         <summary>I don't play on EUNE</summary>

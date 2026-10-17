@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -255,17 +256,18 @@ async def test_rso_start_blocks_reverification_while_delete_is_pending(
     bot.settings.role_ids = {}
     bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=pending_delete))
     bot.verification_sessions = sessions
-    response = SimpleNamespace(send_message=AsyncMock())
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
     interaction = SimpleNamespace(
         guild_id=123,
         guild=guild,
         user=member,
         response=response,
+        edit_original_response=AsyncMock(),
     )
 
     await VerificationStartView(bot).children[0].callback(interaction)
 
-    assert response.send_message.await_args.args[0] == (
+    assert interaction.edit_original_response.await_args.kwargs["content"] == (
         "Usuwanie poprzedniego powiązania jeszcze trwa. Spróbuj ponownie za chwilę."
     )
     sessions.create.assert_not_awaited()
@@ -284,21 +286,137 @@ async def test_rso_start_explains_incomplete_previous_link(
     bot.settings.role_ids = {}
     bot.verifications = SimpleNamespace(get_by_user=AsyncMock(return_value=incomplete_link))
     bot.verification_sessions = sessions
-    response = SimpleNamespace(send_message=AsyncMock())
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
     interaction = SimpleNamespace(
         guild_id=123,
         guild=guild,
         user=member,
         response=response,
+        edit_original_response=AsyncMock(),
     )
 
     await VerificationStartView(bot).children[0].callback(interaction)
 
-    response.send_message.assert_awaited_once_with(
-        "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
-        ephemeral=True,
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
     )
     sessions.create.assert_not_awaited()
+
+
+async def test_rso_start_defers_before_slow_database_and_session_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=123, name="Moon Poro")
+    member = FakeMember(101, guild=guild)
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock())
+    bot = _panel_bot()
+    bot.settings.verified_role_name = "Verified"
+    bot.settings.role_ids = {}
+    bot.settings.rso_session_ttl_seconds = 600
+    bot.settings.rso_base_url = "https://bot.example.com"
+
+    async def slow_read(*_args: object) -> None:
+        response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        await asyncio.sleep(3.01)
+
+    async def create(**kwargs: object) -> SimpleNamespace:
+        response.defer.assert_awaited_once()
+        assert kwargs["discord_username"] == str(member)
+        assert kwargs["discord_guild_name"] == "Moon Poro"
+        return SimpleNamespace(token="a" * 43)
+
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock(side_effect=slow_read))
+    bot.verification_sessions = SimpleNamespace(create=AsyncMock(side_effect=create))
+    interaction = SimpleNamespace(
+        guild_id=123,
+        guild=guild,
+        user=member,
+        response=response,
+        edit_original_response=AsyncMock(),
+    )
+    await VerificationStartView(bot).begin_verification(interaction)
+    bot.verification_sessions.create.assert_awaited_once()
+    interaction.edit_original_response.assert_awaited_once()
+    response.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ["rso", "legacy"])
+async def test_public_start_resumes_paused_completion_without_new_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    guild = SimpleNamespace(id=123)
+    member = FakeMember(101, guild=guild)
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.settings.verified_role_name = "Verified"
+    bot.settings.role_ids = {}
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(
+            return_value=SimpleNamespace(puuid="owned", deletion_requested_at=None)
+        )
+    )
+    response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock())
+
+    async def resume(*_args: object) -> bool:
+        response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        return True
+
+    bot.verification_sessions = SimpleNamespace(
+        resume_paused_for_user=AsyncMock(side_effect=resume),
+        create=AsyncMock(),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        guild=guild,
+        user=member,
+        response=response,
+        edit_original_response=AsyncMock(),
+    )
+    view = (
+        VerificationStartView(bot)
+        if provider == "rso"
+        else LegacyVerificationStartView(
+            bot, LegacyVerificationRateLimiter(global_rate=4, global_period_seconds=10)
+        )
+    )
+    await view.begin_verification(interaction)
+    bot.verification_sessions.resume_paused_for_user.assert_awaited_once_with(123, 101)
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+    )
+    bot.verification_sessions.create.assert_not_awaited()
+    response.send_modal.assert_not_awaited()
+    response.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cog_class", [VerificationCog, LegacyVerificationCog])
+async def test_both_cogs_start_and_unload_independent_audit_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    cog_class: type[VerificationCog],
+) -> None:
+    started: list[str] = []
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        verification.tasks.Loop, "start", lambda loop: started.append(loop.coro.__name__)
+    )
+    monkeypatch.setattr(
+        verification.tasks.Loop, "cancel", lambda loop: cancelled.append(loop.coro.__name__)
+    )
+    bot = _panel_bot()
+    bot.add_view = Mock()
+    bot.wait_until_ready = AsyncMock()
+    bot.settings.rank_refresh_worker_interval_seconds = 10
+    bot.settings.rso_completion_interval_seconds = 3
+    bot.settings.riot_monitoring_interval_seconds = 300
+    cog = cog_class(bot)
+    assert started.count("reconcile_verification_audits") == 1
+    assert started.count("refresh_verified") == 1
+    await VerificationCog.before_audit_reconciliation(cog)
+    bot.wait_until_ready.assert_awaited_once()
+    await cog.cog_unload()
+    assert sorted(started) == sorted(cancelled)
 
 
 async def test_rso_publishes_short_factual_embed() -> None:
@@ -1311,6 +1429,7 @@ async def test_null_puuid_link_can_be_confirmed_and_deleted_with_strict_identity
     guild = SimpleNamespace(id=123)
     member = FakeMember(101, guild=guild)
     member.roles = [verified]
+    guild.fetch_member = AsyncMock(return_value=member)
     current_link = _profile_link(
         guild_id=123,
         discord_user_id=101,
@@ -1749,6 +1868,7 @@ async def test_admin_deletion_removes_verification_roles_but_keeps_member_role()
     guild = SimpleNamespace()
     member = FakeMember(101, guild=guild)
     member.roles = [member_role, verified, region, rank]
+    guild.fetch_member = AsyncMock(return_value=member)
     requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
     claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
     link = SimpleNamespace(
@@ -1823,6 +1943,7 @@ async def test_shared_delete_keeps_region_rank_and_member_roles(
     guild = SimpleNamespace(get_channel=Mock(return_value=channel))
     member = FakeMember(101, guild=guild)
     member.roles = [verified, region, rank, member_role]
+    guild.fetch_member = AsyncMock(return_value=member)
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))
     monkeypatch.setattr(verification, "find_role", Mock(return_value=verified))
@@ -1901,6 +2022,7 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
     member = FakeMember(101, guild=guild)
     verified = object()
     member.roles = [verified]
+    guild.fetch_member = AsyncMock(return_value=member)
     member.remove_roles = AsyncMock(side_effect=FakeHTTPException())
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
@@ -1971,6 +2093,7 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
     )
     guild = SimpleNamespace(get_channel=Mock(return_value=channel))
     member = FakeMember(101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))
