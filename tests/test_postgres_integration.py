@@ -32,14 +32,130 @@ from moon_poro.repositories import (
     VerificationDeletionRequestStatus,
     VerificationLinkIdentity,
     VerificationRepository,
+    VerificationSnapshotChanged,
     WarningRepository,
 )
 from moon_poro.settings import Settings
 from moon_poro.time_utils import timestamps_match
 from moon_poro.verification_sessions import (
     LinkReservationResult,
+    SessionAlreadyUsed,
     VerificationSessionRepository,
 )
+
+
+@pytest.mark.parametrize("reservation_first", [False, True])
+async def test_rso_start_and_reservation_serialize_on_postgres(
+    settings_factory: Callable[..., Settings],
+    reservation_first: bool,
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),  # pragma: allowlist secret
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationSessionRepository(database.session_factory)
+    try:
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        await repository.begin_oauth(token=created.token, state="state", browser_token="browser")
+        record = await repository.claim_callback("state", browser_token="browser")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_lock = repository._lock_user
+
+        async def delayed_lock(session, guild, user):
+            await original_lock(session, guild, user)
+            entered.set()
+            await release.wait()
+
+        first = VerificationSessionRepository(database.session_factory)
+        first._lock_user = delayed_lock
+
+        async def reserve(repo):
+            return await repo.reserve_link(
+                session_id=record.id,
+                platform="EUN1",
+                puuid=f"race-{guild_id}",
+                game_name="Moon",
+                tag_line="EUNE",
+            )
+
+        async def start(repo):
+            return await repo.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+
+        first_task = asyncio.create_task(reserve(first) if reservation_first else start(first))
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        second_task = asyncio.create_task(
+            start(repository) if reservation_first else reserve(repository)
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert not second_task.done()
+        finally:
+            release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(first_task, second_task, return_exceptions=True), timeout=5
+        )
+        assert isinstance(results[1], SessionAlreadyUsed)
+        saved = await repository.get_by_start_token(created.token)
+        assert saved is not None
+        if reservation_first:
+            assert results[0] == LinkReservationResult.RESERVED
+            assert saved.status == "VERIFIED_PENDING_DISCORD"
+            assert len(await repository.claim_pending()) == 1
+            publishing = asyncio.Event()
+            finish_publish = asyncio.Event()
+
+            async def publish(_record, active):
+                assert active
+                publishing.set()
+                await finish_publish.wait()
+                return [987]
+
+            publication = asyncio.create_task(
+                repository.publish_audit(record.id, channel_id=654, operation=publish)
+            )
+            await asyncio.wait_for(publishing.wait(), timeout=3)
+            cancellation = asyncio.create_task(
+                repository.cancel_for_user(
+                    guild_id,
+                    456,
+                    created_at_or_before=saved.created_at,
+                )
+            )
+            try:
+                await asyncio.sleep(0.05)
+                assert not cancellation.done()
+            finally:
+                finish_publish.set()
+            assert await asyncio.wait_for(publication, timeout=5)
+            await asyncio.wait_for(cancellation, timeout=5)
+            async with database.session() as session:
+                link = await session.get(VerificationLink, (guild_id, 456))
+                assert link is not None and link.message_id == 987
+                assert link.audit_channel_id == 654
+        else:
+            assert saved.status == "CANCELLED"
+            async with database.session() as session:
+                assert await session.get(VerificationLink, (guild_id, 456)) is None
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+            await connection.execute(
+                text("DELETE FROM verification_sessions WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+        await database.close()
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -134,6 +250,9 @@ async def test_migrations_and_repositories_against_postgres(
         assert "ix_verification_links_rank_role_sync_due" in verification_indexes
         assert "ix_verification_links_deletion_due" in verification_indexes
         assert "verification_link_created_at" in verification_session_columns
+        assert "browser_binding_hash" in verification_session_columns
+        assert "verification_method" in verification_session_columns
+        assert "audit_pending_channel_id" in verification_session_columns
         assert "verification_audit_cleanups" in table_names
         assert "verification_marker_cleanups" in table_names
 
@@ -376,6 +495,25 @@ async def test_migrations_and_repositories_against_postgres(
         assert refreshed.last_known_league_points == 40
         assert refreshed.rank_tier_change_count == 1
         assert not refreshed.rank_role_sync_pending
+        stale_role_operation = AsyncMock()
+        with pytest.raises(VerificationSnapshotChanged):
+            await verifications.run_verification_role_update_with_identity(
+                guild_id,
+                101,
+                identity=VerificationLinkIdentity.from_link(refreshed),
+                expected_rank_last_checked_at=original_role_snapshot_at,
+                operation=stale_role_operation,
+            )
+        stale_role_operation.assert_not_awaited()
+        current_role_operation = AsyncMock()
+        assert await verifications.run_verification_role_update_with_identity(
+            guild_id,
+            101,
+            identity=VerificationLinkIdentity.from_link(refreshed),
+            expected_rank_last_checked_at=newer_snapshot_at,
+            operation=current_role_operation,
+        )
+        current_role_operation.assert_awaited_once()
         await verifications.log_access(
             guild_id=guild_id,
             actor_id=501,
@@ -388,8 +526,12 @@ async def test_migrations_and_repositories_against_postgres(
         rso_sessions = VerificationSessionRepository(connection.session_factory)
         rso = await rso_sessions.create(guild_id=guild_id, user_id=102, ttl_seconds=600)
         oauth_state = f"oauth-state-{guild_id}"
-        await rso_sessions.begin_oauth(token=rso.token, state=oauth_state)
-        callback = await rso_sessions.claim_callback(oauth_state)
+        await rso_sessions.begin_oauth(
+            token=rso.token, state=oauth_state, browser_token="integration-browser"
+        )
+        callback = await rso_sessions.claim_callback(
+            oauth_state, browser_token="integration-browser"
+        )
         assert (
             await rso_sessions.reserve_link(
                 session_id=callback.id,
@@ -1250,6 +1392,7 @@ async def test_guarded_role_apply_serializes_admin_deletion_cleanup(
                 guild_id,
                 706,
                 identity=identity,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
                 operation=apply_roles,
             )
         )
@@ -1274,6 +1417,7 @@ async def test_guarded_role_apply_serializes_admin_deletion_cleanup(
             guild_id,
             706,
             identity=identity,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
             operation=blocked_operation,
         )
         assert not blocked

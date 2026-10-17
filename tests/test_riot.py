@@ -1,7 +1,10 @@
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiohttp import ClientTimeout, web
+from aiohttp.test_utils import TestServer
 from pulsefire.invocation import Invocation
 
 from moon_poro import riot
@@ -187,7 +190,7 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
     breaker = RiotCircuitBreaker()
     auth_breaker = RiotAuthBreaker()
     monitor = RiotAPIMonitor()
-    monkeypatch.setattr(riot, "RiotAPIClient", client_class)
+    monkeypatch.setattr(riot, "_BoundedRiotAPIClient", client_class)
     monkeypatch.setattr(riot, "json_response_middleware", Mock(return_value=json_middleware))
     monkeypatch.setattr(riot, "http_error_middleware", Mock(return_value=http_error))
     monkeypatch.setattr(riot, "riot_circuit_breaker_middleware", breaker_factory)
@@ -294,3 +297,70 @@ async def test_riot_api_call_does_not_retry_client_error() -> None:
         await riot_api_call(operation)
 
     operation.assert_awaited_once_with()
+
+
+async def test_riot_client_bounds_transport_and_closes_its_session() -> None:
+    client = riot.create_riot_api_client("test-only")
+    async with client:
+        session = client.session
+        assert session is not None
+        assert session.timeout.total == 15
+        assert session.timeout.connect == 5
+        assert session.timeout.sock_read == 10
+        with pytest.raises(RuntimeError, match="already open"):
+            await client.__aenter__()
+    assert session.closed
+    assert client.session is None
+
+
+async def test_riot_client_stalled_response_exhausts_bounded_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    release = asyncio.Event()
+
+    async def stalled(_request: web.Request) -> web.Response:
+        nonlocal attempts
+        attempts += 1
+        await release.wait()
+        return web.json_response([])
+
+    app = web.Application()
+    app.router.add_get("/stall", stalled)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setattr(riot, "RIOT_HTTP_TIMEOUT", ClientTimeout(total=0.03))
+    retry_sleeps: list[float] = []
+    original_sleep = asyncio.sleep
+    limiter_time = [1_000_000.0]
+    monkeypatch.setattr("pulsefire.ratelimiters.time.time", lambda: limiter_time[0])
+
+    async def fast_backoff(delay: float) -> None:
+        retry_sleeps.append(delay)
+        limiter_time[0] += delay
+        await original_sleep(0)
+
+    monkeypatch.setattr("pulsefire.middlewares.asyncio.sleep", fast_backoff)
+    try:
+        async with riot.create_riot_api_client("test-only") as client:
+            with pytest.raises(RiotAPIUnavailable):
+                await asyncio.wait_for(
+                    riot_api_call(
+                        lambda: client.middleware_begin(
+                            Invocation(
+                                "GET",
+                                str(server.make_url("/stall")),
+                                {"region": "EUN1"},
+                                session=client.session,
+                            )
+                        )
+                    ),
+                    timeout=2,
+                )
+        assert attempts == 4
+        # The real limiter also waits for its bounded header-discovery lease
+        # after a transport timeout; do not bypass it to exercise retry timing.
+        assert [delay for delay in retry_sleeps if delay >= 1] == [2, 4, 8]
+    finally:
+        release.set()
+        await server.close()

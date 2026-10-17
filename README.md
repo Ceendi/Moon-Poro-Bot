@@ -74,7 +74,7 @@ SHA-256 checksum. Daily backups use the same procedure through
 `moon-poro-prod-backup.timer`. Daily backup pairs remain for 90 days in
 `/var/backups/moon-poro-prod/daily`; cleanup runs only after a new dump and checksum have been
 verified. Backups made before deployments remain in `/var/backups/moon-poro-prod/pre-deploy` and
-are never deleted automatically.
+are also retained for 90 days. Both directories are pruned only after a new verified backup.
 
 ## Development
 

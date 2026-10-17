@@ -7,8 +7,9 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast, overload
+from typing import Any, Self, cast, overload
 
+import aiohttp
 import discord
 from pulsefire.clients import RiotAPIClient
 from pulsefire.invocation import Invocation
@@ -27,6 +28,7 @@ from moon_poro.settings import Settings
 logger = logging.getLogger("moon_poro.riot")
 
 DEFAULT_RETRY_AFTER_SECONDS = 1.0
+RIOT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
 
 SERVER_TRANSLATION = {"EUN1": "EUNE", "EUW1": "EUW", "NA1": "NA"}
 SERVERS = {"eune": "EUN1", "euw": "EUW1", "na": "NA1"}
@@ -302,6 +304,18 @@ def riot_auth_breaker_middleware(auth_breaker: RiotAuthBreaker) -> Middleware:
     return constructor
 
 
+class _BoundedRiotAPIClient(RiotAPIClient):  # type: ignore[misc]  # Pulsefire has no typed client API.
+    """Bound transport stalls, not the rate limiter or Retry-After wait."""
+
+    session: aiohttp.ClientSession | None
+
+    async def __aenter__(self) -> Self:
+        if self.session is not None:
+            raise RuntimeError("Riot client is already open")
+        self.session = aiohttp.ClientSession(timeout=RIOT_HTTP_TIMEOUT)
+        return self
+
+
 def create_riot_api_client(
     api_token: str,
     *,
@@ -312,7 +326,7 @@ def create_riot_api_client(
     shared_breaker = circuit_breaker or RiotCircuitBreaker()
     shared_auth_breaker = auth_breaker or RiotAuthBreaker()
     shared_monitor = monitor or RiotAPIMonitor()
-    return RiotAPIClient(
+    return _BoundedRiotAPIClient(
         default_headers={"X-Riot-Token": api_token},
         middlewares=[
             json_response_middleware(),

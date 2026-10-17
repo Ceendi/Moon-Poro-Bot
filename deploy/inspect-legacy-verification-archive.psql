@@ -1,0 +1,23 @@
+-- Read-only report; requires psql -v guild_id=THE_DISCORD_GUILD_ID.
+-- Does not print account identifiers and never deletes or changes data.
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT current_database() AS database_name;
+SELECT to_regclass('public.legacy_zweryfikowani') IS NOT NULL AS archive_exists \gset
+\if :archive_exists
+SELECT
+    count(*) AS archive_rows,
+    count(*) FILTER (WHERE archive.puuid IS NOT NULL) AS rows_with_riot_identifier,
+    count(*) FILTER (WHERE current_link.discord_user_id IS NULL) AS rows_without_current_link,
+    count(*) FILTER (
+        WHERE current_link.discord_user_id IS NOT NULL
+          AND archive.puuid IS DISTINCT FROM current_link.puuid
+    ) AS rows_with_different_current_account
+FROM public.legacy_zweryfikowani AS archive
+LEFT JOIN public.verification_links AS current_link
+    ON current_link.guild_id = :'guild_id'::bigint
+   AND current_link.discord_user_id = archive.id;
+\else
+\echo No legacy verification archive exists in this database.
+\endif
+COMMIT;

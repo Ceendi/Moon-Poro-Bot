@@ -15,7 +15,8 @@ class FakeRole:
 
 class FakeMember:
     def __init__(self, *, roles_: list[FakeRole] | None = None) -> None:
-        self.guild = SimpleNamespace()
+        self.id = 42
+        self.guild = SimpleNamespace(id=7, fetch_member=AsyncMock(return_value=self))
         self.roles = roles_ or []
         self.add_roles = AsyncMock()
         self.remove_roles = AsyncMock()
@@ -102,7 +103,9 @@ async def test_toggle_role_button_adds_configured_role(
     await button.callback(interaction)
 
     member.add_roles.assert_awaited_once_with(selected, reason="Samodzielne nadanie roli")
-    update_member.assert_awaited_once_with(bot, member)
+    update_member.assert_awaited_once()
+    assert update_member.await_args.args[1].member is member
+    assert selected in update_member.await_args.args[1].roles
     assert "Dodano" in interaction.followup.send.await_args.args[0]
 
 

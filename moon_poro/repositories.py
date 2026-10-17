@@ -67,6 +67,10 @@ class VerificationDeletionProcessStatus(StrEnum):
     NOT_REQUESTED = "NOT_REQUESTED"
 
 
+class VerificationSnapshotChanged(RuntimeError):
+    """The link is current, but its cached rank snapshot has been replaced."""
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationLinkIdentity:
     puuid: str | None
@@ -693,10 +697,7 @@ class VerificationRepository:
                 expected_created_at=expected_created_at,
             ):
                 return False
-            if (
-                expected_rank_last_checked_at is not None
-                and link.rank_last_checked_at != expected_rank_last_checked_at
-            ):
+            if not timestamps_match(link.rank_last_checked_at, expected_rank_last_checked_at):
                 return False
             link.rank_role_sync_pending = False
             link.rank_role_sync_claimed_at = None
@@ -1018,8 +1019,9 @@ class VerificationRepository:
         *,
         identity: VerificationLinkIdentity,
         operation: Callable[[], Awaitable[None]],
+        expected_rank_last_checked_at: datetime | None = None,
     ) -> bool:
-        """Apply Discord roles only while the observed link is still active.
+        """Apply roles only while the observed link and rank snapshot are current.
 
         ``operation`` must perform Discord I/O only; calling back into a repository
         here would risk a lock-order deadlock while this link row is locked.
@@ -1037,6 +1039,8 @@ class VerificationRepository:
                 or not _strict_link_identity_matches(link, identity)
             ):
                 return False
+            if not timestamps_match(link.rank_last_checked_at, expected_rank_last_checked_at):
+                raise VerificationSnapshotChanged("Cached verification rank snapshot changed")
             await operation()
             return True
 

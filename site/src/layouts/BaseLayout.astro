@@ -23,7 +23,9 @@ const nav = isEnglish
       ["Prywatność", "/privacy/"],
       ["Warunki", "/terms/"],
     ];
-const languageHref = isEnglish ? canonicalPath.replace(/^\/en/, "") || "/" : `/en${canonicalPath}`;
+const languageHref = canonicalPath === "/404/" || canonicalPath === "/404"
+  ? "/en/"
+  : isEnglish ? canonicalPath.replace(/^\/en/, "") || "/" : `/en${canonicalPath}`;
 const canonical = new URL(canonicalPath, siteConfig.siteUrl);
 const image = new URL("/moon-poro.png", siteConfig.siteUrl);
 const fullTitle = `${title} · Moon Poro`;

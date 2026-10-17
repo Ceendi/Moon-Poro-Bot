@@ -155,6 +155,11 @@ class VerificationSession(Base):
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     start_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     oauth_state_hash: Mapped[str | None] = mapped_column(String(64))
+    browser_binding_hash: Mapped[str | None] = mapped_column(String(64))
+    verification_method: Mapped[str] = mapped_column(
+        String(32), default="RSO", server_default="RSO", nullable=False
+    )
+    audit_pending_channel_id: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     platform: Mapped[str | None] = mapped_column(String(10))
     puuid: Mapped[str | None] = mapped_column(String(255))

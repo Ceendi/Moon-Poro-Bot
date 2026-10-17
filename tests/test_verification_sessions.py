@@ -17,6 +17,7 @@ from moon_poro.verification_sessions import (
     CreatedVerificationSession,
     LinkReservationResult,
     SessionAlreadyUsed,
+    SessionBrowserMismatch,
     SessionExpired,
     VerificationSessionRepository,
     hash_secret,
@@ -43,9 +44,11 @@ async def authorize_session(
     state: str,
 ) -> tuple[CreatedVerificationSession, VerificationSession]:
     created = await repository.create(guild_id=guild_id, user_id=user_id, ttl_seconds=600)
-    started = await repository.begin_oauth(token=created.token, state=state)
+    started = await repository.begin_oauth(
+        token=created.token, state=state, browser_token="test-browser"
+    )
     assert started.oauth_state_hash == hash_secret(state)
-    return created, await repository.claim_callback(state)
+    return created, await repository.claim_callback(state, browser_token="test-browser")
 
 
 async def test_complete_rso_lifecycle(
@@ -86,6 +89,105 @@ async def test_complete_rso_lifecycle(
     assert link.riot_tag_line == "EUNE"
     assert link.message_id == 987
     assert link.audit_channel_id == 654
+
+
+async def test_legacy_session_cannot_enter_oauth(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(
+        guild_id=123, user_id=456, ttl_seconds=120, method="PROFILE_ICON"
+    )
+    with pytest.raises(SessionAlreadyUsed):
+        await session_repository.begin_oauth(
+            token=created.token, state="state", browser_token="browser"
+        )
+    record = await session_repository.get_by_start_token(created.token)
+    assert record is not None
+    # Even an accidentally stored OAuth state cannot authorize an icon session.
+    async with session_repository._sessions.begin() as session:
+        stored = await session.get(VerificationSession, record.id)
+        assert stored is not None
+        stored.oauth_state_hash = hash_secret("state")
+        stored.browser_binding_hash = hash_secret("browser")
+        stored.status = "AWAITING_RIOT"
+    with pytest.raises(SessionAlreadyUsed):
+        await session_repository.claim_callback("state", browser_token="browser")
+
+
+async def test_legacy_latest_session_and_hard_ttl_survive_repository_restart(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    old = await session_repository.create(
+        guild_id=123, user_id=456, ttl_seconds=120, method="PROFILE_ICON"
+    )
+    latest = await session_repository.create(
+        guild_id=123, user_id=456, ttl_seconds=120, method="PROFILE_ICON"
+    )
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    old_record = await restarted.get_by_start_token(old.token)
+    latest_record = await restarted.get_by_start_token(latest.token)
+    assert old_record is not None and latest_record is not None
+    with pytest.raises(SessionAlreadyUsed):
+        await restarted.reserve_link(
+            session_id=old_record.id,
+            platform="EUN1",
+            puuid="puuid",
+            game_name="Moon",
+            tag_line="EUNE",
+        )
+    async with restarted._sessions.begin() as session:
+        stored = await session.get(VerificationSession, latest_record.id)
+        assert stored is not None
+        stored.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(SessionExpired):
+        await restarted.reserve_link(
+            session_id=latest_record.id,
+            platform="EUN1",
+            puuid="puuid",
+            game_name="Moon",
+            tag_line="EUNE",
+        )
+    assert await restarted.claim_pending(method="PROFILE_ICON") == []
+
+
+async def test_legacy_pending_work_is_separate_from_rso_after_restart(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(
+        guild_id=123, user_id=456, ttl_seconds=120, method="PROFILE_ICON"
+    )
+    record = await session_repository.get_by_start_token(created.token)
+    assert record is not None
+    assert (
+        await session_repository.reserve_link(
+            session_id=record.id, platform="EUN1", puuid="puuid", game_name="Moon", tag_line="EUNE"
+        )
+        == LinkReservationResult.RESERVED
+    )
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    assert await restarted.claim_pending() == []
+    claimed = await restarted.claim_pending(method="PROFILE_ICON")
+    assert [item.id for item in claimed] == [record.id]
+    async with restarted._sessions() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None and link.verification_method == "PROFILE_ICON"
+
+
+async def test_explicit_all_methods_claim_completes_legacy_after_switch_to_rso(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created = await session_repository.create(
+        guild_id=123, user_id=456, ttl_seconds=120, method="PROFILE_ICON"
+    )
+    record = await session_repository.get_by_start_token(created.token)
+    assert record is not None
+    # An issued icon challenge alone is never work for either completion worker.
+    assert await session_repository.claim_pending(method=None) == []
+    await session_repository.reserve_link(
+        session_id=record.id, platform="EUN1", puuid="puuid", game_name="Moon", tag_line="EUNE"
+    )
+    claimed = await session_repository.claim_pending(method=None)
+    assert [item.id for item in claimed] == [record.id]
 
 
 async def test_new_session_supersedes_previous_link(
@@ -148,11 +250,13 @@ async def test_oauth_state_is_one_time(
     session_repository: VerificationSessionRepository,
 ) -> None:
     created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
-    await session_repository.begin_oauth(token=created.token, state="one-time-state")
-    await session_repository.claim_callback("one-time-state")
+    await session_repository.begin_oauth(
+        token=created.token, state="one-time-state", browser_token="test-browser"
+    )
+    await session_repository.claim_callback("one-time-state", browser_token="test-browser")
 
     with pytest.raises(SessionAlreadyUsed):
-        await session_repository.claim_callback("one-time-state")
+        await session_repository.claim_callback("one-time-state", browser_token="test-browser")
 
 
 async def test_expired_session_cannot_start(
@@ -161,7 +265,9 @@ async def test_expired_session_cannot_start(
     created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=-1)
 
     with pytest.raises(SessionExpired):
-        await session_repository.begin_oauth(token=created.token, state="expired-state")
+        await session_repository.begin_oauth(
+            token=created.token, state="expired-state", browser_token="test-browser"
+        )
 
     expired, purged = await session_repository.expire_and_purge(retention_days=7)
     assert (expired, purged) == (1, 0)
@@ -204,6 +310,12 @@ async def test_same_riot_account_cannot_link_to_two_discord_users(
 async def test_existing_discord_link_rejects_rso_reservation(
     session_repository: VerificationSessionRepository,
 ) -> None:
+    _, callback = await authorize_session(
+        session_repository,
+        guild_id=123,
+        user_id=456,
+        state="existing-discord",
+    )
     async with session_repository._sessions.begin() as session:
         session.add(
             VerificationLink(
@@ -216,13 +328,6 @@ async def test_existing_discord_link_rejects_rso_reservation(
                 verification_method="PROFILE_ICON",
             )
         )
-    _, callback = await authorize_session(
-        session_repository,
-        guild_id=123,
-        user_id=456,
-        state="existing-discord",
-    )
-
     result = await session_repository.reserve_link(
         session_id=callback.id,
         platform="EUW1",
@@ -232,6 +337,58 @@ async def test_existing_discord_link_rejects_rso_reservation(
     )
 
     assert result == LinkReservationResult.DISCORD_ALREADY_LINKED
+
+
+@pytest.mark.parametrize("browser_token", ["", "another-browser"])
+async def test_foreign_browser_does_not_consume_state(
+    session_repository: VerificationSessionRepository, browser_token: str
+) -> None:
+    created = await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    await session_repository.begin_oauth(
+        token=created.token, state="bound-state", browser_token="correct-browser"
+    )
+    with pytest.raises(SessionBrowserMismatch):
+        await session_repository.claim_callback("bound-state", browser_token=browser_token)
+    record = await session_repository.get_by_start_token(created.token)
+    assert record is not None and record.status == "AWAITING_RIOT"
+    assert record.browser_binding_hash == hash_secret("correct-browser")
+    await session_repository.claim_callback("bound-state", browser_token="correct-browser")
+
+
+@pytest.mark.parametrize("claim_discord", [False, True])
+async def test_new_start_cannot_cancel_reserved_completion(
+    session_repository: VerificationSessionRepository, claim_discord: bool
+) -> None:
+    created, callback = await authorize_session(
+        session_repository, guild_id=123, user_id=456, state="reserved-state"
+    )
+    await session_repository.reserve_link(
+        session_id=callback.id,
+        platform="EUN1",
+        puuid="reserved-puuid",
+        game_name="Moon",
+        tag_line="EUNE",
+    )
+    if claim_discord:
+        await session_repository.claim_pending()
+    with pytest.raises(SessionAlreadyUsed):
+        await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    record = await session_repository.get_by_start_token(created.token)
+    expected = "APPLYING_DISCORD" if claim_discord else "VERIFIED_PENDING_DISCORD"
+    assert record is not None and record.status == expected
+
+
+async def test_unbound_session_from_before_migration_fails_closed(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    await session_repository.create(guild_id=123, user_id=456, ttl_seconds=600)
+    async with session_repository._sessions.begin() as session:
+        record = await session.get(VerificationSession, 1)
+        assert record is not None
+        record.oauth_state_hash = hash_secret("old-state")
+        record.status = "AWAITING_RIOT"
+    with pytest.raises(SessionBrowserMismatch):
+        await session_repository.claim_callback("old-state", browser_token="any-browser")
 
 
 async def test_cancellation_wins_race_with_discord_completion(

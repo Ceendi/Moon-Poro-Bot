@@ -9,6 +9,7 @@ const email = siteConfig.contactEmail;
   <section class="doc">
     <h1>Polityka prywatności</h1>
     <p class="updated">Aktualizacja: {siteConfig.lastUpdated}</p>
+    <p>Publiczna weryfikacja nadal korzysta ze zmiany ikony profilu League of Legends. Dostęp do Riot Sign On został zatwierdzony; nowy sposób logowania przechodzi testy lokalne i nie został jeszcze publicznie uruchomiony.</p>
 
     <div class="summary">
       <h2>W skrócie</h2>
@@ -29,12 +30,13 @@ const email = siteConfig.contactEmail;
       <h2>2. Jakie dane przetwarzamy</h2>
       <ul>
         <li><strong>Discord:</strong> identyfikator Twojego konta i serwera oraz role nadawane przez bota.</li>
-        <li><strong>Konto Riot:</strong> PUUID (stały identyfikator konta Riot), Riot ID, region i ranga Solo/Duo (dywizja, LP, wygrane, przegrane, nieaktywność), data i sposób weryfikacji oraz terminy odświeżania rangi.</li>
-        <li><strong>Logowanie przez Riot:</strong> od Riot dostajemy PUUID, Riot ID i region. Nie dostajemy hasła ani adresu e-mail. Jednorazowy klucz dostępu od Riot wykorzystujemy tylko przez chwilę i go nie zapisujemy. Samo logowanie zapisujemy jako krótką sesję: jej status, czas i ewentualny kod błędu.</li>
+        <li><strong>Konto Riot:</strong> PUUID (stały identyfikator konta Riot), Riot ID, region i ranga Solo/Duo (dywizja, LP, wygrane, przegrane, nieaktywność), data i sposób weryfikacji oraz terminy i stan odświeżania rangi. Podczas weryfikacji ikoną odczytujemy też ikonę profilu, ale nie zapisujemy jej w aktywnym powiązaniu.</li>
+        <li><strong>Sesje weryfikacji:</strong> przygotowana aktualizacja zapisuje stan, czas i ewentualny kod błędu sesji dla obu metod: ikony profilu i Riot Sign On. Pozwala to dokończyć nadawanie ról i obsługę audytu po przerwaniu operacji.</li>
+        <li><strong>Logowanie przez Riot po uruchomieniu RSO:</strong> od Riot otrzymamy PUUID, Riot ID i region, bez hasła ani adresu e-mail. Krótkotrwały token dostępu będzie używany tylko w pamięci procesu i odrzucany po odczycie danych. Nie prosimy o dostęp offline ani nie zapisujemy tokenu odświeżania.</li>
         <li><strong>Moderacja:</strong> ostrzeżenia (kogo dotyczą, kto je dał, powód, poziom, daty), miesięczne statystyki moderatorów oraz wiadomości na kanałach moderacji o weryfikacjach i o osobach, które wyszły z serwera, zostały z niego usunięte albo zbanowane.</li>
         <li><strong>Ochrona przed multikontami:</strong> jeśli administrator ją włączy, bot sprawdza przy dołączaniu, ile dni ma konto Discord, i banuje zbyt nowe konta.</li>
         <li><strong>Wyszukiwania administratorów:</strong> gdy administrator sprawdza, kto jest połączony z jakim kontem, zapisujemy, kto sprawdzał, kogo, kiedy i z jakiego powodu.</li>
-        <li><strong>Adres IP</strong> na stronie logowania jest trzymany przez chwilę w pamięci serwera, żeby ograniczyć liczbę prób. Nie zapisujemy go.</li>
+        <li><strong>Adres IP</strong> po uruchomieniu strony logowania RSO będzie trzymany przez chwilę w pamięci serwera, żeby ograniczyć liczbę prób. Mechanizm ten nie zapisuje go w bazie.</li>
         <li><strong>Logi techniczne</strong>, czyli zapisy działania serwera, potrzebne do naprawiania błędów.</li>
       </ul>
       <p>Dane pochodzą od Ciebie, z Discorda i bezpośrednio od Riot Games. Bez identyfikatorów kont Discord i Riot nie da się ich połączyć.</p>
@@ -60,7 +62,7 @@ const email = siteConfig.contactEmail;
       <h2>5. Jak długo</h2>
       <ul>
         <li><strong>Powiązanie i ranga:</strong> dopóki go nie usuniesz albo nie usunie go administrator. Wyjście z serwera go nie usuwa, a po powrocie bot przywraca role.</li>
-        <li><strong>Sesja logowania przez Riot:</strong> link wygasa po kilku minutach, a dane sesji usuwamy po 7 dniach.</li>
+        <li><strong>Sesje w przygotowanej aktualizacji:</strong> wyzwanie ikoną jest standardowo ważne 2 minuty, a link RSO 10 minut. Zakończone lub wygasłe sesje obu metod są usuwane po 7 dniach przy kolejnym dobowym czyszczeniu. Zadania potrzebne do dokończenia nadawania ról lub obsługi audytu pozostają do ich wykonania.</li>
         <li><strong>Rejestr wyszukiwań administratorów:</strong> 90 dni.</li>
         <li><strong>Ostrzeżenia, statystyki i wiadomości moderacyjne:</strong> tak długo, jak są potrzebne do moderacji serwera.</li>
         <li><strong>Kopie zapasowe bazy:</strong> do 90 dni. Usunięte dane mogą do tego czasu zostać w kopii, której używamy tylko do odtworzenia po awarii.</li>
@@ -70,7 +72,7 @@ const email = siteConfig.contactEmail;
 
     <section>
       <h2>6. Ciasteczka</h2>
-      <p>Używamy tylko jednego, niezbędnego ciasteczka: <code>moon_poro_rso</code>. Ustawia je strona logowania przez Riot, żeby po powrocie z Riot pokazać Ci wynik. Wygasa razem z linkiem, po kilku minutach. Pozostałe strony nie używają ciasteczek.</p>
+      <p>Statyczne strony nie ustawiają ciasteczek. Po publicznym uruchomieniu dynamiczna część RSO będzie ustawiać dwa niezbędne ciasteczka: <code>moon_poro_rso</code> do pokazania wyniku sesji oraz <code>moon_poro_rso_browser</code> do potwierdzenia, że logowanie kończy się w przeglądarce, w której je rozpoczęto. Oba mają ustawienia HttpOnly, Secure i SameSite=Lax oraz wygasają po 10 minutach od ustawienia lub odnowienia.</p>
     </section>
 
     <section>

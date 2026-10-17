@@ -20,6 +20,7 @@ from moon_poro.account_profile import (
     build_account_profile,
 )
 from moon_poro.bot import MoonPoroBot
+from moon_poro.member_role_lock import member_role_lock
 from moon_poro.models import VerificationLink, VerificationSession
 from moon_poro.permissions import administrator_only, is_administrator
 from moon_poro.rank_refresh import (
@@ -35,6 +36,7 @@ from moon_poro.repositories import (
     VerificationDeletionProcessStatus,
     VerificationDeletionRequestStatus,
     VerificationLinkIdentity,
+    VerificationSnapshotChanged,
 )
 from moon_poro.riot import (
     API_SERVERS,
@@ -47,6 +49,7 @@ from moon_poro.riot import (
 )
 from moon_poro.roles import find_role, member_has_role, member_roles_named
 from moon_poro.time_utils import timestamps_match
+from moon_poro.verification_sessions import SessionAlreadyUsed
 
 logger = logging.getLogger("moon_poro.verification")
 
@@ -178,6 +181,9 @@ async def _apply_verified_roles(
     platform: str,
     leagues: LeagueEntries,
 ) -> None:
+    # Gateway and interaction members are snapshots. The caller serializes role
+    # writes before taking the link row lock; fetch only after those guards.
+    member = await member.guild.fetch_member(member.id)
     settings = bot.settings
     rank_role = get_discord_rank_role(member.guild, get_rank_from_leagues(leagues), settings)
     server_name = SERVER_TRANSLATION[platform]
@@ -186,6 +192,9 @@ async def _apply_verified_roles(
     member_role = find_role(member.guild, settings.member_role_name, settings)
 
     managed_names = set(settings.lol_ranks + settings.lol_servers)
+    no_lol_role_name = getattr(settings, "no_lol_role_name", None)
+    if no_lol_role_name:
+        managed_names.add(no_lol_role_name)
     desired = {role for role in (rank_role, server_role) if role is not None}
     current_managed = set(member_roles_named(member, managed_names, settings))
     to_remove = current_managed - desired
@@ -205,13 +214,21 @@ async def _run_active_link_role_update(
     bot: MoonPoroBot,
     link: VerificationLink,
     operation: Callable[[], Awaitable[None]],
+    *,
+    expected_rank_last_checked_at: datetime | None = None,
 ) -> bool:
-    return await bot.verifications.run_verification_role_update_with_identity(
-        link.guild_id,
-        link.discord_user_id,
-        identity=VerificationLinkIdentity.from_link(link),
-        operation=operation,
-    )
+    async with member_role_lock(link.guild_id, link.discord_user_id):
+        return await bot.verifications.run_verification_role_update_with_identity(
+            link.guild_id,
+            link.discord_user_id,
+            identity=VerificationLinkIdentity.from_link(link),
+            operation=operation,
+            expected_rank_last_checked_at=(
+                expected_rank_last_checked_at
+                if expected_rank_last_checked_at is not None
+                else getattr(link, "rank_last_checked_at", None)
+            ),
+        )
 
 
 async def _run_pending_deletion_role_cleanup(
@@ -222,14 +239,15 @@ async def _run_pending_deletion_role_cleanup(
     requested_at = link.deletion_requested_at
     if requested_at is None:
         return False
-    return await bot.verifications.run_verification_deletion_role_cleanup_with_identity(
-        link.guild_id,
-        link.discord_user_id,
-        identity=VerificationLinkIdentity.from_link(link),
-        expected_requested_at=requested_at,
-        expected_remove_rank_region_roles=link.deletion_remove_rank_region_roles,
-        operation=operation,
-    )
+    async with member_role_lock(link.guild_id, link.discord_user_id):
+        return await bot.verifications.run_verification_deletion_role_cleanup_with_identity(
+            link.guild_id,
+            link.discord_user_id,
+            identity=VerificationLinkIdentity.from_link(link),
+            expected_requested_at=requested_at,
+            expected_remove_rank_region_roles=link.deletion_remove_rank_region_roles,
+            operation=operation,
+        )
 
 
 async def _remove_verified_roles(bot: MoonPoroBot, member: discord.Member, *, reason: str) -> None:
@@ -252,7 +270,10 @@ async def _remove_roles_for_pending_deletion(
     link: VerificationLink,
     *,
     reason: str,
+    refresh_member: bool = True,
 ) -> None:
+    if refresh_member:
+        member = await member.guild.fetch_member(member.id)
     if link.deletion_remove_rank_region_roles:
         await _remove_verified_roles(bot, member, reason=reason)
     else:
@@ -373,6 +394,31 @@ async def _ensure_active_link_roles(
     member: discord.Member,
     link: VerificationLink,
 ) -> bool:
+    identity = VerificationLinkIdentity.from_link(link)
+    for _attempt in range(4):
+        try:
+            return await _ensure_active_link_roles_once(cog, member, link)
+        except VerificationSnapshotChanged:
+            current = await cog.bot.verifications.get_by_user(member.guild.id, member.id)
+            if (
+                current is None
+                or current.deletion_requested_at is not None
+                or current.puuid != identity.puuid
+                or current.platform != identity.platform
+                or not timestamps_match(current.created_at, identity.created_at)
+            ):
+                return False
+            link = current
+    # Every newer snapshot has its own durable role-sync intent. Leave that
+    # intent untouched if an unusually busy account exhausts this local retry.
+    return False
+
+
+async def _ensure_active_link_roles_once(
+    cog: VerificationCog,
+    member: discord.Member,
+    link: VerificationLink,
+) -> bool:
     cached = _cached_rank_leagues(link)
     if cached is None:
         await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
@@ -460,7 +506,28 @@ async def _remove_verified_marker_durably(
             current = await bot.verifications.get_by_user(guild_id, member.id)
             continue
         try:
-            await _remove_verified_marker(bot, member, reason=reason)
+            async with member_role_lock(guild_id, member.id):
+                try:
+                    fresh_member = await member.guild.fetch_member(member.id)
+                except discord.NotFound:
+                    fresh_member = None
+                # The observed link and Member can predate the writer that held
+                # this lock. Recheck after waiting and fetching; never strip the
+                # marker of an active replacement. Restore it outside this lock
+                # because the guarded role writer acquires the same lock.
+                current = await bot.verifications.get_by_user(guild_id, member.id)
+                if current is not None and current.deletion_requested_at is None:
+                    continue
+                if fresh_member is not None:
+                    await _remove_verified_marker(bot, fresh_member, reason=reason)
+                current = await bot.verifications.get_by_user(guild_id, member.id)
+                if current is None or current.deletion_requested_at is not None:
+                    await bot.verifications.acknowledge_verified_marker_cleanup(
+                        guild_id,
+                        member.id,
+                        expected_generation=expected_generation,
+                    )
+                    return
         except discord.HTTPException:
             delay = await bot.verifications.retry_verified_marker_cleanup(
                 guild_id,
@@ -472,14 +539,6 @@ async def _remove_verified_marker_durably(
                 "Could not remove obsolete Verified marker for %s; retrying in %s seconds",
                 member.id,
                 delay,
-            )
-            return
-        current = await bot.verifications.get_by_user(guild_id, member.id)
-        if current is None or current.deletion_requested_at is not None:
-            await bot.verifications.acknowledge_verified_marker_cleanup(
-                guild_id,
-                member.id,
-                expected_generation=expected_generation,
             )
             return
     await bot.verifications.retry_verified_marker_cleanup(
@@ -561,6 +620,7 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
         acknowledged = await bot.verifications.acknowledge_rank_role_sync(
             guild.id,
             link.discord_user_id,
+            expected_rank_last_checked_at=link.rank_last_checked_at,
             expected_puuid=link.puuid,
             expected_platform=link.platform,
             expected_created_at=link.created_at,
@@ -574,6 +634,9 @@ async def _retry_next_rank_role_sync(cog: VerificationCog) -> None:
             link,
             lambda: cog.apply_verified_roles(member, link.platform, leagues),
         )
+    except VerificationSnapshotChanged:
+        # The newer snapshot owns its own synchronization intent and ACK.
+        return
     except discord.HTTPException:
         delay = await bot.verifications.retry_rank_role_sync(
             guild.id,
@@ -616,19 +679,18 @@ async def _retry_next_rso_audit_cleanup(cog: VerificationCog) -> None:
         return
     record = records[0]
     guild = bot.get_guild(record.guild_id)
-    channel = guild.get_channel(record.channel_id) if guild is not None else None
-    if not isinstance(channel, discord.abc.Messageable):
-        await bot.verification_sessions.retry_audit_cleanup(
-            record.id,
-            message_id=record.message_id,
-            base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
-        )
-        return
+    channel: discord.abc.GuildChannel | discord.abc.PrivateChannel | discord.Thread | None = (
+        guild.get_channel(record.channel_id) if guild is not None else None
+    )
     try:
+        if channel is None:
+            channel = await bot.fetch_channel(record.channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            raise RuntimeError("Verification audit cleanup channel is unavailable")
         await channel.get_partial_message(record.message_id).delete()
     except discord.NotFound:
         pass
-    except discord.HTTPException:
+    except (discord.HTTPException, RuntimeError):
         delay = await bot.verification_sessions.retry_audit_cleanup(
             record.id,
             message_id=record.message_id,
@@ -756,7 +818,10 @@ async def _refresh_next_verified(cog: VerificationCog) -> None:
             bot,
             link,
             lambda: cog.apply_verified_roles(member, link.platform, cached_leagues),
+            expected_rank_last_checked_at=checked_at,
         )
+    except VerificationSnapshotChanged:
+        return
     except discord.HTTPException:
         await bot.verifications.retry_rank_role_sync(
             guild.id,
@@ -899,6 +964,9 @@ async def _restore_cached_roles_on_join(cog: VerificationCog, member: discord.Me
             link,
             lambda: cog.apply_verified_roles(member, link.platform, leagues),
         )
+    except VerificationSnapshotChanged:
+        await _ensure_active_link_roles(cog, member, link)
+        return
     except discord.HTTPException:
         logger.exception("Could not restore cached verification roles for %s", member.id)
     else:
@@ -966,6 +1034,9 @@ async def _reconcile_cached_role_change(
                 link,
                 lambda: cog.apply_verified_roles(after, link.platform, leagues),
             )
+        except VerificationSnapshotChanged:
+            await _ensure_active_link_roles(cog, after, link)
+            return
         except discord.HTTPException:
             logger.exception("Could not restore cached verification roles for %s", after.id)
         else:
@@ -1010,6 +1081,9 @@ async def _reconcile_cached_role_change(
             link,
             restore_previous_roles,
         )
+    except VerificationSnapshotChanged:
+        await _ensure_active_link_roles(cog, after, link)
+        return
     except discord.HTTPException:
         logger.exception("Could not restore previous verification roles for %s", after.id)
         return
@@ -1098,20 +1172,19 @@ async def _process_requested_verification_deletion(
         if guild is None:
             logger.warning("Verification deletion cannot resolve its guild")
             return False
-        resolved_member = member
-        if resolved_member is None:
-            try:
-                resolved_member = await guild.fetch_member(link.discord_user_id)
-            except discord.NotFound:
-                resolved_member = None
-            except discord.HTTPException:
-                return False
+        try:
+            resolved_member = await guild.fetch_member(link.discord_user_id)
+        except discord.NotFound:
+            resolved_member = None
+        except discord.HTTPException:
+            return False
         if resolved_member is not None:
             try:
                 await _remove_roles_for_pending_deletion(
                     bot,
                     resolved_member,
                     link,
+                    refresh_member=False,
                     reason=(
                         "Administracyjne usunięcie powiązania Riot"
                         if link.deletion_remove_rank_region_roles
@@ -1149,14 +1222,15 @@ async def _process_requested_verification_deletion(
                 return False
         return True
 
-    result = await bot.verifications.process_verification_deletion_with_identity(
-        link.guild_id,
-        link.discord_user_id,
-        identity=identity,
-        expected_claimed_at=claimed_at,
-        base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
-        operation=cleanup_discord,
-    )
+    async with member_role_lock(link.guild_id, link.discord_user_id):
+        result = await bot.verifications.process_verification_deletion_with_identity(
+            link.guild_id,
+            link.discord_user_id,
+            identity=identity,
+            expected_claimed_at=claimed_at,
+            base_delay_seconds=bot.settings.rank_refresh_retry_base_seconds,
+            operation=cleanup_discord,
+        )
     if result.status in {
         VerificationDeletionProcessStatus.DELETED,
         VerificationDeletionProcessStatus.ALREADY_DELETED,
@@ -1888,11 +1962,18 @@ class VerificationStartView(discord.ui.View):
             )
             return
 
-        session = await self.bot.verification_sessions.create(
-            guild_id=interaction.guild.id,
-            user_id=interaction.user.id,
-            ttl_seconds=self.bot.settings.rso_session_ttl_seconds,
-        )
+        try:
+            session = await self.bot.verification_sessions.create(
+                guild_id=interaction.guild.id,
+                user_id=interaction.user.id,
+                ttl_seconds=self.bot.settings.rso_session_ttl_seconds,
+            )
+        except SessionAlreadyUsed:
+            await interaction.response.send_message(
+                "Łączenie konta już trwa lub zostało zakończone. Sprawdź sekcję „Moje konto”.",
+                ephemeral=True,
+            )
+            return
         verification_url = f"{self.bot.settings.rso_base_url}/verify/start/{session.token}"
         link_view = discord.ui.View(timeout=self.bot.settings.rso_session_ttl_seconds)
         link_view.add_item(
@@ -1996,13 +2077,23 @@ class VerificationCog(commands.Cog):
 
     @tasks.loop(seconds=3, reconnect=True)
     async def complete_rso_verifications(self) -> None:
-        records = await self.bot.verification_sessions.claim_pending(limit=5)
+        # Finish already accepted icon proofs when the server switches to RSO.
+        records = await self.bot.verification_sessions.claim_pending(limit=5, method=None)
         for record in records:
             try:
                 await self._complete_rso_verification(record)
             except Exception:
                 logger.exception("Unexpected RSO completion error for session %s", record.id)
                 await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
+
+    async def _reconcile_rso_audits(self) -> None:
+        reconciliations = await self.bot.verification_sessions.claim_audit_reconciliations(limit=5)
+        for record in reconciliations:
+            try:
+                await self._publish_rso_audit(record)
+            except Exception:
+                logger.exception("Could not reconcile RSO audit for session %s", record.id)
+                await self._retry_rso_completion(record, "DISCORD_AUDIT_UNAVAILABLE")
 
     async def _complete_rso_verification(self, record: VerificationSession) -> None:
         platform = record.platform
@@ -2062,7 +2153,11 @@ class VerificationCog(commands.Cog):
                 self.bot,
                 link,
                 lambda: self.apply_verified_roles(member, platform, role_leagues),
+                expected_rank_last_checked_at=checked_at,
             )
+        except VerificationSnapshotChanged:
+            await self._retry_rso_completion(record, "RANK_SNAPSHOT_CONFLICT")
+            return
         except RiotAPIUnavailable:
             await self._retry_rso_completion(record, "RIOT_API_UNAVAILABLE")
             return
@@ -2097,35 +2192,12 @@ class VerificationCog(commands.Cog):
             expected_created_at=link.created_at,
         )
 
-        audit_message_id: int | None = None
-        channel_id = self.bot.settings.zweryfikowani_channel_id
-        channel = guild.get_channel(channel_id) if channel_id else None
-        if isinstance(channel, discord.abc.Messageable):
-            embed = discord.Embed(title="Zweryfikowane konto Riot", colour=discord.Colour.green())
-            embed.add_field(name="Discord", value=f"<@{member.id}> (`{member.id}`)")
-            embed.add_field(name="Region", value=SERVER_TRANSLATION[record.platform])
-            if record.riot_game_name and record.riot_tag_line:
-                embed.add_field(
-                    name="Riot ID",
-                    value=f"{record.riot_game_name}#{record.riot_tag_line}",
-                    inline=False,
-                )
-            try:
-                audit_message = await channel.send(
-                    embed=embed,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                audit_message_id = audit_message.id
-            except discord.HTTPException:
-                logger.exception("Could not publish RSO audit message for session %s", record.id)
-        else:
-            logger.error("Verification audit channel %s is unavailable", channel_id)
-
-        completed = await self.bot.verification_sessions.complete_discord(
-            record.id,
-            message_id=audit_message_id,
-            channel_id=channel_id if audit_message_id is not None else None,
-        )
+        try:
+            completed = await self._publish_rso_audit(record)
+        except (discord.HTTPException, RuntimeError):
+            logger.warning("RSO audit publication will retry for session %s", record.id)
+            await self._retry_rso_completion(record, "DISCORD_AUDIT_UNAVAILABLE")
+            return
         if not completed:
             current = await self.bot.verifications.get_by_user(
                 record.guild_id,
@@ -2144,8 +2216,96 @@ class VerificationCog(commands.Cog):
                 f"Na serwerze **{guild.name}** zaktualizowano role regionu i rangi."
             )
 
+    async def _publish_rso_audit(self, record: VerificationSession) -> bool:
+        channel_id = record.audit_pending_channel_id or self.bot.settings.zweryfikowani_channel_id
+        if channel_id is None:
+            raise RuntimeError("Verification audit channel is not configured")
+
+        async def reconcile(current: VerificationSession, active: bool) -> list[int]:
+            destination = current.audit_pending_channel_id
+            if destination is None:
+                raise RuntimeError("Missing pending audit destination")
+            channel = self.bot.get_channel(destination)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(destination)
+                except discord.NotFound:
+                    if active:
+                        raise
+                    # A deleted destination cannot contain an orphan audit.
+                    return []
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                raise RuntimeError("Verification audit channel is unavailable")
+            bot_user = self.bot.user
+            if bot_user is None or not self.bot.is_ready():
+                raise RuntimeError("Discord bot is not ready")
+            bot_member = channel.guild.me
+            if bot_member is None:
+                bot_member = await channel.guild.fetch_member(bot_user.id)
+            permissions = channel.permissions_for(bot_member)
+            if not permissions.view_channel or not permissions.read_message_history:
+                # Discord can return an empty history without this permission.
+                # An empty result would lose terminal cleanup intents or send a
+                # duplicate after an interrupted publication.
+                raise RuntimeError("Verification audit history is not readable")
+            profile_icon = current.verification_method == "PROFILE_ICON"
+            marker = (
+                f"Weryfikacja: ikona profilu #{current.id}"
+                if profile_icon
+                else f"Weryfikacja RSO #{current.id}"
+            )
+            message_ids = []
+            # A committed intent without a message ID can mean send succeeded
+            # immediately before a process/DB failure. Never send blindly on retry.
+            try:
+                async for message in channel.history(
+                    limit=None, after=current.created_at - timedelta(minutes=1), oldest_first=True
+                ):
+                    if message.author.id == bot_user.id and any(
+                        embed.footer.text == marker for embed in message.embeds
+                    ):
+                        message_ids.append(message.id)
+            except discord.NotFound:
+                if active:
+                    raise
+                # The channel may disappear after the cache/fetch lookup.
+                return []
+            if message_ids or not active:
+                return message_ids
+            embed = discord.Embed(
+                title=(
+                    "Weryfikacja konta: ikona profilu"
+                    if profile_icon
+                    else "Zweryfikowane konto Riot"
+                ),
+                colour=discord.Colour.green(),
+            )
+            embed.add_field(
+                name="Discord", value=f"<@{current.discord_user_id}> (`{current.discord_user_id}`)"
+            )
+            if current.platform is None:
+                raise RuntimeError("Missing audit platform")
+            embed.add_field(name="Region", value=SERVER_TRANSLATION[current.platform])
+            if current.riot_game_name and current.riot_tag_line:
+                embed.add_field(
+                    name="Riot ID",
+                    value=f"{current.riot_game_name}#{current.riot_tag_line}",
+                    inline=False,
+                )
+            embed.set_footer(text=marker)
+            audit_message = await channel.send(
+                embed=embed,
+                nonce=f"{'icon' if profile_icon else 'rso'}:{current.id}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return [audit_message.id]
+
+        return await self.bot.verification_sessions.publish_audit(
+            record.id, channel_id=channel_id, operation=reconcile
+        )
+
     async def _retry_rso_completion(self, record: VerificationSession, error_code: str) -> None:
-        delay = min(5 * (2 ** max(record.completion_attempts - 1, 0)), 300)
+        delay = min(5 * (2 ** min(max(record.completion_attempts - 1, 0), 6)), 300)
         await self.bot.verification_sessions.retry_discord(
             record.id,
             error_code=error_code,
@@ -2156,6 +2316,7 @@ class VerificationCog(commands.Cog):
     async def refresh_verified(self) -> None:
         try:
             await _retry_next_verified_marker_cleanup(self)
+            await self._reconcile_rso_audits()
             await _retry_next_rso_audit_cleanup(self)
             await _retry_next_verification_deletion(self)
             await _retry_next_rank_role_sync(self)

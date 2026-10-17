@@ -1,5 +1,4 @@
-# The temporary profile-icon flow intentionally parallels the RSO cog so it can
-# be removed cleanly after the RSO rollout without coupling both implementations.
+# The temporary icon proof reuses durable RSO completion and audit reconciliation.
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
@@ -10,39 +9,42 @@ import time
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import discord
 from discord import app_commands
-from discord.ext import commands
-from sqlalchemy.exc import IntegrityError
+from discord.ext import commands, tasks
 
 from moon_poro.bot import MoonPoroBot
 from moon_poro.cogs.verification import (
     VerificationCog,
     _apply_verified_roles,
     _get_leagues,
-    _reconcile_applied_roles,
     _reconcile_cached_role_change,
-    _remove_verified_marker,
+    _record_leagues,
     _request_rank_refresh_from_panel,
     _restore_cached_roles_on_join,
-    _run_active_link_role_update,
     _show_account_profile,
     _show_delete_confirmation,
     _verification_legal_links,
 )
+from moon_poro.models import VerificationSessionStatus
 from moon_poro.permissions import administrator_only
-from moon_poro.rank_refresh import solo_rank_snapshot
 from moon_poro.riot import (
     API_SERVERS,
     SERVER_TRANSLATION,
     RiotAPIUnavailable,
-    get_rank_from_leagues,
     profile_icon_url,
     riot_api_call,
 )
 from moon_poro.roles import member_has_role
+from moon_poro.verification_sessions import (
+    LinkReservationResult,
+    SessionAlreadyUsed,
+    SessionError,
+    as_utc,
+)
 
 logger = logging.getLogger("moon_poro.verification_legacy")
 
@@ -88,6 +90,24 @@ class LegacyVerificationRateLimiter:
         self._clock = clock
         self._user_limits: dict[tuple[str, int], float] = {}
         self._global_requests: deque[float] = deque()
+        self._challenges: dict[tuple[int, int], LegacyIconConfirmationView] = {}
+
+    def register_challenge(self, view: LegacyIconConfirmationView) -> None:
+        now = self._clock()
+        for key, previous in list(self._challenges.items()):
+            if previous.deadline <= now or key == view.challenge_key:
+                previous.stop()
+                del self._challenges[key]
+        # A fixed cap bounds memory even if many users abandon their challenges.
+        while len(self._challenges) >= 1000:
+            key = next(iter(self._challenges))
+            self._challenges.pop(key).stop()
+        self._challenges[view.challenge_key] = view
+
+    def clear_challenges(self) -> None:
+        for view in self._challenges.values():
+            view.stop()
+        self._challenges.clear()
 
     def update_rate_limit(
         self,
@@ -474,6 +494,19 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
         )
         embed.add_field(name="Region", value=SERVER_TRANSLATION[platform])
         embed.set_thumbnail(url=profile_icon_url(icon_id))
+        try:
+            session = await self.bot.verification_sessions.create(
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                ttl_seconds=self.bot.settings.verification_timeout,
+                method="PROFILE_ICON",
+            )
+        except SessionAlreadyUsed:
+            await interaction.followup.send(
+                "Poprzednia weryfikacja jest już finalizowana. Sprawdź „Moje konto”.",
+                ephemeral=True,
+            )
+            return
         view = LegacyIconConfirmationView(
             self.bot,
             self.rate_limiter,
@@ -483,6 +516,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             game_name=str(account.get("gameName", game_name)),
             tag_line=str(account.get("tagLine", tag_line)),
             expected_icon_id=icon_id,
+            session_token=session.token,
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -543,6 +577,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         game_name: str,
         tag_line: str,
         expected_icon_id: int,
+        session_token: str,
     ) -> None:
         super().__init__(timeout=bot.settings.verification_timeout)
         self.bot = bot
@@ -553,14 +588,36 @@ class LegacyIconConfirmationView(discord.ui.View):
         self.game_name = game_name
         self.tag_line = tag_line
         self.expected_icon_id = expected_icon_id
+        self.session_token = session_token
+        self.challenge_key = (bot.settings.guild_id, owner_id)
+        self.deadline = rate_limiter._clock() + bot.settings.verification_timeout
+        rate_limiter.register_challenge(self)
+
+    def _is_current(self) -> bool:
+        return (
+            self.rate_limiter._clock() < self.deadline
+            and self.rate_limiter._challenges.get(self.challenge_key) is self
+            and not self.is_finished()
+        )
+
+    async def on_timeout(self) -> None:
+        if self.rate_limiter._challenges.get(self.challenge_key) is self:
+            del self.rate_limiter._challenges[self.challenge_key]
+        self.stop()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
-            return True
-        await interaction.response.send_message(
-            "Nie możesz użyć przycisku innej osoby.", ephemeral=True
-        )
-        return False
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Nie możesz użyć przycisku innej osoby.", ephemeral=True
+            )
+            return False
+        if not self._is_current():
+            await interaction.response.send_message(
+                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     @discord.ui.button(label="Sprawdź ikonę", style=discord.ButtonStyle.green)
     async def confirm(
@@ -568,6 +625,8 @@ class LegacyIconConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[LegacyIconConfirmationView],
     ) -> None:
+        if not await self.interaction_check(interaction):
+            return
         if (
             interaction.guild is None
             or interaction.guild_id != self.bot.settings.guild_id
@@ -577,7 +636,6 @@ class LegacyIconConfirmationView(discord.ui.View):
                 "Weryfikację możesz dokończyć tylko na serwerze Moon Poro.", ephemeral=True
             )
             return
-        member = interaction.user
         retry_after = self.rate_limiter.update_rate_limit(
             "icon",
             interaction.user.id,
@@ -634,153 +692,80 @@ class LegacyIconConfirmationView(discord.ui.View):
             )
             return
 
-        rank = get_rank_from_leagues(leagues).title()
-        channel_id = self.bot.settings.zweryfikowani_channel_id
-        channel = interaction.guild.get_channel(channel_id) if channel_id else None
-        if not isinstance(channel, discord.abc.Messageable):
+        # Recheck both clocks and the durable generation after the Riot requests.
+        # A newer challenge or cancellation must invalidate an in-flight request.
+        if not self._is_current():
             await interaction.followup.send(
-                "Nie można teraz dokończyć weryfikacji. Zgłoś problem administratorowi.",
+                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
                 ephemeral=True,
             )
             return
-
-        audit_embed = discord.Embed(
-            title="Weryfikacja konta: ikona profilu",
-            colour=discord.Colour.green(),
-        )
-        audit_embed.add_field(
-            name="Użytkownik", value=f"<@{interaction.user.id}> (`{interaction.user.id}`)"
-        )
-        audit_embed.add_field(name="Region", value=SERVER_TRANSLATION[self.platform])
-        audit_embed.add_field(name="Ranga Solo/Duo", value=rank)
-        audit_embed.add_field(
-            name="Riot ID", value=f"{self.game_name}#{self.tag_line}", inline=False
-        )
         try:
-            audit_message = await channel.send(
-                embed=audit_embed,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            await interaction.followup.send(
-                "Nie udało się dokończyć weryfikacji. Spróbuj ponownie.", ephemeral=True
-            )
-            return
-
-        try:
-            link = await self.bot.verifications.create(
-                guild_id=interaction.guild_id,
-                user_id=self.owner_id,
-                message_id=audit_message.id,
-                audit_channel_id=channel_id,
+            record = await self.bot.verification_sessions.get_by_start_token(self.session_token)
+            if (
+                record is None
+                or record.verification_method != "PROFILE_ICON"
+                or record.guild_id != interaction.guild_id
+                or record.discord_user_id != self.owner_id
+                or record.status != VerificationSessionStatus.CREATED.value
+                or as_utc(record.expires_at) <= datetime.now(UTC)
+            ):
+                raise SessionAlreadyUsed
+            result = await self.bot.verification_sessions.reserve_link(
+                session_id=record.id,
                 platform=self.platform,
                 puuid=self.puuid,
-                method="PROFILE_ICON",
-                riot_game_name=self.game_name,
-                riot_tag_line=self.tag_line,
-                rank_tier=get_rank_from_leagues(leagues).upper(),
-                rank_snapshot=solo_rank_snapshot(leagues),
-                refresh_interval_hours=self.bot.settings.rank_refresh_interval_hours,
+                game_name=self.game_name,
+                tag_line=self.tag_line,
             )
-        except IntegrityError:
-            logger.exception("Could not store profile-icon verification for %s", self.owner_id)
-            with suppress(discord.NotFound, discord.HTTPException):
-                await audit_message.delete()
+        except SessionError:
             await interaction.followup.send(
-                "Nie udało się dokończyć weryfikacji. To konto mogło zostać już połączone.",
+                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
                 ephemeral=True,
             )
             return
-
-        cog = self.bot.get_cog("LegacyVerificationCog")
-
-        async def apply_roles() -> None:
-            if isinstance(cog, LegacyVerificationCog):
-                await cog.apply_verified_roles(member, self.platform, leagues)
-            else:
-                await _apply_verified_roles(self.bot, member, self.platform, leagues)
-
-        try:
-            applied = await _run_active_link_role_update(self.bot, link, apply_roles)
-        except discord.HTTPException:
-            await self.bot.verifications.retry_rank_role_sync(
-                interaction.guild_id,
-                self.owner_id,
-                base_delay_seconds=self.bot.settings.rank_refresh_retry_base_seconds,
-                expected_rank_last_checked_at=link.rank_last_checked_at,
-                expected_puuid=link.puuid,
-                expected_platform=link.platform,
-                expected_created_at=link.created_at,
-            )
-            logger.exception(
-                "Stored profile-icon verification for %s but Discord role sync failed",
-                self.owner_id,
-            )
-            button.disabled = True
-            with suppress(discord.HTTPException):
-                await interaction.edit_original_response(view=self)
+        if result != LinkReservationResult.RESERVED:
             await interaction.followup.send(
-                "Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
-                ephemeral=True,
+                "To konto mogło zostać już połączone. Sprawdź „Moje konto”.", ephemeral=True
             )
             return
 
-        if not applied:
+        # The link and durable completion work exist before any audit send.
+        # Completion can recover after any subsequent process or database failure.
+        self.stop()
+        if self.rate_limiter._challenges.get(self.challenge_key) is self:
+            del self.rate_limiter._challenges[self.challenge_key]
+        record = await self.bot.verification_sessions.get_by_start_token(self.session_token)
+        link = await self.bot.verifications.get_by_user(interaction.guild_id, self.owner_id)
+        if (
+            record is None
+            or link is None
+            or record.verification_link_created_at is None
+            or record.puuid != self.puuid
+            or record.platform != self.platform
+            or link.deletion_requested_at is not None
+            or link.puuid != record.puuid
+            or link.platform != record.platform
+            or as_utc(link.created_at) != as_utc(record.verification_link_created_at)
+        ):
             await interaction.followup.send(
                 "Powiązanie konta zmieniło się podczas weryfikacji. Sprawdź aktualne "
                 "dane w sekcji „Moje konto”.",
                 ephemeral=True,
             )
             return
-
-        if isinstance(cog, LegacyVerificationCog):
-            current = await _reconcile_applied_roles(cog, interaction.user, link)
-        else:
-            current = await self.bot.verifications.is_current_verification(
-                interaction.guild_id,
-                self.owner_id,
-                expected_puuid=link.puuid or "",
-                expected_platform=link.platform,
-                expected_created_at=link.created_at,
-            )
-            if not current:
-                cleanup_generation = await self.bot.verifications.enqueue_verified_marker_cleanup(
-                    interaction.guild_id,
-                    self.owner_id,
-                )
-                try:
-                    await _remove_verified_marker(
-                        self.bot,
-                        interaction.user,
-                        reason="Anulowanie nieaktualnej weryfikacji Riot",
-                    )
-                except discord.HTTPException:
-                    await self.bot.verifications.retry_verified_marker_cleanup(
-                        interaction.guild_id,
-                        self.owner_id,
-                        expected_generation=cleanup_generation,
-                        base_delay_seconds=self.bot.settings.rank_refresh_retry_base_seconds,
-                    )
-        if not current:
-            await interaction.followup.send(
-                "Powiązanie konta zmieniło się podczas weryfikacji. Sprawdź aktualne "
-                "dane w sekcji „Moje konto”.",
-                ephemeral=True,
-            )
-            return
-        await self.bot.verifications.acknowledge_rank_role_sync(
-            interaction.guild_id,
-            self.owner_id,
-            expected_rank_last_checked_at=link.rank_last_checked_at,
-            expected_puuid=link.puuid,
-            expected_platform=link.platform,
-            expected_created_at=link.created_at,
-        )
-
+        # Seed only an empty cache: a completion/rank worker may already have
+        # fetched a newer snapshot while this confirmation awaited reservation.
+        # The repository also fences the None version if a worker wins next.
+        if link.rank_last_checked_at is None:
+            await _record_leagues(self.bot, link, leagues, expected_claimed_at=None)
         button.disabled = True
         with suppress(discord.HTTPException):
             await interaction.edit_original_response(view=self)
-        await interaction.followup.send("Konto Riot zostało zweryfikowane.", ephemeral=True)
+        await interaction.followup.send(
+            "Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
+            ephemeral=True,
+        )
 
 
 class LegacyVerificationCog(VerificationCog):
@@ -800,13 +785,34 @@ class LegacyVerificationCog(VerificationCog):
             seconds=bot.settings.riot_monitoring_interval_seconds
         )
         self.refresh_verified.start()
+        self.complete_legacy_verifications.start()
         self.verification_maintenance.start()
         self.report_riot_monitoring.start()
 
     async def cog_unload(self) -> None:
+        self.rate_limiter.clear_challenges()
+        self.complete_legacy_verifications.cancel()
         self.refresh_verified.cancel()
         self.verification_maintenance.cancel()
         self.report_riot_monitoring.cancel()
+
+    @tasks.loop(seconds=3, reconnect=True)
+    async def complete_legacy_verifications(self) -> None:
+        records = await self.bot.verification_sessions.claim_pending(limit=5, method="PROFILE_ICON")
+        for record in records:
+            try:
+                await self._complete_rso_verification(record)
+            except Exception:
+                logger.exception("Could not complete profile-icon session %s", record.id)
+                await self._retry_rso_completion(record, "UNEXPECTED_COMPLETION_ERROR")
+
+    @complete_legacy_verifications.before_loop
+    async def before_legacy_completion(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @complete_legacy_verifications.error
+    async def legacy_completion_error(self, error: BaseException) -> None:
+        logger.exception("Profile-icon completion loop failed", exc_info=error)
 
     async def apply_verified_roles(
         self,

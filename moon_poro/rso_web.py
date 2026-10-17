@@ -22,6 +22,7 @@ from moon_poro.settings import RSOSettings
 from moon_poro.verification_sessions import (
     LinkReservationResult,
     SessionAlreadyUsed,
+    SessionBrowserMismatch,
     SessionExpired,
     SessionNotFound,
     VerificationSessionRepository,
@@ -35,6 +36,7 @@ STATE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,200}$")
 MAX_RIOT_RESPONSE_BYTES = 64 * 1024
 SESSION_COOKIE = "moon_poro_rso"
 NEW_LINK_HINT = "Kliknij „Zweryfikuj konto” na Discordzie, a bot wyśle nowy."
+BROWSER_COOKIE = "moon_poro_rso_browser"
 ACCOUNT_CLUSTER_BY_PLATFORM = {
     "EUN1": "europe",
     "EUW1": "europe",
@@ -177,9 +179,14 @@ async def _read_riot_json(
     if response.status != expected_status:
         logger.warning("RSO upstream returned HTTP %s", response.status)
         raise RiotRSOError("RIOT_UPSTREAM_REJECTED")
-    body = await response.content.read(MAX_RIOT_RESPONSE_BYTES + 1)
-    if len(body) > MAX_RIOT_RESPONSE_BYTES:
-        raise RiotRSOError("RIOT_RESPONSE_TOO_LARGE")
+    body = bytearray()
+    while True:
+        chunk = await response.content.read(min(8192, MAX_RIOT_RESPONSE_BYTES + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > MAX_RIOT_RESPONSE_BYTES:
+            raise RiotRSOError("RIOT_RESPONSE_TOO_LARGE")
     try:
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -250,11 +257,13 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
                     "font-src 'self'; "
-                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                    "form-action 'self' https://auth.riotgames.com "
+                    "https://authenticate.riotgames.com; "
+                    "base-uri 'none'; frame-ancestors 'none'"
                 ),
                 "Cross-Origin-Opener-Policy": "same-origin",
                 "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
-                "Referrer-Policy": "no-referrer",
+                "Referrer-Policy": "same-origin",
                 "X-Content-Type-Options": "nosniff",
                 "X-Frame-Options": "DENY",
             }
@@ -341,8 +350,13 @@ async def begin_rso(request: web.Request) -> web.StreamResponse:
             "Nie udało się rozpocząć", "Wróć do Discorda i użyj nowego linku.", "error"
         )
     state = secrets.token_urlsafe(48)
+    browser_token = request.cookies.get(BROWSER_COOKIE, "")
+    if not TOKEN_PATTERN.fullmatch(browser_token):
+        browser_token = secrets.token_urlsafe(32)
     try:
-        await request.app[REPOSITORY_KEY].begin_oauth(token=token, state=state)
+        await request.app[REPOSITORY_KEY].begin_oauth(
+            token=token, state=state, browser_token=browser_token
+        )
     except SessionExpired:
         return _status_page("Link wygasł", NEW_LINK_HINT, "error")
     except (SessionNotFound, SessionAlreadyUsed):
@@ -351,6 +365,15 @@ async def begin_rso(request: web.Request) -> web.StreamResponse:
         )
     response = _see_other(request.app[RSO_CLIENT_KEY].authorization_url(state))
     _set_session_cookie(response, token, request.app[SETTINGS_KEY])
+    response.set_cookie(
+        BROWSER_COOKIE,
+        browser_token,
+        max_age=request.app[SETTINGS_KEY].rso_session_ttl_seconds,
+        secure=request.app[SETTINGS_KEY].rso_public_base_url.scheme == "https",
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
     return response
 
 
@@ -363,7 +386,16 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
             "error",
         )
     try:
-        record = await request.app[REPOSITORY_KEY].claim_callback(state)
+        record = await request.app[REPOSITORY_KEY].claim_callback(
+            state, browser_token=request.cookies.get(BROWSER_COOKIE, "")
+        )
+    except SessionBrowserMismatch:
+        return _status_page(
+            "Wróć do poprzedniej przeglądarki",
+            "Dokończ logowanie w przeglądarce, w której rozpoczęto weryfikację. "
+            "Jeśli to niemożliwe, rozpocznij ponownie w Discordzie.",
+            "error",
+        )
     except SessionExpired:
         return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
     except (SessionNotFound, SessionAlreadyUsed):
@@ -391,13 +423,20 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
         await request.app[REPOSITORY_KEY].fail(record.id, error.code)
         return _see_other("/verify/result")
 
-    result = await request.app[REPOSITORY_KEY].reserve_link(
-        session_id=record.id,
-        platform=identity.platform,
-        puuid=identity.puuid,
-        game_name=identity.game_name,
-        tag_line=identity.tag_line,
-    )
+    try:
+        result = await request.app[REPOSITORY_KEY].reserve_link(
+            session_id=record.id,
+            platform=identity.platform,
+            puuid=identity.puuid,
+            game_name=identity.game_name,
+            tag_line=identity.tag_line,
+        )
+    except (SessionExpired, SessionNotFound, SessionAlreadyUsed):
+        return _status_page(
+            "Ta weryfikacja nie jest już aktywna",
+            "Wróć do Discorda i użyj najnowszego linku weryfikacyjnego.",
+            "error",
+        )
     if result is not LinkReservationResult.RESERVED:
         logger.info("RSO link reservation rejected with %s", result.value)
     return _see_other("/verify/result")
@@ -429,8 +468,14 @@ def _result_for_record(record: VerificationSession) -> web.Response:
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),
         )
+    if status == VerificationSessionStatus.PROCESSING_RIOT.value:
+        return _status_page(
+            "Potwierdzamy logowanie w Riot",
+            "Poczekaj chwilę. Ta strona odświeży się automatycznie.",
+            "pending",
+            refresh_seconds=2,
+        )
     if status in {
-        VerificationSessionStatus.PROCESSING_RIOT.value,
         VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value,
         VerificationSessionStatus.APPLYING_DISCORD.value,
     }:

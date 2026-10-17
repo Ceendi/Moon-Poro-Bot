@@ -1311,6 +1311,7 @@ async def test_null_puuid_link_can_be_confirmed_and_deleted_with_strict_identity
     guild = SimpleNamespace(id=123)
     member = FakeMember(101, guild=guild)
     member.roles = [verified]
+    guild.fetch_member = AsyncMock(return_value=member)
     current_link = _profile_link(
         guild_id=123,
         discord_user_id=101,
@@ -1749,6 +1750,7 @@ async def test_admin_deletion_removes_verification_roles_but_keeps_member_role()
     guild = SimpleNamespace()
     member = FakeMember(101, guild=guild)
     member.roles = [member_role, verified, region, rank]
+    guild.fetch_member = AsyncMock(return_value=member)
     requested_at = datetime(2026, 8, 24, 9, 59, tzinfo=UTC)
     claimed_at = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
     link = SimpleNamespace(
@@ -1823,6 +1825,7 @@ async def test_shared_delete_keeps_region_rank_and_member_roles(
     guild = SimpleNamespace(get_channel=Mock(return_value=channel))
     member = FakeMember(101, guild=guild)
     member.roles = [verified, region, rank, member_role]
+    guild.fetch_member = AsyncMock(return_value=member)
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))
     monkeypatch.setattr(verification, "find_role", Mock(return_value=verified))
@@ -1901,6 +1904,7 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
     member = FakeMember(101, guild=guild)
     verified = object()
     member.roles = [verified]
+    guild.fetch_member = AsyncMock(return_value=member)
     member.remove_roles = AsyncMock(side_effect=FakeHTTPException())
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
@@ -1971,6 +1975,7 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
     )
     guild = SimpleNamespace(get_channel=Mock(return_value=channel))
     member = FakeMember(101, guild=guild)
+    guild.fetch_member = AsyncMock(return_value=member)
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
     monkeypatch.setattr(verification.discord.abc, "Messageable", type(channel))

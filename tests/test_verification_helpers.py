@@ -51,6 +51,7 @@ def _guarded_verifications(
         *,
         identity: VerificationLinkIdentity,
         operation: Callable[[], Awaitable[None]],
+        expected_rank_last_checked_at: datetime | None,
     ) -> bool:
         assert isinstance(identity, VerificationLinkIdentity)
         assert (
@@ -232,11 +233,13 @@ async def test_apply_verified_roles_replaces_managed_roles(
     )
     bot = SimpleNamespace(settings=settings)
     member = SimpleNamespace(
-        guild=object(),
+        id=101,
+        guild=SimpleNamespace(fetch_member=AsyncMock()),
         roles=[old_rank],
         remove_roles=AsyncMock(),
         add_roles=AsyncMock(),
     )
+    member.guild.fetch_member.return_value = member
     monkeypatch.setattr(verification, "get_discord_rank_role", lambda *_args: rank)
     monkeypatch.setattr(
         verification,
@@ -943,6 +946,7 @@ async def test_claimed_role_sync_compensates_when_delete_tombstone_wins_race(
     deleting = SimpleNamespace(**vars(link))
     deleting.deletion_requested_at = datetime(2026, 8, 15, 1, tzinfo=UTC)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     verifications = _guarded_verifications(
         link,
@@ -982,6 +986,7 @@ async def test_failed_stale_marker_compensation_survives_worker_restart(
 
     member = SimpleNamespace(id=101)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     link = SimpleNamespace(
         discord_user_id=101,
@@ -1039,6 +1044,7 @@ async def test_marker_cleanup_restores_reverified_generation_that_wins_during_de
 ) -> None:
     member = SimpleNamespace(id=101)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     replacement = SimpleNamespace(
         guild_id=123,
@@ -1059,7 +1065,7 @@ async def test_marker_cleanup_restores_reverified_generation_that_wins_during_de
     verifications = _guarded_verifications(
         replacement,
         claim_due_verified_marker_cleanups=AsyncMock(return_value=[cleanup]),
-        get_by_user=AsyncMock(side_effect=[None, replacement, replacement]),
+        get_by_user=AsyncMock(side_effect=[None, None, replacement, replacement]),
         acknowledge_verified_marker_cleanup=AsyncMock(),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
         retry_rank_role_sync=AsyncMock(),
@@ -1101,6 +1107,7 @@ async def test_marker_cleanup_compensates_delete_during_replacement_role_restore
 ) -> None:
     member = SimpleNamespace(id=101)
     guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     replacement = SimpleNamespace(
         guild_id=123,
@@ -1121,7 +1128,7 @@ async def test_marker_cleanup_compensates_delete_during_replacement_role_restore
     verifications = _guarded_verifications(
         replacement,
         claim_due_verified_marker_cleanups=AsyncMock(return_value=[cleanup]),
-        get_by_user=AsyncMock(side_effect=[replacement, None, None, None]),
+        get_by_user=AsyncMock(side_effect=[replacement, None, None, None, None]),
         acknowledge_verified_marker_cleanup=AsyncMock(),
         acknowledge_rank_role_sync=AsyncMock(),
         retry_rank_role_sync=AsyncMock(),
@@ -1158,6 +1165,7 @@ async def test_reconcile_compensates_delete_during_replacement_role_restore(
 ) -> None:
     member = SimpleNamespace(id=101)
     guild = SimpleNamespace(id=123)
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     old_link = SimpleNamespace(
         guild_id=123,
@@ -1183,7 +1191,7 @@ async def test_reconcile_compensates_delete_during_replacement_role_restore(
     )
     verifications = _guarded_verifications(
         replacement,
-        get_by_user=AsyncMock(side_effect=[replacement, None, None, None]),
+        get_by_user=AsyncMock(side_effect=[replacement, None, None, None, None]),
         enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
         acknowledge_verified_marker_cleanup=AsyncMock(),
         acknowledge_rank_role_sync=AsyncMock(),
@@ -1261,6 +1269,7 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
     cog = object.__new__(verification.VerificationCog)
     cog.bot = bot
     cog.apply_verified_roles = AsyncMock()
+    cog._publish_rso_audit = AsyncMock(return_value=True)
     leagues = [
         {
             "queueType": "RANKED_SOLO_5x5",
@@ -1302,11 +1311,7 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
         expected_platform=link.platform,
         expected_created_at=link.created_at,
     )
-    sessions.complete_discord.assert_awaited_once_with(
-        1,
-        message_id=None,
-        channel_id=None,
-    )
+    cog._publish_rso_audit.assert_awaited_once_with(record)
     member.send.assert_awaited_once_with(
         "Twoje konto Riot zostało zweryfikowane. "
         "Na serwerze **Test** zaktualizowano role regionu i rangi."
@@ -1383,8 +1388,10 @@ async def test_rso_completion_retries_if_rank_worker_owns_the_snapshot(
     cog.apply_verified_roles.assert_not_awaited()
 
 
+@pytest.mark.parametrize("failure_stage", ["roles", "audit"])
 async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call(
     monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
 ) -> None:
     class FakeHTTPException(Exception):
         pass
@@ -1442,7 +1449,13 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
     )
     cog = object.__new__(verification.VerificationCog)
     cog.bot = bot
-    cog.apply_verified_roles = AsyncMock(side_effect=[FakeHTTPException(), None])
+    cog.apply_verified_roles = AsyncMock(
+        side_effect=[FakeHTTPException(), None] if failure_stage == "roles" else None
+    )
+    cog._publish_rso_audit = AsyncMock(
+        return_value=True,
+        side_effect=[FakeHTTPException(), True] if failure_stage == "audit" else None,
+    )
     riot_call = AsyncMock()
     monkeypatch.setattr(verification, "_get_leagues", riot_call)
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
@@ -1463,13 +1476,10 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
 
     riot_call.assert_not_awaited()
     verifications.record_rank_snapshot.assert_not_awaited()
-    verifications.retry_rank_role_sync.assert_awaited_once()
+    assert verifications.retry_rank_role_sync.await_count == (failure_stage == "roles")
     sessions.retry_discord.assert_awaited_once()
-    sessions.complete_discord.assert_awaited_once_with(
-        1,
-        message_id=None,
-        channel_id=None,
-    )
+    assert cog._publish_rso_audit.await_count == (2 if failure_stage == "audit" else 1)
+    member.send.assert_awaited_once()
 
 
 async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
@@ -1486,6 +1496,7 @@ async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
         get_member=Mock(return_value=member),
         get_channel=Mock(return_value=None),
     )
+    guild.fetch_member = AsyncMock(return_value=member)
     member.guild = guild
     link = SimpleNamespace(
         guild_id=123,
@@ -1508,7 +1519,9 @@ async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
     verifications = _guarded_verifications(
         link,
         replacement,
-        get_by_user=AsyncMock(side_effect=[link, link, replacement, None, None, None, None]),
+        get_by_user=AsyncMock(
+            side_effect=[link, link, replacement, None, None, None, None, None, None]
+        ),
         acknowledge_rank_role_sync=AsyncMock(return_value=True),
         retry_rank_role_sync=AsyncMock(),
         enqueue_verified_marker_cleanup=AsyncMock(return_value=1),
@@ -1541,6 +1554,7 @@ async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
     cog = object.__new__(verification.VerificationCog)
     cog.bot = bot
     cog.apply_verified_roles = AsyncMock()
+    cog._publish_rso_audit = AsyncMock(return_value=False)
     remove_marker = AsyncMock(side_effect=[FakeHTTPException(), None])
     monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
     monkeypatch.setattr(verification, "_remove_verified_marker", remove_marker)

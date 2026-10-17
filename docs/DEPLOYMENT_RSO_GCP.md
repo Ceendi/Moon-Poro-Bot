@@ -18,6 +18,9 @@ kod tylko do odczytu i baza z oddzielnymi loginami.
 > Repozytorium zawiera tymczasową weryfikację ikoną oraz docelowe RSO. Do czasu otrzymania danych
 > klienta Riot używaj `VERIFICATION_MODE=legacy_icon` i pozostaw `moon-poro-rso.service` wyłączone.
 
+Dostęp RSO dla Moon Poro został przyznany. Przełączenie produkcji nastąpi osobno, po testach;
+sam dostęp ani aktualizacja kodu nie zmieniają `VERIFICATION_MODE` istniejącej instalacji.
+
 ## 1. Warunki wstępne
 
 - wspierany system Linux i Python 3.12 lub 3.13;
@@ -26,6 +29,20 @@ kod tylko do odczytu i baza z oddzielnymi loginami.
 - firewall GCP: Internet ma dostęp tylko do TCP 80/443; SSH ograniczony do zaufanych adresów;
 - porty 5432 i 8080 nie są publiczne;
 - snapshot i zweryfikowany backup bazy przed migracją.
+- Na kanale audytu bot potrzebuje „Wyświetlanie kanału”, „Wysyłanie wiadomości”,
+  „Zamieszczanie linków” (embedy) i „Czytanie historii wiadomości”. Historia pozwala
+  odzyskać wpis po awarii bez wysyłania duplikatu; brak dostępu wstrzymuje finalizację RSO.
+
+Migracja `20261017_0008` dodaje tylko dwa opcjonalne pola do sesji RSO: skrót
+identyfikatora przeglądarki i kanał oczekującej publikacji audytu. Nie zmienia powiązań
+ani danych rankingowych. Przed migracją zatrzymaj bot i callback; rozpoczęte wcześniej
+logowania bez powiązania z przeglądarką wymagają nowego linku. Przy powrocie do legacy
+nie cofaj migracji ani nie usuwaj nierozstrzygniętych zamiarów publikacji audytu.
+
+Migracja `20261017_0009` dodaje metodę weryfikacji do sesji (dotychczasowe sesje pozostają RSO).
+Weryfikacja ikoną również zapisuje trwałe zadanie finalizacji przed publikacją audytu.
+Po przełączeniu na RSO bot może dokończyć już zaakceptowane wyzwania ikoną. Po powrocie
+do legacy finalizuje tylko wyzwania ikoną, ale sprząta nierozstrzygnięte audyty obu metod.
 
 ## 2. Budowa strony poza VM
 
@@ -198,6 +215,15 @@ retry na podstawie cache i nie ponawia zapytania Riot. Błędy sieciowe i 5xx ma
 z jitterem 20%. Regionalny breaker nadal respektuje `Retry-After` po 429. Po 401 lub 403 globalny
 breaker zatrzymuje masową kolejkę i dopuszcza pojedynczą próbę kontrolną co 15 minut.
 
+Transport Riot ma limit 15 sekund na pojedyncze żądanie, 5 sekund na połączenie i 10 sekund
+bez odbierania danych. Limit nie obejmuje oczekiwania limitera ani `Retry-After`; ponowienia
+nadal wykonuje Pulsefire. Awaria transportu nie blokuje pojedynczą próbą workera na 5 minut.
+
+Zmiana ról sprawdza pod blokadą zarówno tożsamość powiązania, jak i wersję snapshotu.
+Lokalna blokada użytkownika jest zawsze pobierana przed blokadą rekordu bazy. Panel ról
+korzysta ze świeżego stanu Discorda oraz jawnego wyniku wykonanych operacji, a nie zakłada,
+że `add_roles` od razu zmieni obiekt `Member` w pamięci.
+
 Usuwanie powiązania najpierw zapisuje trwały stan oczekującego usunięcia. Ten stan blokuje nowe
 odświeżenia i synchronizacje ról dla rekordu. Bot usuwa rolę Zweryfikowany, sprząta wiadomość
 audytową i dopiero wtedy usuwa rekord. Błąd Discord jest ponawiany z bazy po restarcie, więc nie
@@ -223,3 +249,12 @@ czas ostatniej odpowiedzi 2xx. Częstotliwość raportu kontroluje
 Po problemie z RSO ustaw `VERIFICATION_MODE=legacy_icon`, zatrzymaj `moon-poro-rso` i opublikuj panel
 weryfikacji ikoną. Nie cofaj migracji `20260810_0002`, `20260814_0003` ani `20260815_0005`, jeżeli
 istnieją już rekordy produkcyjne. Problem analizuj na kopii bazy.
+
+Nie cofaj również migracji `0008` i `0009` przy zmianie samego trybu weryfikacji.
+Tryb `legacy_icon` kończy wyłącznie sesje z potwierdzeniem ikoną. Sesje RSO,
+które już potwierdziły konto i czekają na dokończenie w Discordzie, pozostają w bazie:
+ich finalizacja wróci po ponownym uruchomieniu trybu RSO. Nie rozpoczynaj dla nich
+nowego powiązania ani nie kopiuj danych ręcznie. Jeśli nie planujesz powrotu do RSO,
+usuń takie powiązanie zwykłą ścieżką usuwania z potwierdzeniem i dopiero potem
+rozpocznij weryfikację ikoną. Sama kolejka rang nadal może synchronizować role
+istniejącego powiązania; zmiana trybu nie cofa potwierdzonej wcześniej tożsamości.
