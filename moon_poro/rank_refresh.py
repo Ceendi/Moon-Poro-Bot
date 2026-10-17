@@ -11,6 +11,47 @@ TWELVE_HOURS = 12 * 60 * 60
 TWENTY_FOUR_HOURS = 24 * 60 * 60
 UNRANKED_CONFIRMATION_SECONDS = 60 * 60
 HIGH_TIERS = frozenset({"MASTER", "GRANDMASTER", "CHALLENGER"})
+SOLO_QUEUE = "RANKED_SOLO_5x5"
+RANKED_TIERS = frozenset(
+    {
+        "IRON",
+        "BRONZE",
+        "SILVER",
+        "GOLD",
+        "PLATINUM",
+        "EMERALD",
+        "DIAMOND",
+        *HIGH_TIERS,
+    }
+)
+
+
+class InvalidLeagueEntries(ValueError):
+    """League-v4 returned something other than a list of entries with valid tiers."""
+
+
+def validate_league_entries(
+    payload: object, *, allow_unranked: bool = False
+) -> list[dict[str, Any]]:
+    """Return League-v4 entries, or raise when a successful response is malformed.
+
+    Riot never reports a Solo/Duo entry as UNRANKED. ``allow_unranked`` exists for
+    entries rebuilt from the bot's own cache, which stores a confirmed UNRANKED.
+    """
+
+    if not isinstance(payload, list):
+        raise InvalidLeagueEntries(f"expected a list, got {type(payload).__name__}")
+    entries: list[dict[str, Any]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise InvalidLeagueEntries(f"expected entry objects, got {type(entry).__name__}")
+        if entry.get("queueType") == SOLO_QUEUE:
+            tier = entry.get("tier")
+            normalized = tier.upper() if isinstance(tier, str) else None
+            if normalized not in RANKED_TIERS and not (allow_unranked and normalized == "UNRANKED"):
+                raise InvalidLeagueEntries("Solo/Duo entry has no valid tier")
+        entries.append(entry)
+    return entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +83,12 @@ class RankRefreshDecision:
 
 
 def solo_rank_snapshot(leagues: list[dict[str, Any]]) -> RankSnapshot | None:
-    for league in leagues:
-        if league.get("queueType") != "RANKED_SOLO_5x5":
+    """Parse the Solo/Duo entry; raise ``InvalidLeagueEntries`` on a malformed payload."""
+    for league in validate_league_entries(leagues):
+        if league.get("queueType") != SOLO_QUEUE:
             continue
         return RankSnapshot(
-            tier=str(league.get("tier") or "UNRANKED").upper(),
+            tier=str(league["tier"]).upper(),
             division=_optional_upper_string(league.get("rank")),
             league_points=_optional_int(league.get("leaguePoints")),
             wins=_optional_int(league.get("wins")),

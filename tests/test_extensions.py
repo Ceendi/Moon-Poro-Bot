@@ -41,6 +41,7 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
             "cw",
             "dr",
             "mod_stats",
+            "multikonta",
             "napraw_weryfikacje",
             "nr",
             "pbr",
@@ -55,7 +56,6 @@ async def test_all_enabled_extensions_register_without_conflicts() -> None:
             "usun_weryfikacje",
             "w",
             "weryfikacja",
-            "wylacz_multikonta",
         }
         expected_reasons = {
             "Moderacja",

@@ -102,7 +102,8 @@ class DiscordRoles:
     "initial,expected",
     [
         (("Gold",), {"Gold", "EUNE", "Member"}),
-        (("Gold", "EUNE", "Member"), {"Gold"}),
+        # The member role is never taken away automatically.
+        (("Gold", "EUNE", "Member"), {"Gold", "Member"}),
     ],
 )
 async def test_toggle_region_uses_actual_http_result(initial, expected):
@@ -116,7 +117,7 @@ async def test_toggle_region_uses_actual_http_result(initial, expected):
     "initial,expected",
     [
         ((), {"No LoL", "Member"}),
-        (("No LoL", "Member"), set()),
+        (("No LoL", "Member"), {"Member"}),
     ],
 )
 async def test_no_lol_updates_member_from_http_result(initial, expected):
@@ -129,7 +130,7 @@ async def test_no_lol_updates_member_from_http_result(initial, expected):
 @pytest.mark.parametrize(
     "initial,expected",
     [
-        (("Gold", "EUNE", "Member", "TFT"), set()),
+        (("Gold", "EUNE", "Member", "TFT"), {"Member"}),
         (
             ("Gold", "EUNE", "Member", "Verified", "Mid", "TFT"),
             {"Gold", "EUNE", "Member", "Verified"},
@@ -140,6 +141,18 @@ async def test_remove_all_preserves_only_protected_verified_roles(initial, expec
     env = DiscordRoles(*initial)
     await MiscRolesView(env.bot).remove_all.callback(env.interaction())
     assert env.selected() == expected
+
+
+async def test_failed_rank_add_keeps_old_rank():
+    env = DiscordRoles("Gold", "EUNE", "Member")
+    env.http.add_role.side_effect = discord.Forbidden(
+        SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
+    )
+    dropdown = RankDropdown(env.bot)
+    dropdown._values = ["Silver"]
+    with pytest.raises(discord.Forbidden):
+        await dropdown.callback(env.interaction())
+    assert env.selected() == {"Gold", "EUNE", "Member"}
 
 
 async def test_rank_change_removes_old_rank_and_keeps_member():
@@ -174,7 +187,7 @@ async def test_concurrent_no_lol_and_rank_do_not_mix_exclusive_roles():
     assert env.selected() == {"No LoL", "Member"}
 
 
-async def test_concurrent_remove_all_and_rank_leave_no_orphaned_member():
+async def test_concurrent_remove_all_and_rank_keep_member_role():
     env = DiscordRoles("Gold", "EUNE", "Member")
     rank = RankDropdown(env.bot)
     rank._values = ["Silver"]
@@ -182,7 +195,7 @@ async def test_concurrent_remove_all_and_rank_leave_no_orphaned_member():
         MiscRolesView(env.bot).remove_all.callback(env.interaction()),
         rank.callback(env.interaction()),
     )
-    assert env.selected() == {"Silver"}
+    assert env.selected() == {"Silver", "Member"}
 
 
 @pytest.mark.parametrize("command", ["rank", "region", "no_lol", "remove_all"])
@@ -212,7 +225,7 @@ async def test_moderator_add_remove_and_multi_rank_keep_dependencies():
     await RolesCog.add_roles.callback(cog, env.interaction(), env.member, env.roles["EUNE"])
     assert env.selected() == {"Gold", "EUNE", "Member"}
     await RolesCog.remove_roles.callback(cog, env.interaction(), env.member, env.roles["EUNE"])
-    assert env.selected() == {"Gold"}
+    assert env.selected() == {"Gold", "Member"}
     await RolesCog.add_roles.callback(
         cog,
         env.interaction(),
@@ -221,8 +234,11 @@ async def test_moderator_add_remove_and_multi_rank_keep_dependencies():
         env.roles["Silver"],
         env.roles["EUNE"],
     )
-    assert env.selected() == {"Gold"}
+    assert env.selected() == {"Gold", "Member"}
     await RolesCog.add_roles.callback(cog, env.interaction(), env.member, env.roles["Silver"])
+    assert env.selected() == {"Silver", "Member"}
+    # A moderator can still take the member role away explicitly.
+    await RolesCog.remove_roles.callback(cog, env.interaction(), env.member, env.roles["Member"])
     assert env.selected() == {"Silver"}
 
 
