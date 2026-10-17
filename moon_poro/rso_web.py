@@ -733,7 +733,7 @@ def _result_for_record(record: VerificationSession, *, now: datetime | None = No
         return _status_page(
             "Konto połączone",
             f"{account} jest już połączone z Twoim kontem Discord. "
-            "Role za region i rangę znajdziesz na serwerze.",
+            "Twoje role znajdziesz na serwerze.",
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),
         )
