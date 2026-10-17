@@ -1,21 +1,60 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import { siteConfig } from "../../config";
+
+const email = siteConfig.contactEmail;
 ---
 
-<BaseLayout lang="en" canonicalPath="/en/terms/" title="Terms of service" description="Terms governing Moon Poro Bot, its current profile-icon verification and the planned Riot Sign On flow.">
-  <section class="page-hero"><p class="eyebrow">Public document · updated {siteConfig.lastUpdatedEn}</p><h1>Terms of service.</h1><p class="lead">By using Moon Poro, you agree to these terms for the free verification and rank synchronisation service.</p></section>
-  <section class="legal">
-    <aside class="legal-aside">Version 1.1<br />Effective 24 August 2026<br />Contact: <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a></aside>
-    <div class="legal-content">
-      <section><h2>1. Operator and service</h2><p>Moon Poro Bot is operated by {siteConfig.operatorDisplayName} in Poland. It links a Discord account with a Riot account, retrieves official platform and rank information, and manages matching roles in the League of Legends PL Discord community.</p><p>The service is free, contains no advertising and may evolve, be limited or end. Information about the controller is available in the <a href="/en/privacy/">privacy policy</a>.</p></section>
-      <section><h2>2. Who may use the service</h2><p>You may use the service only if you are authorised to use both accounts and meet Discord's and Riot's applicable age and account requirements. You remain responsible for account security and for providing correct information during verification.</p></section>
-      <section><h2>3. Acceptable use</h2><p>Do not circumvent limits, repeatedly make bulk attempts, test accounts you do not control, disrupt the bot, exploit defects, impersonate another person, or use the service contrary to law, Discord rules, Riot policies or community rules.</p><p>We may cancel a session, remove a link or restrict access when necessary for security, moderation, compliance or stability.</p></section>
-      <section><h2>4. Riot verification and third-party services</h2><p>Current verification uses a League of Legends profile-icon challenge. Riot Sign On is in preparation and will launch after Riot grants access. Discord, Riot Games and Google Cloud provide independent services under their own terms. Their availability and API changes are outside Moon Poro's control.</p><p>Moon Poro Bot is not an official Riot Games product. The required non-endorsement notice appears in every page footer.</p></section>
-      <section><h2>5. Data freshness and availability</h2><p>The profile shows data stored during the last successful update, not real-time information. Automatic and manual refreshes are subject to scheduling, limits and Riot API availability. APIs, networks and Discord may be delayed or temporarily unavailable.</p><p>We take reasonable care to keep data and roles correct. To the extent permitted by law, the service is nevertheless provided “as is” without a promise of uninterrupted operation or suitability for a particular purpose. A Discord role is a community designation, not an official Riot certificate.</p></section>
-      <section><h2>6. Privacy and deletion</h2><p>The <a href="/en/privacy/">privacy policy</a> explains data processing. You may remove the link yourself with <span class="mono">/usun_weryfikacje</span> or the panel button. You may also contact the operator. Self-service removal ends future synchronisation, removes the “Zweryfikowany” role and keeps the existing region, rank and “Użytkownik” roles. Administrative removal also removes region and rank roles; the “Użytkownik” role remains.</p></section>
-      <section><h2>7. Intellectual property and changes</h2><p>Moon Poro's name, code and materials belong to their operator or licensors. Riot Games and League of Legends marks belong to Riot Games, Inc. Discord marks belong to their owner.</p><p>We may change these terms. Material changes will receive a new publication date. Continued use after their effective date indicates acceptance unless law requires another process.</p></section>
-      <section><h2>8. Contact and law</h2><p>Questions may be sent to <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>. Polish law applies, without limiting mandatory consumer rights or jurisdiction provided by applicable law.</p></section>
+<BaseLayout lang="en" canonicalPath="/en/terms/" title="Terms of service" description="Rules for using Moon Poro Bot on the League of Legends PL server.">
+  <section class="doc">
+    <h1>Terms of service</h1>
+    <p class="updated">Updated: {siteConfig.lastUpdatedEn}</p>
+
+    <div class="summary">
+      <h2>In short</h2>
+      <ul>
+        <li>Only verify your own Riot account.</li>
+        <li>One Riot account, one Discord account.</li>
+        <li>The bot is free and we do our best to keep it running, but there are no guarantees.</li>
+      </ul>
     </div>
+
+    <section>
+      <h2>1. What Moon Poro is</h2>
+      <p>Moon Poro is a free bot for the League of Legends PL server, run by {siteConfig.operatorDisplayName}. It links Discord accounts with Riot accounts, assigns verification, region and rank roles, and helps the moderators. By using the bot, you accept these terms.</p>
+    </section>
+
+    <section>
+      <h2>2. Who can use it</h2>
+      <p>Anyone allowed to use Discord and a Riot account under their rules, including age requirements. Only link an account that belongs to you.</p>
+    </section>
+
+    <section>
+      <h2>3. What's not allowed</h2>
+      <p>Don't verify other people's accounts, impersonate anyone, spam the bot, get around limits or exploit bugs. The rules of Discord, Riot Games and the server also apply.</p>
+      <p>If the rules are broken, or the server's safety requires it, we may remove a link or block access to the bot.</p>
+    </section>
+
+    <section>
+      <h2>4. Rank and availability</h2>
+      <p>The bot gets your rank from the official Riot API and refreshes it periodically, so it can be briefly out of date. A Discord role is a label on our server, not an official Riot certificate.</p>
+      <p>The Riot API and Discord sometimes go down, and the bot may change or be shut down. It's provided as is, without warranties, to the extent the law allows.</p>
+    </section>
+
+    <section>
+      <h2>5. Removing your link</h2>
+      <p>Use <code>/usun_weryfikacje</code> or the “Usuń powiązanie” (Remove link) button in “Moje konto”. The bot stops refreshing your rank and removes the Verified role. Region, rank and “Użytkownik” (Member) roles stay.</p>
+      <p>When an administrator removes a link, the bot also removes region and rank roles. The “Użytkownik” role stays.</p>
+    </section>
+
+    <section>
+      <h2>6. Riot Games</h2>
+      <p>Moon Poro isn't a Riot Games product and isn't endorsed by Riot. League of Legends and Riot Games are trademarks of Riot Games, Inc.</p>
+    </section>
+
+    <section>
+      <h2>7. Changes and contact</h2>
+      <p>If we change these terms, we'll publish them here with a new date. Send questions to <a href={`mailto:${email}`}>{email}</a>. Polish law applies, without affecting your rights as a consumer.</p>
+    </section>
   </section>
 </BaseLayout>

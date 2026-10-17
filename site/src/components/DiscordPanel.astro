@@ -1,0 +1,35 @@
+---
+// Mirrors the panel posted by /weryfikacja in moon_poro/cogs/verification_legacy.py.
+// Keep the copy in sync with the bot; it is shown verbatim, in Polish, on both languages.
+interface Props {
+  lang?: "pl" | "en";
+}
+
+const { lang = "pl" } = Astro.props;
+const isEnglish = lang === "en";
+---
+
+<figure class="discord" aria-label={isEnglish ? "Preview of the verification panel on Discord" : "Podgląd panelu weryfikacji na Discordzie"}>
+  <div class="discord-message" lang="pl">
+    <img class="discord-avatar" src="/moon-poro.png" alt="" width="40" height="40" />
+    <div class="discord-body">
+      <p class="discord-author">Moon Poro <span class="discord-badge">APP</span></p>
+      <div class="discord-embed">
+        <p class="discord-embed-title">Weryfikacja konta League of Legends</p>
+        <p>Podaj Riot ID i region. Następnie potwierdź konto, zmieniając ikonę profilu w kliencie League of Legends.</p>
+        <p class="discord-field-name">Role</p>
+        <p>Bot nada Ci rolę „Zweryfikowany” oraz role regionu i rangi Solo/Duo. Rangę będzie odświeżać automatycznie.</p>
+        <p class="discord-field-name">Zasady</p>
+        <p><a href="/privacy/">Polityka prywatności</a> · <a href="/terms/">Warunki korzystania</a></p>
+        <p class="discord-footer">Kliknij „Zweryfikuj konto”, aby rozpocząć.</p>
+      </div>
+      <div class="discord-buttons" aria-hidden="true">
+        <span class="discord-button green">Zweryfikuj konto</span>
+        <span class="discord-button grey">Moje konto</span>
+      </div>
+    </div>
+  </div>
+  <figcaption>
+    {isEnglish ? "This is what the panel looks like on the server. The bot speaks Polish." : "Tak wygląda panel weryfikacji na serwerze."}
+  </figcaption>
+</figure>

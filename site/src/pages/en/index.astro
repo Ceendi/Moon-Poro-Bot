@@ -1,28 +1,97 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import DiscordPanel from "../../components/DiscordPanel.astro";
 import { siteConfig } from "../../config";
 ---
 
-<BaseLayout lang="en" canonicalPath="/en/" title="Riot account verification" description="Moon Poro currently verifies League of Legends accounts through a profile-icon challenge. Riot Sign On is being prepared for a later launch.">
+<BaseLayout lang="en" canonicalPath="/en/" title="Your LoL rank on Discord" description="Moon Poro is the bot of the League of Legends PL Discord server. Link your Riot account and get a role with your region and Solo/Duo rank.">
   <section class="hero">
-    <div>
-      <p class="eyebrow">Moon Poro · Riot account verification</p>
-      <h1>Verify a League of Legends account on Discord</h1>
-      <p class="lead">Moon Poro currently verifies a Riot account by asking the user to change their League of Legends profile icon. Riot Sign On is in preparation and will launch after Riot grants access.</p>
-      <div class="actions"><a class="button" href={siteConfig.discordInviteUrl}>Open the Discord server <span aria-hidden="true">→</span></a><a class="button secondary" href="/en/rso/">Review the planned RSO flow</a></div>
-      <p class="trust-note">Free service · no advertising · Moon Poro never asks for your Riot password</p>
+    <div class="hero-text">
+      <h1>Show your rank on the server</h1>
+      <p class="lead">Moon Poro is the bot of the League of Legends PL server. Link your Riot account to Discord and the bot gives you a role with your region and Solo/Duo rank. It keeps it up to date when you climb.</p>
+      <div class="actions">
+        <a class="button" href={siteConfig.discordInviteUrl}>Join the server</a>
+        <a class="button ghost" href="#how">How to verify</a>
+      </div>
+      <p class="hero-note">Free, no ads and no password needed.</p>
     </div>
-    <div class="orbit" role="img" aria-label="Planned flow between Discord, Riot Sign On, a verified account and roles">
-      <div class="orbit-core"><img src="/moon-poro.png" alt="" width="128" height="128" /></div><div class="orbit-node node-discord">Discord</div><div class="orbit-node node-riot">Riot Sign On</div><div class="orbit-node node-role">Role + rank</div><div class="orbit-node node-account">Riot account</div><p class="orbit-caption">Planned RSO flow</p>
+    <div class="hero-visual">
+      <div class="moon" aria-hidden="true"></div>
+      <DiscordPanel lang="en" />
     </div>
   </section>
-  <section class="section">
-    <div class="section-heading"><div><p class="eyebrow">Planned four-step verification</p><h2>How Riot Sign On will work</h2></div><p>After RSO launches, the bot will send a private one-time link. Authentication will happen only on Riot Games' website, then the bot will update roles after confirming the account.</p></div>
-    <ol class="process"><li><h3>Click “Verify account”</h3><p>The bot creates a private verification link valid for 10 minutes.</p></li><li><h3>Sign in with Riot</h3><p>Your password goes only to Riot Sign On, never to Moon Poro.</p></li><li><h3>Riot confirms the account</h3><p>Moon Poro receives the Riot ID and League platform needed for the link.</p></li><li><h3>The bot assigns roles</h3><p>Discord receives verified, region and current Solo/Duo rank roles.</p></li></ol>
+
+  <section class="section" id="how">
+    <h2>How to verify</h2>
+    <ol class="steps">
+      <li>
+        <h3>Click “Zweryfikuj konto”</h3>
+        <p>That's “Verify account”, under the verification panel on the server.</p>
+      </li>
+      <li>
+        <h3>Enter your Riot ID and region</h3>
+        <p>The name and tag from your Riot profile, e.g. <span class="tag">Moon Poro #EUNE</span>. Riot ID, not your login! EUNE, EUW and NA are supported.</p>
+      </li>
+      <li>
+        <h3>Set the profile icon</h3>
+        <p>The bot shows a profile icon. Set it in the League of Legends client and click “Sprawdź ikonę” (“Check icon”).</p>
+      </li>
+      <li>
+        <h3>Done</h3>
+        <p>You get the “Zweryfikowany” (Verified) role plus region and rank roles. You can switch your icon back right away.</p>
+      </li>
+    </ol>
+    <p class="soon">Soon you'll be able to simply sign in with Riot instead of changing your icon.</p>
   </section>
+
   <section class="section">
-    <div class="section-heading"><div><p class="eyebrow">Privacy</p><h2>Data stored by Moon Poro</h2></div><p>Moon Poro never receives a Riot password. After RSO launches, its access token will exist only in memory and will not be written to the database.</p></div>
-    <div class="data-strip"><div><h3>We retain</h3><ul><li>Discord user and guild IDs</li><li>Riot PUUID and platform</li><li>verification method and time</li><li>limited, audited administrator lookups</li></ul></div><div><h3>We do not retain</h3><ul><li>Riot passwords</li><li>RSO tokens</li><li>Riot account email addresses</li><li>advertising or browsing profiles</li></ul></div></div>
-    <div class="actions"><a class="button secondary" href="/en/privacy/">Read the privacy policy</a></div>
+    <h2>After verifying</h2>
+    <ul class="features">
+      <li>
+        <p class="feature-key"><span class="discord-button grey">Moje konto</span> <span class="or">or</span> <code>/profil</code></p>
+        <p>“My account” shows your linked Riot account, rank, LP and win/loss record. Only you can see it.</p>
+      </li>
+      <li>
+        <p class="feature-key"><span class="discord-button blurple">Odśwież rangę</span></p>
+        <p>Your rank refreshes on its own. After a promotion you don't have to wait: click “Refresh rank” in “Moje konto”.</p>
+      </li>
+      <li>
+        <p class="feature-key"><span class="discord-button red">Usuń powiązanie</span> <span class="or">or</span> <code>/usun_weryfikacje</code></p>
+        <p>“Remove link” disconnects your Riot account and removes the Verified role. Region and rank roles stay.</p>
+      </li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <div class="callout">
+      <img src="/moon-poro.png" alt="" width="72" height="72" />
+      <div>
+        <h2>We don't need your password</h2>
+        <p>The bot will never ask for your Riot password. Poros prefer Poro-Snax. If someone asks for your password “on behalf of Moon Poro”, it's a scam. Report it to the moderators.</p>
+        <p>We only store what's needed for roles: your Discord ID, Riot ID, region and rank. Details are in the <a href="/en/privacy/">privacy policy</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>FAQ</h2>
+    <div class="faq">
+      <details>
+        <summary>The bot says my Riot ID doesn't exist</summary>
+        <p>Make sure you're entering the Riot ID from your profile (the name and the tag after #), not your login, and that the region is right.</p>
+      </details>
+      <details>
+        <summary>I want to link a different Riot account</summary>
+        <p>Remove the current link in “Moje konto” first, then verify the new account. One Riot account can be linked to only one Discord account.</p>
+      </details>
+      <details>
+        <summary>My rank on Discord is wrong</summary>
+        <p>The bot shows the rank from the last refresh. Click “Odśwież rangę” in “Moje konto” and give it a moment.</p>
+      </details>
+      <details>
+        <summary>What happens if I leave the server?</summary>
+        <p>The link stays, and the bot restores your roles when you come back. If you want it removed and you're no longer on the server, email <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>.</p>
+      </details>
+    </div>
   </section>
 </BaseLayout>

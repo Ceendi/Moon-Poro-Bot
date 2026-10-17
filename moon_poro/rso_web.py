@@ -327,7 +327,7 @@ async def show_start(request: web.Request) -> web.Response:
         <ol class="steps">
           <li><span>1</span>Zaloguj się na stronie Riot.</li>
           <li><span>2</span>Potwierdź dostęp do Riot ID i regionu.</li>
-          <li><span>3</span>Wróć do Discorda — role pojawią się automatycznie.</li>
+          <li><span>3</span>Wróć do Discorda. Role pojawią się automatycznie.</li>
         </ol>
         <form method="post" action="/verify/start/{html.escape(token)}">
           <button type="submit">Przejdź do logowania Riot <span aria-hidden="true">→</span></button>
@@ -425,7 +425,7 @@ def _result_for_record(record: VerificationSession) -> web.Response:
         if record.riot_game_name and record.riot_tag_line:
             riot_id = f" Konto <strong>{html.escape(record.riot_game_name)}#{html.escape(record.riot_tag_line)}</strong> jest połączone."
         return _status_page(
-            "Gotowe — konto zostało zweryfikowane",
+            "Gotowe, konto zostało zweryfikowane",
             f"{riot_id} Role regionu i rangi zostały zaktualizowane. Możesz wrócić do Discorda.",
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),
@@ -506,23 +506,23 @@ def _html_page(title: str, body: str) -> web.Response:
   <meta name="color-scheme" content="dark">
   <title>{html.escape(title)} · Moon Poro</title>
   <style>
-    :root {{ color-scheme: dark; --ink:#eef8fb; --muted:#a7bcc7; --night:#08131d; --panel:#102431; --ice:#8fe6f3; --berry:#ef6480; --line:#29404e; }}
+    :root {{ color-scheme: dark; --ink:#efeaf8; --muted:#b3abcf; --night:#0d0b1e; --panel:#1b1735; --ice:#ffe2a3; --berry:#ff8fae; --line:#2f2856; }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; color:var(--ink); background:radial-gradient(circle at 70% 15%, #173547 0, var(--night) 42%, #050b11 100%); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }}
-    main {{ width:min(680px,100%); padding:clamp(28px,6vw,58px); border:1px solid var(--line); border-radius:30px 30px 30px 8px; background:linear-gradient(145deg,rgba(16,36,49,.96),rgba(8,22,31,.96)); box-shadow:0 28px 80px rgba(0,0,0,.35); }}
-    .eyebrow {{ margin:0 0 10px; color:var(--ice); font:700 12px/1.2 ui-monospace,"Cascadia Mono",monospace; letter-spacing:.14em; text-transform:uppercase; }}
-    h1 {{ max-width:14ch; margin:0 0 18px; font:700 clamp(36px,8vw,64px)/.98 "Trebuchet MS",system-ui,sans-serif; letter-spacing:-.045em; }}
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; color:var(--ink); background:radial-gradient(circle at 80% 0, #2c2160 0, var(--night) 55%); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }}
+    main {{ width:min(640px,100%); padding:clamp(28px,6vw,52px); border:1.5px solid var(--line); border-radius:28px; background:linear-gradient(140deg,#221d42,#15122d); box-shadow:0 28px 80px rgba(0,0,0,.35); }}
+    .eyebrow {{ margin:0 0 10px; color:var(--berry); font-weight:700; font-size:14px; }}
+    h1 {{ max-width:16ch; margin:0 0 16px; font:700 clamp(30px,6vw,44px)/1.1 system-ui,-apple-system,"Segoe UI",sans-serif; }}
     .lead {{ margin:0 0 28px; color:var(--muted); font-size:clamp(17px,3vw,20px); }}
     .steps {{ display:grid; gap:12px; margin:28px 0; padding:0; list-style:none; }}
     .steps li {{ display:flex; gap:12px; align-items:center; padding:12px 14px; border-top:1px solid var(--line); }}
-    .steps span {{ display:grid; place-items:center; flex:0 0 28px; height:28px; border:1px solid #407083; border-radius:50%; color:var(--ice); font:700 12px ui-monospace,monospace; }}
-    button,.button {{ display:inline-flex; align-items:center; justify-content:center; gap:12px; width:100%; min-height:54px; padding:14px 20px; border:0; border-radius:16px 16px 16px 4px; color:#07141b; background:var(--ice); font:800 16px system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .18s ease,background .18s ease; }}
-    button:hover,.button:hover {{ transform:translateY(-2px); background:#b6f4fb; }}
-    button:focus-visible,.button:focus-visible,a:focus-visible {{ outline:3px solid var(--berry); outline-offset:4px; }}
-    a {{ color:var(--ice); }}
-    .fine {{ margin:22px 0 0; color:#819aa7; font-size:13px; }}
-    .status-icon {{ display:grid; place-items:center; width:58px; height:58px; margin-bottom:24px; border:1px solid var(--line); border-radius:50% 50% 50% 16px; color:var(--ice); background:#123140; font:800 24px ui-monospace,monospace; }}
-    .status-icon.error {{ color:#ff9cad; background:#3a1c29; }} .status-icon.success {{ color:#a9f7cc; background:#123629; }}
+    .steps span {{ display:grid; place-items:center; flex:0 0 28px; height:28px; border-radius:50%; color:#2a1630; background:var(--berry); font:700 13px system-ui,sans-serif; }}
+    button,.button {{ display:inline-flex; align-items:center; justify-content:center; gap:12px; width:100%; min-height:54px; padding:14px 20px; border:0; border-radius:999px; color:#241a3f; background:var(--ice); font:800 16px system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .18s ease,background .18s ease; }}
+    button:hover,.button:hover {{ transform:translateY(-2px); background:#fff0cc; }}
+    button:focus-visible,.button:focus-visible,a:focus-visible {{ outline:3px solid var(--ice); outline-offset:4px; }}
+    a {{ color:#b9a3f5; }}
+    .fine {{ margin:22px 0 0; color:#8a82aa; font-size:13px; }}
+    .status-icon {{ display:grid; place-items:center; width:56px; height:56px; margin-bottom:22px; border-radius:50%; color:var(--ice); background:#2a2350; font:800 24px system-ui,sans-serif; }}
+    .status-icon.error {{ color:#ff9cad; background:#3d1d36; }} .status-icon.success {{ color:#a9f7cc; background:#173a33; }}
     strong {{ color:var(--ink); }}
     @media (prefers-reduced-motion:reduce) {{ * {{ transition:none!important; }} }}
   </style>
