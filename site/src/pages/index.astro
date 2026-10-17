@@ -3,65 +3,117 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import { siteConfig } from "../config";
 ---
 
-<BaseLayout title="Weryfikacja konta Riot" description="Moon Poro obecnie weryfikuje konta League of Legends ikoną profilu. Logowanie przez Riot Sign On jest w przygotowaniu.">
+<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Zaloguj się przez Riot i dostań role z regionem i rangą Solo/Duo.">
   <section class="hero">
-    <div>
-      <p class="eyebrow">Moon Poro · weryfikacja konta Riot</p>
-      <h1>Weryfikacja konta League of Legends na Discordzie</h1>
-      <p class="lead">Moon Poro obecnie weryfikuje konto Riot przez zmianę ikony profilu w kliencie League of Legends. Logowanie przez Riot Sign On jest w przygotowaniu i zostanie uruchomione po otrzymaniu dostępu od Riot.</p>
+    <div class="hero-text">
+      <h1>Pokaż swoją rangę na serwerze</h1>
+      <p class="lead">Moon Poro to bot serwera League of Legends PL. Logujesz się przez Riot, a bot nadaje Ci role regionu i rangi Solo/Duo. Potem sam pilnuje, żeby ranga była aktualna.</p>
       <div class="actions">
-        <a class="button" href={siteConfig.discordInviteUrl}>Otwórz serwer Discord <span aria-hidden="true">→</span></a>
-        <a class="button secondary" href="/rso/">Zobacz planowany przepływ RSO</a>
+        <a class="button" href={siteConfig.discordInviteUrl}>Dołącz do serwera</a>
+        <a class="button ghost" href="#jak">Jak się zweryfikować</a>
       </div>
-      <p class="trust-note">Usługa bezpłatna · bez reklam · bot nigdy nie prosi o hasło Riot</p>
     </div>
-    <div class="orbit" role="img" aria-label="Planowany przepływ: Discord, logowanie Riot, potwierdzone konto i role">
-      <div class="orbit-core"><img src="/moon-poro.png" alt="" width="128" height="128" /></div>
-      <div class="orbit-node node-discord">Discord</div>
-      <div class="orbit-node node-riot">Riot Sign On</div>
-      <div class="orbit-node node-role">Role i ranga</div>
-      <div class="orbit-node node-account">Konto Riot</div>
-      <p class="orbit-caption">Planowany przepływ RSO</p>
+    <div class="hero-visual" aria-hidden="true">
+      <div class="moon"></div>
+      <img class="poro" src="/moon-poro.png" alt="" width="128" height="128" />
+      <span class="sparkle one"></span>
+      <span class="sparkle two"></span>
+      <span class="sparkle three"></span>
     </div>
   </section>
 
-  <section class="section" id="flow">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Planowana weryfikacja w czterech krokach</p>
-        <h2>Jak będzie działać Riot Sign On</h2>
-      </div>
-      <p>Po uruchomieniu RSO bot wyśle prywatny, jednorazowy link. Logowanie odbędzie się wyłącznie na stronie Riot Games, a po potwierdzeniu konta bot zaktualizuje role.</p>
-    </div>
-    <ol class="process">
-      <li><h3>Klikasz „Zweryfikuj konto”</h3><p>Bot tworzy prywatny link ważny przez 10 minut.</p></li>
-      <li><h3>Logujesz się u Riot</h3><p>Hasło trafia wyłącznie do Riot Sign On — nigdy do Moon Poro.</p></li>
-      <li><h3>Riot potwierdza konto</h3><p>Moon Poro otrzymuje Riot ID i region potrzebne do powiązania.</p></li>
-      <li><h3>Bot nadaje role</h3><p>Na Discordzie pojawiają się role weryfikacji, regionu i aktualnej rangi Solo/Duo.</p></li>
+  <section class="section" id="jak">
+    <h2>Jak się zweryfikować</h2>
+    <ol class="steps">
+      <li>
+        <h3>Kliknij „Zweryfikuj konto”</h3>
+        <p>Przycisk jest pod panelem weryfikacji na serwerze. Bot wyśle Ci prywatny link.</p>
+      </li>
+      <li>
+        <h3>Otwórz link</h3>
+        <p>Kliknij „Zaloguj się przez Riot”, a potem „Przejdź do logowania Riot”. Link działa tylko raz i przez kilka minut.</p>
+      </li>
+      <li>
+        <h3>Zaloguj się na konto Riot</h3>
+        <p>Logujesz się na stronie Riot Games tym samym kontem, co w grze. Riot przekazuje nam Twoje Riot ID i region.</p>
+      </li>
+      <li>
+        <h3>Gotowe</h3>
+        <p>Wróć do Discorda. Masz już role „Zweryfikowany” i „Użytkownik” oraz role regionu i rangi.</p>
+      </li>
     </ol>
   </section>
 
   <section class="section">
-    <div class="section-heading">
-      <div><p class="eyebrow">Zastosowanie</p><h2>Dlaczego przygotowujemy Riot Sign On</h2></div>
-      <p>Docelowe logowanie Riot zastąpi zmianę ikony profilu, zachowując automatyczną aktualizację regionu i rangi Solo/Duo.</p>
-    </div>
-    <div class="cards">
-      <article class="card"><span class="symbol">ID</span><h3>Jedno powiązanie kont</h3><p>Jedno konto Riot może być aktywnie połączone z jednym kontem Discord na serwerze.</p></article>
-      <article class="card"><span class="symbol">↻</span><h3>Odświeżana ranga</h3><p>Ranga Solo/Duo jest okresowo pobierana z oficjalnego Riot API i synchronizowana z rolą.</p></article>
-      <article class="card"><span class="symbol">×</span><h3>Usuwanie na żądanie</h3><p>Komenda <span class="mono">/usun_weryfikacje</span> usuwa powiązanie i rolę „Zweryfikowany”. Role regionu i rangi pozostają bez zmian.</p></article>
+    <h2>Każda ranga ma swoją rolę</h2>
+    <p class="section-lead">Od Irona do Challengera. Jeśli nie masz jeszcze rangi w Solo/Duo, dostaniesz rolę Unranked.</p>
+    <ul class="ranks">
+      <li class="challenger">Challenger</li>
+      <li class="grandmaster">GrandMaster</li>
+      <li class="master">Master</li>
+      <li class="diamond">Diamond</li>
+      <li class="emerald">Emerald</li>
+      <li class="platinum">Platinum</li>
+      <li class="gold">Gold</li>
+      <li class="silver">Silver</li>
+      <li class="bronze">Bronze</li>
+      <li class="iron">Iron</li>
+      <li class="unranked">Unranked</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Po weryfikacji</h2>
+    <ul class="features">
+      <li>
+        <p class="feature-key"><span class="discord-button grey">Moje konto</span> <span class="or">lub</span> <code>/profil</code></p>
+        <p>Pokazuje połączone konto Riot, rangę, LP i bilans gier. Widzisz to tylko Ty.</p>
+      </li>
+      <li>
+        <p class="feature-key"><span class="discord-button blurple">Odśwież rangę</span></p>
+        <p>Ranga odświeża się sama. Po awansie nie musisz czekać, wystarczy kliknąć ten przycisk w sekcji „Moje konto”.</p>
+      </li>
+      <li>
+        <p class="feature-key"><span class="discord-button red">Usuń powiązanie</span> <span class="or">lub</span> <code>/usun_weryfikacje</code></p>
+        <p>Odłącza konto Riot i zabiera rolę „Zweryfikowany”. Role regionu i rangi zostają.</p>
+      </li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <div class="callout">
+      <img src="/moon-poro.png" alt="" width="72" height="72" />
+      <div>
+        <h2>Hasło wpisujesz tylko u Riot</h2>
+        <p>Logowanie odbywa się na stronie riotgames.com. Moon Poro nie widzi Twojego hasła, a bot nigdy nie zapyta o nie na Discordzie. Poro woli Poro-Snaxy. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
+        <p>Zapisujemy tylko to, co potrzebne do ról: identyfikator konta Discord, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
+      </div>
     </div>
   </section>
 
   <section class="section">
-    <div class="section-heading">
-      <div><p class="eyebrow">Prywatność</p><h2>Jakie dane zapisujemy</h2></div>
-      <p>Moon Poro nie otrzymuje hasła Riot. Po uruchomieniu RSO token dostępu będzie używany tylko w pamięci i nie trafi do bazy.</p>
+    <h2>Częste pytania</h2>
+    <div class="faq">
+      <details>
+        <summary>Link nie działa albo wygasł</summary>
+        <p>Każdy link działa tylko raz i przez kilka minut. Kliknij jeszcze raz „Zweryfikuj konto”, a bot wyśle nowy.</p>
+      </details>
+      <details>
+        <summary>Gram na innym serwerze niż EUNE</summary>
+        <p>Możesz połączyć konto z EUNE, EUW albo NA. Konta z innych regionów nie są na razie obsługiwane.</p>
+      </details>
+      <details>
+        <summary>Chcę podłączyć inne konto Riot</summary>
+        <p>Najpierw usuń obecne powiązanie w sekcji „Moje konto”, potem zweryfikuj nowe. Jedno konto Riot może być połączone tylko z jednym kontem Discord.</p>
+      </details>
+      <details>
+        <summary>Ranga na Discordzie się nie zgadza</summary>
+        <p>Bot pokazuje rangę z ostatniego odświeżenia. Kliknij „Odśwież rangę” w sekcji „Moje konto” i daj botowi chwilę.</p>
+      </details>
+      <details>
+        <summary>Co się dzieje, gdy wyjdę z serwera na Discordzie?</summary>
+        <p>Powiązanie zostaje, a gdy wrócisz, bot przywróci Ci role. Jeśli chcesz je usunąć, a nie ma Cię już na serwerze, napisz na <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>.</p>
+      </details>
     </div>
-    <div class="data-strip">
-      <div><h3>Przechowujemy</h3><ul><li>identyfikatory użytkownika i serwera Discord</li><li>Riot PUUID oraz platformę</li><li>metodę i czas weryfikacji</li><li>ograniczony dziennik administracyjnych odczytów</li></ul></div>
-      <div><h3>Nie przechowujemy</h3><ul><li>hasła Riot</li><li>tokenów RSO</li><li>adresu e-mail konta Riot</li><li>historii przeglądania ani danych reklamowych</li></ul></div>
-    </div>
-    <div class="actions"><a class="button secondary" href="/privacy/">Przeczytaj politykę prywatności</a></div>
   </section>
 </BaseLayout>
