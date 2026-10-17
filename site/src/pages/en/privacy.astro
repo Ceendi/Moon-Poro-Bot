@@ -29,15 +29,15 @@ const email = siteConfig.contactEmail;
       <h2>2. What we process</h2>
       <ul>
         <li><strong>Discord:</strong> your user and server IDs and the roles the bot manages.</li>
-        <li><strong>Riot account:</strong> PUUID, Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling.</li>
-        <li><strong>Riot sign-in:</strong> Riot gives us your PUUID, Riot ID and region. We don't get your password or email. The token from Riot is used only for a moment and isn't stored. The sign-in itself is saved as a short session: its status, time and any error code.</li>
+        <li><strong>Riot account:</strong> PUUID (a permanent Riot account ID), Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling.</li>
+        <li><strong>Riot sign-in:</strong> Riot gives us your PUUID, Riot ID and region. We don't get your password or email. The one-time access token from Riot is used only for a moment and isn't stored. The sign-in itself is saved as a short session: its status, time and any error code.</li>
         <li><strong>Moderation:</strong> warnings (who they concern, who issued them, reason, level, dates), monthly moderator statistics, and messages in moderation channels about verifications, joins, leaves and bans.</li>
-        <li><strong>Optional server features:</strong> if enabled, the bot checks your Discord account age when you join, and may forward messages containing certain words (e.g. boosting offers) to moderators.</li>
+        <li><strong>Optional server features:</strong> if enabled, the bot checks your Discord account age when you join, and may forward messages containing certain words (e.g. boosting offers) to moderators or delete them.</li>
         <li><strong>Administrator lookups:</strong> when an administrator checks which accounts are linked, we log who looked up whom, when and why.</li>
         <li><strong>IP address</strong> on the sign-in page is kept briefly in the server's memory to limit attempts. It isn't stored.</li>
         <li><strong>Technical logs</strong> needed to fix errors.</li>
       </ul>
-      <p>The data comes from you, from Discord and from the official Riot API. Accounts can't be linked without the Discord and Riot IDs.</p>
+      <p>The data comes from you, from Discord and directly from Riot Games. Accounts can't be linked without the Discord and Riot IDs.</p>
       <p>You can see your account and rank from the last refresh with <code>/profil</code>. Roles are visible to others on the server; moderation messages only to people with access to those channels.</p>
     </section>
 
@@ -53,7 +53,7 @@ const email = siteConfig.contactEmail;
 
     <section>
       <h2>4. Who has access</h2>
-      <p>The operator and the server's administrators and moderators, as far as needed for moderation and support. Our service providers also process data: Discord, Riot Games and Google Cloud (hosting for the bot and database). They may do so outside the European Economic Area under the safeguards described in their own policies.</p>
+      <p>The operator and the server's administrators and moderators, as far as needed for moderation and support. Our service providers also process data: Discord, Riot Games and Google Cloud (the servers running the bot and database). They may do so outside the European Economic Area under the safeguards described in their own policies.</p>
     </section>
 
     <section>

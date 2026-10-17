@@ -67,10 +67,7 @@ const fullTitle = `${title} · Moon Poro`;
     <main id="content"><slot /></main>
     <footer class="site-footer">
       <div class="footer-row">
-        <p>
-          {isEnglish ? "Made by " : "Zrobione przez "}{siteConfig.operatorDisplayName}
-          {isEnglish ? " for the League of Legends PL server." : " dla serwera League of Legends PL."}
-        </p>
+        <p>{isEnglish ? `Made by ${siteConfig.operatorDisplayName} for the League of Legends PL server.` : `Zrobione przez ${siteConfig.operatorDisplayName} dla serwera League of Legends PL.`}</p>
         <div class="footer-links">
           <a href={isEnglish ? "/en/privacy/" : "/privacy/"}>{isEnglish ? "Privacy" : "Prywatność"}</a>
           <a href={isEnglish ? "/en/terms/" : "/terms/"}>{isEnglish ? "Terms" : "Warunki"}</a>

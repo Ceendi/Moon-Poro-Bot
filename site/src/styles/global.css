@@ -131,6 +131,20 @@
   .steps p, .features p, .faq p { color: var(--muted); }
   .tag { color: var(--cream); font-weight: 700; white-space: nowrap; }
 
+  .section-lead { max-width: 40rem; margin: -14px 0 24px; color: var(--muted); }
+  .ranks { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; max-width: 860px; list-style: none; }
+  .ranks li { display: inline-flex; gap: 8px; align-items: center; padding: 8px 16px 8px 12px; border-radius: 999px; background: var(--card); color: var(--text); font-weight: 800; }
+  .ranks li::before { width: 12px; height: 12px; border-radius: 50%; background: var(--tier); box-shadow: 0 0 12px var(--tier); content: ""; }
+  .ranks .iron { --tier: #8c7f78; }
+  .ranks .bronze { --tier: #b9805f; }
+  .ranks .silver { --tier: #b8c4cc; }
+  .ranks .gold { --tier: #e8bd62; }
+  .ranks .platinum { --tier: #4fc1b0; }
+  .ranks .emerald { --tier: #35c98a; }
+  .ranks .diamond { --tier: #7d9cf0; }
+  .ranks .master { --tier: #c174e6; }
+  .ranks .grandmaster { --tier: #ef5a5e; }
+  .ranks .challenger { --tier: #f6d98a; }
   .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; list-style: none; }
   .features li { padding: 24px 22px; border-radius: var(--radius); background: var(--card); }
   .features .feature-key { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; color: var(--text); }
@@ -183,6 +197,7 @@
   .hero { grid-template-columns: minmax(0, 1fr); gap: 64px; padding-top: 32px; }
   .hero-visual { min-height: 0; }
   .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ranks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .features { grid-template-columns: minmax(0, 1fr); }
 }
 
@@ -195,6 +210,7 @@
   .button { width: 100%; }
   .poro { width: 104px; height: 104px; }
   .steps { grid-template-columns: minmax(0, 1fr); }
+  .ranks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .callout { flex-direction: column; gap: 18px; padding: 24px 20px; }
 }
 
