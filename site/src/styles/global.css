@@ -1,5 +1,23 @@
 @layer reset, base, components;
 
+/* Nunito (SIL OFL, see /fonts/OFL.txt). Served from /fonts so the RSO pages can use it too. */
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-weight: 200 1000;
+  font-display: swap;
+  src: url("/fonts/nunito-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-weight: 200 1000;
+  font-display: swap;
+  src: url("/fonts/nunito-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 @layer reset {
   *, *::before, *::after { box-sizing: border-box; }
   html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
@@ -26,8 +44,7 @@
     --pink: #ff8fae;
     --radius: 22px;
     --content: 1080px;
-    --font-body: "Nunito Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
-    --font-display: "Fredoka", "Nunito Variable", system-ui, sans-serif;
+    --font-body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   body {
     min-width: 320px;
@@ -43,10 +60,10 @@
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
   }
-  h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.1; text-wrap: balance; }
+  h1, h2, h3 { font-weight: 800; line-height: 1.15; text-wrap: balance; }
   h1 { font-size: clamp(2.5rem, 6vw, 4rem); letter-spacing: -0.01em; }
   h2 { font-size: clamp(1.7rem, 3.4vw, 2.3rem); }
-  h3 { font-size: 1.2rem; font-weight: 500; }
+  h3 { font-size: 1.15rem; }
   p { text-wrap: pretty; }
   a { color: var(--lavender); text-underline-offset: 0.18em; }
   a:hover { color: var(--cream); }
@@ -61,7 +78,7 @@
 
   /* Header */
   .site-header { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; justify-content: space-between; padding-block: 22px; }
-  .brand { display: inline-flex; gap: 10px; align-items: center; color: var(--text); font: 600 1.25rem/1 var(--font-display); text-decoration: none; }
+  .brand { display: inline-flex; gap: 10px; align-items: center; color: var(--text); font-size: 1.2rem; font-weight: 800; line-height: 1; text-decoration: none; }
   .brand img { border-radius: 50%; }
   .brand:hover { color: var(--cream); }
   .site-header nav { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
@@ -81,41 +98,38 @@
   .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 470px); gap: 56px; align-items: center; padding-block: 56px 96px; }
   .hero h1 { font-size: clamp(2.4rem, 5vw, 3.5rem); }
   .lead { max-width: 34rem; margin-top: 20px; color: var(--muted); font-size: 1.15rem; }
-  .hero-note { margin-top: 18px; color: var(--quiet); font-size: 0.95rem; }
-  .hero-visual { position: relative; }
-  .moon { position: absolute; z-index: 0; top: -54px; right: -34px; width: 150px; height: 150px; border-radius: 50%; box-shadow: inset -26px 14px 0 0 var(--moon), 0 0 70px rgb(255 226 163 / 0.12); transform: rotate(-12deg); opacity: 0.95; }
+  .hero-visual { position: relative; display: grid; place-items: center; min-height: 380px; }
+  .moon { width: min(340px, 78vw); aspect-ratio: 1; border-radius: 50%; background:
+      radial-gradient(circle at 30% 34%, rgb(214 186 120 / 0.35) 0 9%, transparent 10%),
+      radial-gradient(circle at 66% 26%, rgb(214 186 120 / 0.28) 0 5%, transparent 6%),
+      radial-gradient(circle at 60% 64%, rgb(214 186 120 / 0.3) 0 12%, transparent 13%),
+      radial-gradient(circle at 36% 70%, rgb(214 186 120 / 0.22) 0 4%, transparent 5%),
+      radial-gradient(circle at 38% 32%, #fff6e2, var(--moon) 62%, #e9c47e);
+    box-shadow: 0 0 0 18px rgb(255 226 163 / 0.05), 0 0 0 46px rgb(255 226 163 / 0.03), 0 0 120px rgb(255 226 163 / 0.25); }
+  .poro { position: absolute; bottom: 4%; left: 50%; width: 128px; height: 128px; border-radius: 50%; translate: -132% 0; box-shadow: 0 18px 40px rgb(13 11 30 / 0.6); animation: float 6s ease-in-out infinite; }
+  .sparkle { position: absolute; width: 10px; height: 10px; background: var(--cream); clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%); opacity: 0.8; }
+  .sparkle.one { top: 8%; right: 12%; }
+  .sparkle.two { top: 46%; right: 2%; width: 7px; height: 7px; opacity: 0.6; }
+  .sparkle.three { bottom: 10%; right: 22%; width: 13px; height: 13px; }
+  @keyframes float { 50% { transform: translateY(-8px); } }
 
-  /* Discord panel preview (colours follow Discord's dark theme) */
-  .discord { position: relative; z-index: 1; }
-  .discord-message { display: flex; gap: 14px; padding: 18px 18px 20px; border-radius: var(--radius); background: #313338; box-shadow: 0 24px 60px rgb(0 0 0 / 0.45), 0 0 0 1px rgb(255 255 255 / 0.04); color: #dbdee1; font: 15px/1.4 "Nunito Variable", system-ui, sans-serif; }
-  .discord-avatar { flex: 0 0 40px; height: 40px; border-radius: 50%; }
-  .discord-body { min-width: 0; }
-  .discord-author { color: #f2f3f5; font-weight: 700; }
-  .discord-badge { margin-left: 4px; padding: 1px 5px; border-radius: 4px; color: #fff; background: #5865f2; font-size: 10px; font-weight: 800; vertical-align: 2px; }
-  .discord-embed { display: grid; gap: 4px; margin-top: 6px; padding: 12px 16px 14px; border-left: 4px solid #74d3e0; border-radius: 4px; background: #2b2d31; font-size: 14px; }
-  .discord-embed-title { margin-bottom: 4px; color: #f2f3f5; font-weight: 800; font-size: 15px; }
-  .discord-field-name { margin-top: 8px; color: #f2f3f5; font-weight: 800; }
-  .discord-embed a { color: #00a8fc; text-decoration: none; }
-  .discord-footer { margin-top: 10px; color: #b5bac1; font-size: 12px; }
-  .discord-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  .discord-button { display: inline-block; padding: 5px 14px; border-radius: 8px; color: #fff; font: 600 14px/1.45 "Nunito Variable", system-ui, sans-serif; white-space: nowrap; }
+  /* Discord buttons (colours follow Discord's dark theme) */
+  .discord-button { display: inline-block; padding: 5px 14px; border-radius: 8px; color: #fff; font-size: 14px; font-weight: 700; line-height: 1.45; white-space: nowrap; }
   .discord-button.green { background: #248046; }
   .discord-button.grey { background: #4e5058; }
   .discord-button.blurple { background: #5865f2; }
   .discord-button.red { background: #da373c; }
-  .discord figcaption { margin-top: 14px; color: var(--quiet); font-size: 0.9rem; text-align: center; }
 
   /* Sections */
   .section { padding-block: 48px; }
   .section > h2 { margin-bottom: 28px; }
   .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; list-style: none; counter-reset: step; }
   .steps li { position: relative; padding: 24px 22px 26px; border-radius: var(--radius); background: var(--card); counter-increment: step; }
-  .steps li::before { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 18px; border-radius: 50%; color: #2a1630; background: var(--pink); content: counter(step); font: 600 1.1rem/1 var(--font-display); }
+  .steps li::before { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 18px; border-radius: 50%; color: #2a1630; background: var(--pink); content: counter(step); font-size: 1.05rem; font-weight: 900; line-height: 1; }
   .steps li:last-child::before { background: var(--moon); content: "✓"; }
   .steps h3 { margin-bottom: 8px; }
   .steps p, .features p, .faq p { color: var(--muted); }
   .tag { color: var(--cream); font-weight: 700; white-space: nowrap; }
-  .soon { margin-top: 22px; color: var(--quiet); font-size: 0.95rem; }
 
   .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; list-style: none; }
   .features li { padding: 24px 22px; border-radius: var(--radius); background: var(--card); }
@@ -132,7 +146,7 @@
   .faq details { border-radius: 16px; background: var(--card); }
   .faq summary { position: relative; padding: 16px 52px 16px 20px; border-radius: 16px; font-weight: 700; cursor: pointer; list-style: none; }
   .faq summary::-webkit-details-marker { display: none; }
-  .faq summary::after { position: absolute; top: 50%; right: 20px; color: var(--lavender); content: "+"; font: 500 1.5rem/1 var(--font-display); translate: 0 -50%; }
+  .faq summary::after { position: absolute; top: 50%; right: 20px; color: var(--lavender); content: "+"; font-size: 1.5rem; font-weight: 600; line-height: 1; translate: 0 -50%; }
   .faq details[open] summary::after { content: "−"; }
   .faq summary:hover { color: var(--cream); }
   .faq details p { padding: 0 20px 18px; }
@@ -167,7 +181,7 @@
 
 @media (max-width: 960px) {
   .hero { grid-template-columns: minmax(0, 1fr); gap: 64px; padding-top: 32px; }
-  .hero-visual { max-width: 520px; }
+  .hero-visual { min-height: 0; }
   .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .features { grid-template-columns: minmax(0, 1fr); }
 }
@@ -179,14 +193,12 @@
   body { font-size: 16px; }
   .actions { flex-direction: column; }
   .button { width: 100%; }
-  .moon { top: -40px; right: -6px; width: 104px; height: 104px; box-shadow: inset -18px 10px 0 0 var(--moon), 0 0 50px rgb(255 226 163 / 0.12); }
-  .discord-message { gap: 10px; padding: 14px 12px 16px; }
-  .discord-avatar { flex-basis: 34px; width: 34px; height: 34px; }
+  .poro { width: 104px; height: 104px; }
   .steps { grid-template-columns: minmax(0, 1fr); }
   .callout { flex-direction: column; gap: 18px; padding: 24px 20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  *, *::before, *::after { transition: none !important; }
+  *, *::before, *::after { transition: none !important; animation: none !important; }
 }

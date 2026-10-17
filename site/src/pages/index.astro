@@ -1,23 +1,24 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import DiscordPanel from "../components/DiscordPanel.astro";
 import { siteConfig } from "../config";
 ---
 
-<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Połącz konto Riot z Discordem i dostań rolę z regionem i rangą Solo/Duo.">
+<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Zaloguj się przez Riot i dostań rolę z regionem i rangą Solo/Duo.">
   <section class="hero">
     <div class="hero-text">
       <h1>Pokaż swoją rangę na serwerze</h1>
-      <p class="lead">Moon Poro to bot serwera League of Legends PL. Łączysz konto Riot z Discordem, a bot nadaje Ci rolę z regionem i rangą Solo/Duo. Potem sam ją aktualizuje, kiedy wbijesz wyżej.</p>
+      <p class="lead">Moon Poro to bot serwera League of Legends PL. Logujesz się przez Riot, a bot nadaje Ci rolę z regionem i rangą Solo/Duo. Potem sam ją aktualizuje, kiedy wbijesz wyżej.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Dołącz do serwera</a>
         <a class="button ghost" href="#jak">Jak się zweryfikować</a>
       </div>
-      <p class="hero-note">Za darmo, bez reklam i bez podawania hasła.</p>
     </div>
-    <div class="hero-visual">
-      <div class="moon" aria-hidden="true"></div>
-      <DiscordPanel />
+    <div class="hero-visual" aria-hidden="true">
+      <div class="moon"></div>
+      <img class="poro" src="/moon-poro.png" alt="" width="128" height="128" />
+      <span class="sparkle one"></span>
+      <span class="sparkle two"></span>
+      <span class="sparkle three"></span>
     </div>
   </section>
 
@@ -26,22 +27,21 @@ import { siteConfig } from "../config";
     <ol class="steps">
       <li>
         <h3>Kliknij „Zweryfikuj konto”</h3>
-        <p>Przycisk jest pod panelem weryfikacji na serwerze.</p>
+        <p>Przycisk jest pod panelem weryfikacji na serwerze. Bot wyśle Ci prywatny link.</p>
       </li>
       <li>
-        <h3>Wpisz Riot ID i region</h3>
-        <p>Nazwę i tag z profilu Riot, np. <span class="tag">Moon Poro #EUNE</span>. Riot ID, nie login! Do wyboru EUNE, EUW i NA.</p>
+        <h3>Otwórz link</h3>
+        <p>Kliknij „Zaloguj się przez Riot”, a potem „Przejdź do logowania Riot”. Link działa tylko raz i przez kilka minut.</p>
       </li>
       <li>
-        <h3>Ustaw wskazaną ikonę</h3>
-        <p>Bot pokaże ikonę profilu. Ustaw ją w kliencie League of Legends i kliknij „Sprawdź ikonę”.</p>
+        <h3>Zaloguj się w Riot</h3>
+        <p>Logujesz się na stronie Riot Games, tak jak w kliencie gry. Riot przekazuje nam Twoje Riot ID i region.</p>
       </li>
       <li>
         <h3>Gotowe</h3>
-        <p>Dostajesz rolę „Zweryfikowany” oraz role regionu i rangi. Ikonę możesz od razu zmienić z powrotem.</p>
+        <p>Wróć do Discorda. Masz już rolę „Zweryfikowany” oraz role regionu i rangi.</p>
       </li>
     </ol>
-    <p class="soon">Wkrótce zamiast zmiany ikony będzie można po prostu zalogować się przez Riot.</p>
   </section>
 
   <section class="section">
@@ -66,8 +66,8 @@ import { siteConfig } from "../config";
     <div class="callout">
       <img src="/moon-poro.png" alt="" width="72" height="72" />
       <div>
-        <h2>Hasła nie potrzebujemy</h2>
-        <p>Bot nigdy nie zapyta Cię o hasło do konta Riot. Poro woli Poro-Snaxy. Jeśli ktoś prosi o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
+        <h2>Hasło wpisujesz tylko u Riot</h2>
+        <p>Logowanie odbywa się na stronie riotgames.com. Moon Poro nie widzi Twojego hasła, a bot nigdy nie zapyta o nie na Discordzie. Poro woli Poro-Snaxy. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
         <p>Zapisujemy tylko to, co potrzebne do ról: ID z Discorda, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
       </div>
     </div>
@@ -77,8 +77,12 @@ import { siteConfig } from "../config";
     <h2>Częste pytania</h2>
     <div class="faq">
       <details>
-        <summary>Bot pisze, że nie ma takiego Riot ID</summary>
-        <p>Sprawdź, czy wpisujesz Riot ID z profilu (nazwa i tag po #), a nie login, i czy region jest właściwy.</p>
+        <summary>Link nie działa albo wygasł</summary>
+        <p>Każdy link działa tylko raz i przez kilka minut. Kliknij jeszcze raz „Zweryfikuj konto”, a bot wyśle nowy.</p>
+      </details>
+      <details>
+        <summary>Gram na innym serwerze niż EUNE</summary>
+        <p>Możesz połączyć konto z EUNE, EUW albo NA. Konta z innych regionów nie są na razie obsługiwane.</p>
       </details>
       <details>
         <summary>Chcę podłączyć inne konto Riot</summary>

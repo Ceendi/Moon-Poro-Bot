@@ -1,9 +1,4 @@
 ---
-import "@fontsource/fredoka/latin-500.css";
-import "@fontsource/fredoka/latin-ext-500.css";
-import "@fontsource/fredoka/latin-600.css";
-import "@fontsource/fredoka/latin-ext-600.css";
-import "@fontsource-variable/nunito/wght.css";
 import "../styles/global.css";
 import { siteConfig } from "../config";
 
@@ -50,6 +45,7 @@ const fullTitle = `${title} · Moon Poro`;
     <meta property="og:image" content={image} />
     <link rel="canonical" href={canonical} />
     <link rel="icon" type="image/png" href="/moon-poro.png" />
+    <link rel="preload" href="/fonts/nunito-latin.woff2" as="font" type="font/woff2" crossorigin />
     <title>{fullTitle}</title>
   </head>
   <body>

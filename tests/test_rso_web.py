@@ -227,7 +227,7 @@ async def test_complete_browser_flow_from_landing_to_result(
     assert landing.status == 200
     landing_html = await landing.text()
     assert "Połącz konto przez Riot" in landing_html
-    assert "Potwierdź dostęp do Riot ID i regionu" in landing_html
+    assert "Riot przekaże nam Twoje Riot ID i region" in landing_html
     assert "Przejdź do logowania Riot" in landing_html
     assert untouched is not None and untouched.status == VerificationSessionStatus.CREATED.value
 
@@ -277,7 +277,7 @@ async def test_complete_browser_flow_from_landing_to_result(
         headers={**headers, "Cookie": f"moon_poro_rso={created.token}"},
     )
     completed_html = await completed_page.text()
-    assert "Gotowe, konto zostało zweryfikowane" in completed_html
+    assert "Konto połączone" in completed_html
     assert "Moon#EUNE" in completed_html
 
 

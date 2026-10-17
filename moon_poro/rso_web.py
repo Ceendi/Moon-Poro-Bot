@@ -34,6 +34,7 @@ TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,80}$")
 STATE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,200}$")
 MAX_RIOT_RESPONSE_BYTES = 64 * 1024
 SESSION_COOKIE = "moon_poro_rso"
+NEW_LINK_HINT = "Kliknij „Zweryfikuj konto” na Discordzie, a bot wyśle nowy."
 ACCOUNT_CLUSTER_BY_PLATFORM = {
     "EUN1": "europe",
     "EUW1": "europe",
@@ -247,7 +248,8 @@ def create_app(settings: RSOSettings, database: Database) -> web.Application:
             {
                 "Cache-Control": "no-store, max-age=0",
                 "Content-Security-Policy": (
-                    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+                    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+                    "font-src 'self'; "
                     "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
                 ),
                 "Cross-Origin-Opener-Policy": "same-origin",
@@ -305,15 +307,13 @@ def _see_other(location: str) -> web.Response:
 async def show_start(request: web.Request) -> web.Response:
     token = request.match_info["token"]
     if not TOKEN_PATTERN.fullmatch(token):
-        return _status_page("Nieprawidłowy link", "Poproś bota o nowy link weryfikacyjny.", "error")
+        return _status_page("Nieprawidłowy link", NEW_LINK_HINT, "error")
     record = await request.app[REPOSITORY_KEY].get_by_start_token(token)
     if record is None:
-        return _status_page("Link nie istnieje", "Poproś bota o nowy link weryfikacyjny.", "error")
+        return _status_page("Link nie istnieje", NEW_LINK_HINT, "error")
     now = _utc_now()
     if as_utc(record.expires_at) <= now or record.status == VerificationSessionStatus.EXPIRED.value:
-        return _status_page(
-            "Link wygasł", "Wróć do Discorda i rozpocznij weryfikację ponownie.", "error"
-        )
+        return _status_page("Link wygasł", NEW_LINK_HINT, "error")
     if record.status != VerificationSessionStatus.CREATED.value:
         redirect_response = _see_other("/verify/result")
         _set_session_cookie(redirect_response, token, request.app[SETTINGS_KEY])
@@ -321,18 +321,13 @@ async def show_start(request: web.Request) -> web.Response:
 
     minutes = max(1, int((as_utc(record.expires_at) - now).total_seconds() // 60))
     body = f"""
-        <p class="eyebrow">Jednorazowe połączenie</p>
-        <h1>Połącz konto przez Riot.</h1>
-        <p class="lead">Za chwilę przejdziesz do oficjalnej strony Riot Games. Moon Poro nie zobaczy Twojego hasła. Link wygaśnie za około {minutes} min.</p>
-        <ol class="steps">
-          <li><span>1</span>Zaloguj się na stronie Riot.</li>
-          <li><span>2</span>Potwierdź dostęp do Riot ID i regionu.</li>
-          <li><span>3</span>Wróć do Discorda. Role pojawią się automatycznie.</li>
-        </ol>
+        {_avatar("start")}
+        <h1>Połącz konto przez Riot</h1>
+        <p class="lead">Zalogujesz się na stronie Riot Games. Moon Poro nie widzi Twojego hasła, a Riot przekaże nam Twoje Riot ID i region.</p>
         <form method="post" action="/verify/start/{html.escape(token)}">
-          <button type="submit">Przejdź do logowania Riot <span aria-hidden="true">→</span></button>
+          <button type="submit">Przejdź do logowania Riot</button>
         </form>
-        <p class="fine">Kontynuując, akceptujesz <a href="/terms">warunki</a> i potwierdzasz zapoznanie się z <a href="/privacy">polityką prywatności</a>.</p>
+        <p class="fine">Link działa jeszcze około {minutes} min i tylko raz. Klikając, akceptujesz <a href="/terms/">warunki</a> i <a href="/privacy/">politykę prywatności</a>.</p>
     """
     response = _html_page("Połącz konto Riot", body)
     _set_session_cookie(response, token, request.app[SETTINGS_KEY])
@@ -349,9 +344,11 @@ async def begin_rso(request: web.Request) -> web.StreamResponse:
     try:
         await request.app[REPOSITORY_KEY].begin_oauth(token=token, state=state)
     except SessionExpired:
-        return _status_page("Link wygasł", "Wróć do Discorda i rozpocznij ponownie.", "error")
+        return _status_page("Link wygasł", NEW_LINK_HINT, "error")
     except (SessionNotFound, SessionAlreadyUsed):
-        return _status_page("Link został już użyty", "Każdy link działa tylko raz.", "error")
+        return _status_page(
+            "Link został już użyty", f"Każdy link działa tylko raz. {NEW_LINK_HINT}", "error"
+        )
     response = _see_other(request.app[RSO_CLIENT_KEY].authorization_url(state))
     _set_session_cookie(response, token, request.app[SETTINGS_KEY])
     return response
@@ -368,10 +365,12 @@ async def oauth_callback(request: web.Request) -> web.StreamResponse:
     try:
         record = await request.app[REPOSITORY_KEY].claim_callback(state)
     except SessionExpired:
-        return _status_page("Sesja wygasła", "Wróć do Discorda i rozpocznij ponownie.", "error")
+        return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
     except (SessionNotFound, SessionAlreadyUsed):
         return _status_page(
-            "Sesja została już użyta", "Dla bezpieczeństwa rozpocznij nową weryfikację.", "error"
+            "Sesja została już użyta",
+            f"Dla bezpieczeństwa zacznij od nowa. {NEW_LINK_HINT}",
+            "error",
         )
 
     provider_error = request.query.get("error")
@@ -421,12 +420,12 @@ async def verification_result(request: web.Request) -> web.Response:
 def _result_for_record(record: VerificationSession) -> web.Response:
     status = record.status
     if status == VerificationSessionStatus.COMPLETED.value:
-        riot_id = ""
+        account = "Twoje konto Riot"
         if record.riot_game_name and record.riot_tag_line:
-            riot_id = f" Konto <strong>{html.escape(record.riot_game_name)}#{html.escape(record.riot_tag_line)}</strong> jest połączone."
+            account = f"<strong>{html.escape(record.riot_game_name)}#{html.escape(record.riot_tag_line)}</strong>"
         return _status_page(
-            "Gotowe, konto zostało zweryfikowane",
-            f"{riot_id} Role regionu i rangi zostały zaktualizowane. Możesz wrócić do Discorda.",
+            "Konto połączone",
+            f"{account} jest już połączone z Twoim Discordem. Role regionu i rangi czekają na serwerze.",
             "success",
             button=("Wróć do Discorda", f"https://discord.com/channels/{record.guild_id}"),
         )
@@ -437,25 +436,26 @@ def _result_for_record(record: VerificationSession) -> web.Response:
     }:
         return _status_page(
             "Riot potwierdził konto",
-            "Bot aktualizuje teraz role na Discordzie. Ta strona odświeży się automatycznie.",
+            "Bot nadaje teraz role na Discordzie. Ta strona odświeży się sama.",
             "pending",
             refresh_seconds=2,
         )
     if status == VerificationSessionStatus.CANCELLED.value or record.error_code == "USER_CANCELLED":
         return _status_page(
             "Logowanie anulowane",
-            "Żadne konto nie zostało połączone. Możesz bezpiecznie zamknąć kartę.",
+            "Nic nie zostało połączone. Możesz zamknąć tę kartę albo zacząć jeszcze raz na Discordzie.",
             "neutral",
         )
     if status == VerificationSessionStatus.EXPIRED.value:
-        return _status_page(
-            "Sesja wygasła", "Wróć do Discorda i rozpocznij weryfikację ponownie.", "error"
-        )
+        return _status_page("Sesja wygasła", NEW_LINK_HINT, "error")
 
     error_copy = {
-        "DISCORD_ALREADY_LINKED": "To konto Discord ma już połączone konto Riot.",
+        "DISCORD_ALREADY_LINKED": (
+            "Twoje konto Discord ma już połączone konto Riot. Żeby podłączyć inne, "
+            "najpierw usuń obecne w „Moje konto”."
+        ),
         "RIOT_ALREADY_LINKED": "To konto Riot jest już połączone z innym kontem Discord.",
-        "LINK_CONFLICT": "Konto zostało już połączone w innej rozpoczętej weryfikacji.",
+        "LINK_CONFLICT": "To konto zostało właśnie połączone w innej weryfikacji.",
         "UNSUPPORTED_PLATFORM": "Ten region League of Legends nie jest obecnie obsługiwany.",
         "MISSING_PLATFORM": (
             "Nie udało się ustalić obsługiwanego regionu League of Legends dla tego konta."
@@ -465,9 +465,9 @@ def _result_for_record(record: VerificationSession) -> web.Response:
     }
     message = error_copy.get(
         record.error_code or "",
-        "Nie udało się potwierdzić konta. Wróć do Discorda i spróbuj ponownie za chwilę.",
+        "Coś poszło nie tak po drodze. Wróć do Discorda i spróbuj ponownie za chwilę.",
     )
-    return _status_page("Weryfikacja nie została ukończona", message, "error")
+    return _status_page("Nie udało się połączyć konta", message, "error")
 
 
 def _status_page(
@@ -478,23 +478,32 @@ def _status_page(
     button: tuple[str, str] | None = None,
     refresh_seconds: int | None = None,
 ) -> web.Response:
-    icon = {"success": "✓", "error": "!", "pending": "···", "neutral": "↗"}[kind]
     action = ""
     if button:
         label, url = button
-        action = f'<a class="button" href="{html.escape(url, quote=True)}">{html.escape(label)} <span aria-hidden="true">→</span></a>'
+        action = f'<a class="button" href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
     body = f"""
-        <div class="status-icon {kind}" aria-hidden="true">{icon}</div>
-        <p class="eyebrow">Weryfikacja konta Riot</p>
+        {_avatar(kind)}
         <h1>{html.escape(title)}</h1>
         <p class="lead">{message}</p>
         {action}
-        <p class="fine">Moon Poro nigdy nie otrzymuje Twojego hasła Riot.</p>
     """
     response = _html_page(title, body)
     if refresh_seconds is not None:
         response.headers["Refresh"] = str(refresh_seconds)
     return response
+
+
+def _avatar(kind: str) -> str:
+    badge = {
+        "success": '<span class="badge success">✓</span>',
+        "error": '<span class="badge error">!</span>',
+        "pending": '<span class="badge pending"><i></i><i></i><i></i></span>',
+    }.get(kind, "")
+    return (
+        f'<div class="avatar" aria-hidden="true">'
+        f'<img src="/moon-poro.png" alt="" width="96" height="96">{badge}</div>'
+    )
 
 
 def _html_page(title: str, body: str) -> web.Response:
@@ -506,28 +515,36 @@ def _html_page(title: str, body: str) -> web.Response:
   <meta name="color-scheme" content="dark">
   <title>{html.escape(title)} · Moon Poro</title>
   <style>
-    :root {{ color-scheme: dark; --ink:#efeaf8; --muted:#b3abcf; --night:#0d0b1e; --panel:#1b1735; --ice:#ffe2a3; --berry:#ff8fae; --line:#2f2856; }}
+    @font-face {{ font-family:"Nunito"; font-weight:200 1000; font-display:swap; src:url("/fonts/nunito-latin.woff2") format("woff2"); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }}
+    @font-face {{ font-family:"Nunito"; font-weight:200 1000; font-display:swap; src:url("/fonts/nunito-latin-ext.woff2") format("woff2"); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }}
+    :root {{ color-scheme:dark; --night:#0d0b1e; --text:#efeaf8; --muted:#b3abcf; --quiet:#8a82aa; --moon:#ffe2a3; --pink:#ff8fae; --lavender:#b9a3f5; --line:#2f2856; }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; color:var(--ink); background:radial-gradient(circle at 80% 0, #2c2160 0, var(--night) 55%); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }}
-    main {{ width:min(640px,100%); padding:clamp(28px,6vw,52px); border:1.5px solid var(--line); border-radius:28px; background:linear-gradient(140deg,#221d42,#15122d); box-shadow:0 28px 80px rgba(0,0,0,.35); }}
-    .eyebrow {{ margin:0 0 10px; color:var(--berry); font-weight:700; font-size:14px; }}
-    h1 {{ max-width:16ch; margin:0 0 16px; font:700 clamp(30px,6vw,44px)/1.1 system-ui,-apple-system,"Segoe UI",sans-serif; }}
-    .lead {{ margin:0 0 28px; color:var(--muted); font-size:clamp(17px,3vw,20px); }}
-    .steps {{ display:grid; gap:12px; margin:28px 0; padding:0; list-style:none; }}
-    .steps li {{ display:flex; gap:12px; align-items:center; padding:12px 14px; border-top:1px solid var(--line); }}
-    .steps span {{ display:grid; place-items:center; flex:0 0 28px; height:28px; border-radius:50%; color:#2a1630; background:var(--berry); font:700 13px system-ui,sans-serif; }}
-    button,.button {{ display:inline-flex; align-items:center; justify-content:center; gap:12px; width:100%; min-height:54px; padding:14px 20px; border:0; border-radius:999px; color:#241a3f; background:var(--ice); font:800 16px system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .18s ease,background .18s ease; }}
-    button:hover,.button:hover {{ transform:translateY(-2px); background:#fff0cc; }}
-    button:focus-visible,.button:focus-visible,a:focus-visible {{ outline:3px solid var(--ice); outline-offset:4px; }}
-    a {{ color:#b9a3f5; }}
-    .fine {{ margin:22px 0 0; color:#8a82aa; font-size:13px; }}
-    .status-icon {{ display:grid; place-items:center; width:56px; height:56px; margin-bottom:22px; border-radius:50%; color:var(--ice); background:#2a2350; font:800 24px system-ui,sans-serif; }}
-    .status-icon.error {{ color:#ff9cad; background:#3d1d36; }} .status-icon.success {{ color:#a9f7cc; background:#173a33; }}
-    strong {{ color:var(--ink); }}
-    @media (prefers-reduced-motion:reduce) {{ * {{ transition:none!important; }} }}
+    body {{ margin:0; min-height:100vh; display:grid; grid-template-rows:1fr auto; justify-items:center; padding:24px 20px; color:var(--text); background:radial-gradient(48rem 30rem at 50% -6rem, rgba(124,98,214,.34), transparent 70%), var(--night); font:17px/1.6 "Nunito",system-ui,-apple-system,"Segoe UI",sans-serif; }}
+    main {{ align-self:center; display:grid; justify-items:center; width:min(460px,100%); padding-block:32px; text-align:center; }}
+    .avatar {{ position:relative; width:96px; height:96px; margin-bottom:26px; }}
+    .avatar img {{ display:block; width:96px; height:96px; border-radius:50%; box-shadow:0 0 0 8px rgba(255,226,163,.08), 0 0 60px rgba(255,226,163,.22); }}
+    .badge {{ position:absolute; right:-6px; bottom:-4px; display:grid; place-items:center; width:36px; height:36px; border:4px solid var(--night); border-radius:50%; font-weight:900; font-size:17px; line-height:1; }}
+    .badge.success {{ color:#123629; background:#7ee2b0; }}
+    .badge.error {{ color:#3d1d36; background:var(--pink); }}
+    .badge.pending {{ display:flex; gap:3px; justify-content:center; align-items:center; background:var(--lavender); }}
+    .badge.pending i {{ width:5px; height:5px; border-radius:50%; background:#241a3f; animation:blink 1.2s infinite ease-in-out; }}
+    .badge.pending i:nth-child(2) {{ animation-delay:.2s; }} .badge.pending i:nth-child(3) {{ animation-delay:.4s; }}
+    @keyframes blink {{ 0%,80%,100% {{ opacity:.25; }} 40% {{ opacity:1; }} }}
+    h1 {{ margin:0 0 12px; font-size:clamp(28px,6vw,36px); font-weight:800; line-height:1.15; text-wrap:balance; }}
+    .lead {{ margin:0 0 28px; color:var(--muted); text-wrap:pretty; }}
+    form {{ width:100%; margin:0; }}
+    button,.button {{ display:inline-flex; align-items:center; justify-content:center; width:100%; min-height:52px; padding:12px 24px; border:0; border-radius:999px; color:#241a3f; background:linear-gradient(180deg,#fff0cc,var(--moon)); box-shadow:0 6px 24px rgba(255,226,163,.18); font:800 17px "Nunito",system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .15s ease; }}
+    button:hover,.button:hover {{ transform:translateY(-2px); }}
+    :focus-visible {{ outline:3px solid var(--moon); outline-offset:4px; }}
+    a {{ color:var(--lavender); }}
+    .fine {{ margin:18px 0 0; color:var(--quiet); font-size:14px; }}
+    strong {{ color:var(--text); }}
+    footer {{ color:var(--quiet); font-size:14px; }}
+    footer a {{ color:var(--quiet); margin-left:14px; }}
+    @media (prefers-reduced-motion:reduce) {{ * {{ transition:none!important; animation:none!important; }} }}
   </style>
 </head>
-<body><main>{body}</main></body>
+<body><main>{body}</main><footer>Moon Poro<a href="/privacy/">Prywatność</a><a href="/terms/">Warunki</a></footer></body>
 </html>"""
     return web.Response(text=document, content_type="text/html", charset="utf-8")
 
