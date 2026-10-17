@@ -35,7 +35,7 @@ async def test_stats_paginator_builds_latest_period_and_navigates() -> None:
 
     embed = view.embed()
 
-    assert embed.title.endswith("2026-08")
+    assert embed.title.endswith("sierpień 2026")
     assert embed.footer.text == "Strona 2/2"
     assert {field.name for field in embed.fields} == {"<@1>", "ID: 3"}
 
@@ -55,7 +55,7 @@ async def test_stats_paginator_rejects_other_user() -> None:
 
     assert not await view.interaction_check(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "To nie jest Twój paginator.", ephemeral=True
+        "Te przyciski działają tylko dla osoby, która użyła komendy.", ephemeral=True
     )
 
 
