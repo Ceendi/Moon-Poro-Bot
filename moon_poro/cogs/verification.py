@@ -74,13 +74,13 @@ _ACCOUNT_PROFILE_OBSERVABLE_REQUESTS = frozenset(
     }
 )
 _ACCOUNT_PROFILE_STALE_MESSAGE = (
-    "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz."
+    "Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz."
 )
 _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
-    "Odświeżanie trwa dłużej niż zwykle. Wyświetl „Moje konto” ponownie za chwilę."
+    "Odświeżanie trwa dłużej niż zwykle. Otwórz „Moje konto” jeszcze raz za chwilę."
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
-    "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać."
+    "Nie udało się pokazać wyniku. Odświeżanie może jeszcze trwać, sprawdź „Moje konto” za chwilę."
 )
 _RANK_REFRESH_RIOT_UNAVAILABLE_MESSAGE = (
     "Riot jest chwilowo niedostępny.\n"
@@ -1235,12 +1235,12 @@ async def _remove_user_verification(
         link=link,
     )
     if not completed:
-        return "Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie."
+        return "Usuwanie powiązania jeszcze trwa. Bot dokończy je sam."
     if identity.puuid is None:
         return "Usunięto poprzednie powiązanie. Możesz teraz ponownie połączyć konto Riot."
     return (
         "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
-        "Role regionu, rangi i użytkownika pozostają bez zmian."
+        "Role regionu, rangi i „Użytkownik” zostają."
     )
 
 
@@ -1779,7 +1779,7 @@ class AccountProfileView(discord.ui.View):
             return
         self._restore_refresh_button(self.refresh_rank)
         failure_message = (
-            "Nie udało się sprawdzić możliwości odświeżenia. Spróbuj ponownie."
+            "Nie udało się sprawdzić, czy możesz odświeżyć rangę. Spróbuj ponownie."
             if checking_cooldown
             else "Nie udało się rozpocząć odświeżania. Spróbuj ponownie."
         )
@@ -1937,14 +1937,14 @@ async def _show_delete_confirmation(
         confirmation = (
             "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i użytkownika pozostaną bez zmian.\n"
+            "Role regionu, rangi i „Użytkownik” zostaną.\n"
             "Po usunięciu możesz ponownie połączyć konto Riot."
         )
     else:
         confirmation = (
             "Czy na pewno chcesz usunąć powiązanie z kontem Riot?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i użytkownika pozostaną bez zmian."
+            "Role regionu, rangi i „Użytkownik” zostaną."
         )
     await interaction.response.send_message(
         confirmation,
@@ -2018,12 +2018,12 @@ class AdminDeleteVerificationConfirmationView(discord.ui.View):
                 VerificationDeletionRequestStatus.LINK_CHANGED,
                 VerificationDeletionRequestStatus.NOT_LINKED,
             }:
-                message = "Powiązanie zmieniło się. Uruchom komendę ponownie."
+                message = "Powiązanie się zmieniło. Użyj komendy jeszcze raz."
             elif result.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED:
                 message = "Usuwanie tego powiązania już trwa."
             elif result.status is VerificationDeletionRequestStatus.POLICY_CONFLICT:
                 message = (
-                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
+                    "Ta osoba sama zaczęła już usuwać powiązanie. Role regionu i rangi zostaną."
                 )
             elif result.link is None:
                 message = "Nie udało się rozpocząć usuwania. Spróbuj ponownie."
@@ -2130,7 +2130,7 @@ class VerificationStartView(discord.ui.View):
             )
         ):
             await interaction.edit_original_response(
-                content="Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+                content="Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
             )
             return
         already_linked = existing_link is not None
@@ -2157,7 +2157,7 @@ class VerificationStartView(discord.ui.View):
             )
         except SessionAlreadyUsed:
             await interaction.edit_original_response(
-                content="Łączenie konta już trwa lub zostało zakończone. Sprawdź sekcję „Moje konto”.",
+                content="Łączenie konta już trwa albo się zakończyło. Sprawdź „Moje konto”.",
             )
             return
         verification_url = f"{self.bot.settings.rso_base_url}/verify/start/{session.token}"
@@ -2175,11 +2175,12 @@ class VerificationStartView(discord.ui.View):
             description=(
                 "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
                 "Moon Poro nie zobaczy Twojego hasła. "
-                f"Jednorazowy link wygaśnie za {minutes} min."
+                f"Link działa tylko dla Ciebie i wygaśnie za {minutes} min. "
+                "Nie przekazuj go nikomu."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
-        embed.set_footer(text="Po zalogowaniu wróć do Discorda. Role zostaną nadane automatycznie.")
+        embed.set_footer(text="Po zalogowaniu wróć do Discorda, role pojawią się same.")
         await interaction.edit_original_response(content=None, embed=embed, view=link_view)
 
     @discord.ui.button(
@@ -2448,14 +2449,14 @@ class VerificationCog(commands.Cog):
             return
         if role_leagues is None:
             message = (
-                "Twoje konto Riot zostało zweryfikowane. "
-                f"Na serwerze **{guild.name}** masz już rolę regionu. "
-                "Rolę rangi dodamy automatycznie, gdy tylko Riot ją potwierdzi."
+                "Twoje konto Riot jest połączone. "
+                f"Na serwerze **{guild.name}** masz już rolę regionu, "
+                "a rolę rangi bot doda, gdy tylko Riot ją poda."
             )
         else:
             message = (
-                "Twoje konto Riot zostało zweryfikowane. "
-                f"Na serwerze **{guild.name}** zaktualizowano role regionu i rangi."
+                "Twoje konto Riot jest połączone. "
+                f"Na serwerze **{guild.name}** masz już role regionu i rangi."
             )
         with suppress(discord.Forbidden, discord.HTTPException):
             await member.send(message)
@@ -2661,8 +2662,8 @@ class VerificationCog(commands.Cog):
         embed = discord.Embed(
             title="Weryfikacja konta League of Legends",
             description=(
-                "Połącz konto przez oficjalne logowanie Riot. Bot zapisze Riot ID i region "
-                "oraz będzie aktualizował rangę Solo/Duo i role."
+                "Zaloguj się przez Riot, a bot nada Ci role regionu i rangi Solo/Duo. "
+                "Potem sam pilnuje, żeby ranga była aktualna."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
@@ -2671,7 +2672,7 @@ class VerificationCog(commands.Cog):
             value=_verification_legal_links(self.bot),
             inline=False,
         )
-        embed.set_footer(text="Logowanie odbywa się na stronie Riot.")
+        embed.set_footer(text="Hasło wpisujesz tylko na stronie Riot.")
         await interaction.response.send_message(embed=embed, view=self.rso_start_view)
 
     @app_commands.command(
@@ -2702,7 +2703,7 @@ class VerificationCog(commands.Cog):
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.choices(server=_server_choices(), powod=_lookup_reason_choices())
-    @app_commands.command(name="show_wer_user", description="Znajduje Discord na podstawie Riot ID")
+    @app_commands.command(name="show_wer_user", description="Szuka konta Discord po Riot ID")
     async def lookup_by_riot_id(
         self,
         interaction: discord.Interaction,
@@ -2732,13 +2733,13 @@ class VerificationCog(commands.Cog):
         if link:
             await interaction.followup.send(
                 f"Powiązane konto Discord: <@{link.discord_user_id}> (`{link.discord_user_id}`). "
-                "Sprawdzenie zapisano w dzienniku audytowym.",
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                "Nie znaleziono powiązania. Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
 
@@ -2765,7 +2766,7 @@ class VerificationCog(commands.Cog):
         )
         if link is None or not link.puuid:
             await interaction.followup.send(
-                "Nie znaleziono powiązania. Sprawdzenie zapisano w dzienniku audytowym.",
+                "Nie znaleziono powiązania. Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
             return
@@ -2783,7 +2784,7 @@ class VerificationCog(commands.Cog):
         if account is None:
             await interaction.followup.send(
                 f"Riot nie znalazł konta przypisanego do tego powiązania (region **{region}**). "
-                "Sprawdzenie zapisano w dzienniku audytowym.",
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
             return
@@ -2791,13 +2792,13 @@ class VerificationCog(commands.Cog):
         if riot_id is None:
             await interaction.followup.send(
                 f"Riot nie zwrócił Riot ID dla tego konta (region **{region}**). "
-                "Sprawdzenie zapisano w dzienniku audytowym.",
+                "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
                 ephemeral=True,
             )
             return
         await interaction.followup.send(
             f"Konto Riot: **{discord.utils.escape_markdown(riot_id)}**, region **{region}**. "
-            "Sprawdzenie zapisano w dzienniku audytowym.",
+            "Sprawdzenie zostało zapisane w rejestrze wyszukiwań.",
             ephemeral=True,
         )
 
@@ -2805,7 +2806,7 @@ class VerificationCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.choices(server=_server_choices())
     @app_commands.command(
-        name="usun_wer_nick", description="Administracyjnie usuwa powiązanie Riot ID"
+        name="usun_wer_nick", description="Usuwa powiązanie wybranej osoby z kontem Riot"
     )
     async def remove_by_riot_id(
         self,
@@ -2842,7 +2843,7 @@ class VerificationCog(commands.Cog):
                 message = "Usuwanie tego powiązania już trwa."
             else:
                 message = (
-                    "Użytkownik rozpoczął już usuwanie. Role regionu i rangi pozostaną bez zmian."
+                    "Ta osoba sama zaczęła już usuwać powiązanie. Role regionu i rangi zostaną."
                 )
             await interaction.followup.send(message, ephemeral=True)
             return

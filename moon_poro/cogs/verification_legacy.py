@@ -252,7 +252,7 @@ class LegacyVerificationStartView(discord.ui.View):
             )
             await interaction.edit_original_response(
                 content=(
-                    "Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+                    "Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
                     if resumed
                     else "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
                     "obecne powiązanie w sekcji „Moje konto”."
@@ -518,7 +518,7 @@ class LegacyVerificationModal(discord.ui.Modal, title="Weryfikacja konta Riot"):
             )
         except SessionAlreadyUsed:
             await interaction.followup.send(
-                "Poprzednia weryfikacja jest już finalizowana. Sprawdź „Moje konto”.",
+                "Poprzednia weryfikacja jeszcze się kończy. Sprawdź „Moje konto”.",
                 ephemeral=True,
             )
             return
@@ -628,7 +628,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             return False
         if not self._is_current():
             await interaction.response.send_message(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return False
@@ -711,7 +711,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         # A newer challenge or cancellation must invalidate an in-flight request.
         if not self._is_current():
             await interaction.followup.send(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return
@@ -735,7 +735,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             )
         except SessionError:
             await interaction.followup.send(
-                "To wyzwanie wygasło lub zostało zastąpione. Rozpocznij weryfikację ponownie.",
+                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return

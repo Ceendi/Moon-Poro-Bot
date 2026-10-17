@@ -45,19 +45,19 @@ class CoreEventsCog(commands.Cog):
         )
         await self._log(
             member.guild,
-            f"🔨 Zbanowano użytkownika `{member}` (`{member.id}`): zbyt młode konto Discord.",
+            f"🔨 Automatyczny ban: `{member}` (`{member.id}`), konto Discord jest za nowe.",
         )
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         await self._log(
             member.guild,
-            f"👋 Użytkownik `{member}` (`{member.id}`) opuścił serwer lub został usunięty.",
+            f"👋 `{member}` (`{member.id}`) nie jest już na serwerze (wyjście albo wyrzucenie).",
         )
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User) -> None:
-        await self._log(guild, f"🔨 Użytkownik `{user}` (`{user.id}`) został zbanowany.")
+        await self._log(guild, f"🔨 Ban: `{user}` (`{user.id}`).")
 
     async def _log(self, guild: discord.Guild, content: str) -> None:
         settings = self.bot.settings

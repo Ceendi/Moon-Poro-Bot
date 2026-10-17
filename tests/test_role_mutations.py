@@ -248,7 +248,7 @@ async def test_repair_counts_http_changes_and_skips_consistent_members():
     interaction = env.interaction()
     await RolesCog.repair_roles.callback(cog, interaction)
     assert env.selected() == {"Gold", "EUNE", "Member"}
-    assert interaction.followup.send.await_args.args[0] == "Zaktualizowano 1 użytkowników."
+    assert interaction.followup.send.await_args.args[0] == "Zmienione osoby: 1."
     env.guild._members[42] = env.snapshot()
     await RolesCog.repair_roles.callback(cog, env.interaction())
     assert env.http.get_member.await_count == 1
@@ -284,7 +284,7 @@ async def test_verification_repair_rechecks_link_created_after_initial_scan():
     await RolesCog.repair_verifications.callback(env.cog(), interaction)
     assert env.selected() == {"Gold", "EUNE", "Member", "Verified"}
     assert not env.http.remove_role.await_count
-    assert interaction.followup.send.await_args.args[0] == "Naprawiono 0 użytkowników."
+    assert interaction.followup.send.await_args.args[0] == "Poprawione osoby: 0."
 
 
 async def test_verification_repair_preserves_roles_after_self_delete():

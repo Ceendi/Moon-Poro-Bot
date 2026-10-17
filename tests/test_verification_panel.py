@@ -384,7 +384,7 @@ async def test_public_start_resumes_paused_completion_without_new_authentication
     await view.begin_verification(interaction)
     bot.verification_sessions.resume_paused_for_user.assert_awaited_once_with(123, 101)
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Wznawiamy weryfikację. Bot ponownie spróbuje nadać role."
+        content="Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
     )
     bot.verification_sessions.create.assert_not_awaited()
     response.send_modal.assert_not_awaited()
@@ -430,7 +430,7 @@ async def test_rso_publishes_short_factual_embed() -> None:
 
     kwargs = interaction.response.send_message.await_args.kwargs
     assert kwargs["embed"].title == "Weryfikacja konta League of Legends"
-    assert "oficjalne logowanie Riot" in kwargs["embed"].description
+    assert "Zaloguj się przez Riot" in kwargs["embed"].description
     assert "dywiz" not in kwargs["embed"].description.lower()
     assert kwargs["embed"].fields[0].name == "Zasady"
     assert kwargs["embed"].fields[0].value == (
@@ -733,7 +733,7 @@ async def test_profile_refresh_timeout_keeps_queue_running_and_button_disabled(
     assert timeout_embed.description is None
     assert all(field.name != "Stan odświeżania" for field in timeout_embed.fields)
     interaction.followup.send.assert_awaited_once_with(
-        "Odświeżanie trwa dłużej niż zwykle. Wyświetl „Moje konto” ponownie za chwilę.",
+        "Odświeżanie trwa dłużej niż zwykle. Otwórz „Moje konto” jeszcze raz za chwilę.",
         ephemeral=True,
     )
     assert timeout_kwargs["view"].children[0].disabled is True
@@ -897,7 +897,7 @@ async def test_stale_profile_refresh_does_not_render_the_new_link(
 
     bot.verifications.get_by_user.assert_not_awaited()
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
+        content="Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz.",
         embed=None,
         view=None,
     )
@@ -953,7 +953,7 @@ async def test_profile_refresh_stops_if_link_changes_while_watching(
     await refresh.callback(interaction)
 
     assert interaction.edit_original_response.await_args.kwargs == {
-        "content": "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
+        "content": "Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz.",
         "embed": None,
         "view": None,
     }
@@ -1232,7 +1232,7 @@ async def test_profile_cooldown_lookup_failure_restores_the_active_button() -> N
 
     interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_awaited_once_with(
-        "Nie udało się sprawdzić możliwości odświeżenia. Spróbuj ponownie.",
+        "Nie udało się sprawdzić, czy możesz odświeżyć rangę. Spróbuj ponownie.",
         ephemeral=True,
     )
     assert all(field.name != "Stan odświeżania" for field in view.presentation.embed.fields)
@@ -1275,7 +1275,7 @@ async def test_profile_refresh_keeps_button_disabled_after_observer_error() -> N
 
     interaction.edit_original_response.assert_awaited_once_with(view=view)
     interaction.followup.send.assert_awaited_once_with(
-        "Nie udało się automatycznie pokazać wyniku. Odświeżanie może nadal trwać.",
+        "Nie udało się pokazać wyniku. Odświeżanie może jeszcze trwać, sprawdź „Moje konto” za chwilę.",
         ephemeral=True,
     )
     assert "database" not in interaction.followup.send.await_args.args[0]
@@ -1595,7 +1595,7 @@ async def test_delete_button_requires_ephemeral_confirmation(
     assert kwargs["ephemeral"] is True
     confirmation = interaction.response.send_message.await_args.args[0]
     assert "Rola „Zweryfikowany” zostanie usunięta." in confirmation
-    assert "Role regionu, rangi i użytkownika pozostaną bez zmian." in confirmation
+    assert "Role regionu, rangi i „Użytkownik” zostaną." in confirmation
     view = kwargs["view"]
     assert isinstance(view, DeleteVerificationConfirmationView)
     assert view.identity == VerificationLinkIdentity.from_link(link)
@@ -1673,7 +1673,7 @@ async def test_null_puuid_link_can_be_confirmed_and_deleted_with_strict_identity
     assert confirmation == (
         "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
         "Rola „Zweryfikowany” zostanie usunięta. "
-        "Role regionu, rangi i użytkownika pozostaną bez zmian.\n"
+        "Role regionu, rangi i „Użytkownik” zostaną.\n"
         "Po usunięciu możesz ponownie połączyć konto Riot."
     )
     view = open_interaction.response.send_message.await_args.kwargs["view"]
@@ -1740,7 +1740,7 @@ async def test_delete_rejects_a_profile_for_an_old_link(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
+        "Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz.",
         ephemeral=True,
     )
 
@@ -1769,7 +1769,7 @@ async def test_delete_rejects_stale_null_puuid_identity(
     )
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Ten widok jest już nieaktualny. Wyświetl „Moje konto” jeszcze raz.",
+        "Ta wiadomość jest już nieaktualna. Otwórz „Moje konto” jeszcze raz.",
         ephemeral=True,
     )
 
@@ -2186,7 +2186,7 @@ async def test_shared_delete_keeps_region_rank_and_member_roles(
         verified, reason="Usunięcie weryfikacji przez użytkownika"
     )
     assert region in member.roles and rank in member.roles and member_role in member.roles
-    assert "pozostają bez zmian" in message
+    assert "zostają" in message
     audit_delete.assert_awaited_once()
     bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
         123,
@@ -2256,7 +2256,7 @@ async def test_shared_delete_reports_pending_and_retries_when_discord_fails(
 
     message = await _remove_user_verification(bot, interaction, identity=identity)
 
-    assert message == ("Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie.")
+    assert message == ("Usuwanie powiązania jeszcze trwa. Bot dokończy je sam.")
     bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
         123,
         101,
@@ -2330,7 +2330,7 @@ async def test_shared_delete_retries_audit_cleanup_before_finalizing(
         identity=identity,
     )
 
-    assert message == ("Usuwanie powiązania jeszcze trwa. Spróbujemy dokończyć je automatycznie.")
+    assert message == ("Usuwanie powiązania jeszcze trwa. Bot dokończy je sam.")
     bot.verification_sessions.cancel_for_user.assert_awaited_once_with(
         123,
         101,

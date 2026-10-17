@@ -292,9 +292,9 @@ def _rank_label(link: VerificationLinkLike) -> str:
 
 def _lp_label(link: VerificationLinkLike) -> str:
     if (link.last_known_rank or "").strip().upper() == "UNRANKED":
-        return "—"
+        return "brak"
     if link.last_known_league_points is None or link.last_known_league_points < 0:
-        return "—"
+        return "brak"
     return f"{link.last_known_league_points} LP"
 
 
@@ -306,13 +306,13 @@ def _valid_record(wins: int | None, losses: int | None) -> tuple[int | None, int
 
 def _record_label(wins: int | None, losses: int | None) -> str:
     if wins is None or losses is None:
-        return "—"
+        return "brak"
     return f"{wins} W / {losses} P"
 
 
 def _win_rate_label(wins: int | None, losses: int | None) -> str:
     if wins is None or losses is None or wins + losses == 0:
-        return "—"
+        return "brak"
     rate = wins / (wins + losses) * 100
     return f"{rate:.1f}".replace(".", ",").removesuffix(",0") + "%"
 

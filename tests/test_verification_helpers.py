@@ -334,7 +334,7 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
     assert sent_embed.title == "Połącz konto Riot"
     assert sent_embed.description == (
         "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
-        "Moon Poro nie zobaczy Twojego hasła. Jednorazowy link wygaśnie za 10 min."
+        "Moon Poro nie zobaczy Twojego hasła. Link działa tylko dla Ciebie i wygaśnie za 10 min. Nie przekazuj go nikomu."
     )
     assert "token" not in sent_embed.description.lower()
     assert interaction.edit_original_response.await_args.kwargs["content"] is None
@@ -1332,8 +1332,7 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
     )
     cog._publish_rso_audit.assert_awaited_once_with(record)
     member.send.assert_awaited_once_with(
-        "Twoje konto Riot zostało zweryfikowane. "
-        "Na serwerze **Test** zaktualizowano role regionu i rangi."
+        "Twoje konto Riot jest połączone. Na serwerze **Test** masz już role regionu i rangi."
     )
 
 
@@ -1776,7 +1775,7 @@ async def test_riot_outage_completes_verification_without_a_rank(
     verifications.schedule_rank_refresh_now.assert_awaited_once_with(123, 101)
     cog._publish_rso_audit.assert_awaited_once_with(record)
     message = member.send.await_args.args[0]
-    assert "Rolę rangi dodamy automatycznie" in message
+    assert "rolę rangi bot doda" in message
     assert "\u2014" not in message and "\u2013" not in message
 
 
@@ -2157,5 +2156,5 @@ async def test_show_wer_discord_handles_missing_accounts_and_fields(
     message = interaction.followup.send.await_args.args[0]
     assert expected_fragment in message
     assert "chwilowo niedostępny" not in message
-    assert "dzienniku audytowym" in message
+    assert "rejestrze wyszukiwań" in message
     cog.bot.verifications.log_access.assert_awaited_once()

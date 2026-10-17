@@ -362,7 +362,7 @@ async def test_icon_challenge_has_hard_deadline_even_with_repeated_rate_limited_
         limiter.update_rate_limit("icon", 101, user_cooldown_seconds=200)
     now[0] = 220
     await view.children[0].callback(interaction)
-    assert "wygasło" in interaction.response.send_message.await_args.args[0]
+    assert "wygasła" in interaction.response.send_message.await_args.args[0]
     assert view.deadline == 220
 
 
@@ -454,7 +454,7 @@ async def test_inflight_icon_check_cannot_finish_after_challenge_invalidation(
     )
     await view.children[0].callback(interaction)
     bot.verification_sessions.reserve_link.assert_not_awaited()
-    assert "wygasło" in interaction.followup.send.await_args.args[0]
+    assert "wygasła" in interaction.followup.send.await_args.args[0]
 
 
 def test_legacy_rate_limiter_applies_global_window_without_consuming_denied_attempt() -> None:

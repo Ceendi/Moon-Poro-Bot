@@ -144,14 +144,14 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
         new_role = find_role(interaction.guild, self.values[0], settings)
         if new_role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
         async with _current_roles(interaction.user) as member:
             if member_has_role(member, settings.verified_role_name, settings):
                 await interaction.followup.send(
-                    "Zweryfikowane konta otrzymują rangę automatycznie.", ephemeral=True
+                    "Po weryfikacji bot sam nadaje rolę rangi.", ephemeral=True
                 )
                 return
             if member_has_role(member, settings.no_lol_role_name, settings):
@@ -227,7 +227,7 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
         role = find_role(interaction.guild, self.role_name, settings)
         if role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
@@ -243,7 +243,7 @@ class ToggleRoleButton(discord.ui.Button[discord.ui.View]):
                 member, settings.verified_role_name, settings
             ):
                 await interaction.followup.send(
-                    "Region zweryfikowanego konta jest zarządzany automatycznie.", ephemeral=True
+                    "Po weryfikacji bot sam ustawia rolę regionu.", ephemeral=True
                 )
                 return
             if role in member.roles:
@@ -290,14 +290,14 @@ class MiscRolesView(_RolePanelView):
         role = find_role(interaction.guild, settings.no_lol_role_name, settings)
         if role is None:
             await interaction.followup.send(
-                "Nie udało się zmienić roli. Zgłoś problem administratorowi.",
+                "Nie udało się zmienić roli. Daj znać administracji serwera.",
                 ephemeral=True,
             )
             return
         async with _current_roles(interaction.user) as member:
             if member_has_role(member, settings.verified_role_name, settings):
                 await interaction.followup.send(
-                    "Najpierw usuń weryfikację konta Riot.", ephemeral=True
+                    "Najpierw usuń powiązanie z kontem Riot w „Moje konto”.", ephemeral=True
                 )
                 return
             league_roles = settings.lol_ranks + settings.lol_servers + settings.lol_positions
@@ -365,7 +365,7 @@ class RolesCog(commands.Cog):
     ) -> None:
         channel = interaction.channel
         if not isinstance(channel, discord.abc.Messageable):
-            await safe_send(interaction, "Nie można publikować panelu na tym kanale.")
+            await safe_send(interaction, "Bot nie może wysłać panelu na tym kanale.")
             return
 
         await interaction.response.send_message("**Ranga Solo/Duo**", view=RankSelect(self.bot))
@@ -513,7 +513,9 @@ class RolesCog(commands.Cog):
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
-    @app_commands.command(name="pbr", description="Pokazuje osoby z niespójnymi rolami")
+    @app_commands.command(
+        name="pbr", description="Pokazuje osoby z brakującymi albo zbędnymi rolami"
+    )
     async def show_broken_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         guild = await _require_guild(interaction)
@@ -521,14 +523,14 @@ class RolesCog(commands.Cog):
             return
         members = [member.mention for member in guild.members if self._role_problem(member)]
         if not members:
-            await interaction.followup.send("Nie znaleziono niespójnych ról.", ephemeral=True)
+            await interaction.followup.send("Wszystkie role się zgadzają.", ephemeral=True)
             return
         for start in range(0, len(members), 30):
             await interaction.followup.send(", ".join(members[start : start + 30]), ephemeral=True)
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
-    @app_commands.command(name="nr", description="Naprawia podstawowe zależności ról")
+    @app_commands.command(name="nr", description="Poprawia brakujące albo zbędne role")
     async def repair_roles(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         guild = await _require_guild(interaction)
@@ -542,7 +544,7 @@ class RolesCog(commands.Cog):
             async with _current_roles(member) as current:
                 if await _update_member_role(self.bot, current):
                     changed += 1
-        await interaction.followup.send(f"Zaktualizowano {changed} użytkowników.", ephemeral=True)
+        await interaction.followup.send(f"Zmienione osoby: {changed}.", ephemeral=True)
 
     @moderator_only()
     @app_commands.default_permissions(moderate_members=True)
@@ -562,7 +564,7 @@ class RolesCog(commands.Cog):
             and not member_has_role(member, settings.verified_role_name, settings)
         ]
         if not members:
-            await interaction.followup.send("Nie znaleziono użytkowników.", ephemeral=True)
+            await interaction.followup.send("Nie ma takich osób.", ephemeral=True)
             return
         for start in range(0, len(members), 30):
             await interaction.followup.send(", ".join(members[start : start + 30]), ephemeral=True)
@@ -570,7 +572,8 @@ class RolesCog(commands.Cog):
     @administrator_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.command(
-        name="napraw_weryfikacje", description="Usuwa role weryfikacji bez rekordu w bazie"
+        name="napraw_weryfikacje",
+        description="Zdejmuje role weryfikacji, rangi i regionu osobom bez połączonego konta Riot",
     )
     async def repair_verifications(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -599,7 +602,7 @@ class RolesCog(commands.Cog):
                     ]
                     await current.remove_roles(*to_remove, reason="Brak rekordu weryfikacji")
                     fixed += 1
-        await interaction.followup.send(f"Naprawiono {fixed} użytkowników.", ephemeral=True)
+        await interaction.followup.send(f"Poprawione osoby: {fixed}.", ephemeral=True)
 
 
 async def setup(bot: MoonPoroBot) -> None:

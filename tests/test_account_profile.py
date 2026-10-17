@@ -186,9 +186,9 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     fields = {field.name: field.value for field in profile.embed.fields}
 
     assert fields["Solo/Duo"] == "Brak rangi"
-    assert fields["LP"] == "—"
-    assert fields["Bilans"] == "—"
-    assert fields["Procent wygranych"] == "—"
+    assert fields["LP"] == "brak"
+    assert fields["Bilans"] == "brak"
+    assert fields["Procent wygranych"] == "brak"
 
 
 def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
