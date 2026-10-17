@@ -7,9 +7,10 @@ interface Props {
   description: string;
   lang?: "pl" | "en";
   canonicalPath?: string;
+  noindex?: boolean;
 }
 
-const { title, description, lang = "pl", canonicalPath = Astro.url.pathname } = Astro.props;
+const { title, description, lang = "pl", canonicalPath = Astro.url.pathname, noindex = false } = Astro.props;
 const isEnglish = lang === "en";
 const home = isEnglish ? "/en/" : "/";
 const nav = isEnglish
@@ -23,7 +24,7 @@ const nav = isEnglish
       ["Prywatność", "/privacy/"],
       ["Warunki", "/terms/"],
     ];
-const languageHref = canonicalPath === "/404/" || canonicalPath === "/404"
+const languageHref = noindex
   ? "/en/"
   : isEnglish ? canonicalPath.replace(/^\/en/, "") || "/" : `/en${canonicalPath}`;
 const canonical = new URL(canonicalPath, siteConfig.siteUrl);
@@ -43,9 +44,9 @@ const fullTitle = `${title} · Moon Poro`;
     <meta property="og:site_name" content="Moon Poro" />
     <meta property="og:title" content={fullTitle} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content={canonical} />
+    {!noindex && <meta property="og:url" content={canonical} />}
     <meta property="og:image" content={image} />
-    <link rel="canonical" href={canonical} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <link rel="icon" type="image/png" href="/moon-poro.png" />
     <link rel="preload" href="/fonts/nunito-latin.woff2" as="font" type="font/woff2" crossorigin />
     <title>{fullTitle}</title>

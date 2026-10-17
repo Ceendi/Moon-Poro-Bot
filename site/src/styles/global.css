@@ -126,7 +126,7 @@
   .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; list-style: none; counter-reset: step; }
   .steps li { position: relative; padding: 24px 22px 26px; border-radius: var(--radius); background: var(--card); counter-increment: step; }
   .steps li::before { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 18px; border-radius: 50%; color: #2a1630; background: var(--pink); content: counter(step); font-size: 1.05rem; font-weight: 900; line-height: 1; }
-  .steps li:last-child::before { background: var(--moon); content: "✓"; }
+  .steps li:last-child::before { background: var(--moon); content: "✓"; content: "✓" / ""; }
   .steps h3 { margin-bottom: 8px; }
   .steps p, .features p, .faq p { color: var(--muted); }
   .tag { color: var(--cream); font-weight: 700; white-space: nowrap; }
@@ -164,8 +164,8 @@
   .faq details { border-radius: 16px; background: var(--card); }
   .faq summary { position: relative; padding: 16px 52px 16px 20px; border-radius: 16px; font-weight: 700; cursor: pointer; list-style: none; }
   .faq summary::-webkit-details-marker { display: none; }
-  .faq summary::after { position: absolute; top: 50%; right: 20px; color: var(--lavender); content: "+"; font-size: 1.5rem; font-weight: 600; line-height: 1; translate: 0 -50%; }
-  .faq details[open] summary::after { content: "−"; }
+  .faq summary::after { position: absolute; top: 50%; right: 20px; color: var(--lavender); content: "+"; content: "+" / ""; font-size: 1.5rem; font-weight: 600; line-height: 1; translate: 0 -50%; }
+  .faq details[open] summary::after { content: "−"; content: "−" / ""; }
   .faq summary:hover { color: var(--cream); }
   .faq details p { padding: 0 20px 18px; }
 

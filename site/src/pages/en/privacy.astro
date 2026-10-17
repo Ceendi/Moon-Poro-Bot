@@ -9,7 +9,6 @@ const email = siteConfig.contactEmail;
   <section class="doc">
     <h1>Privacy policy</h1>
     <p class="updated">Updated: {siteConfig.lastUpdatedEn}</p>
-    <p>Public verification still uses a League of Legends profile-icon challenge. Riot Sign On access has been approved; the new sign-in flow is undergoing local testing and has not launched publicly.</p>
 
     <div class="summary">
       <h2>In short</h2>
@@ -29,14 +28,13 @@ const email = siteConfig.contactEmail;
     <section>
       <h2>2. What we process</h2>
       <ul>
-        <li><strong>Discord:</strong> your user and server IDs and the roles the bot manages. The prepared RSO flow also stores the Discord username and server name in the session to show which account is being linked.</li>
-        <li><strong>Riot account:</strong> PUUID (a permanent Riot account ID), Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling and state. During icon verification we also read the profile icon, but do not store it in the active account link.</li>
-        <li><strong>Verification sessions:</strong> the prepared update stores session state, time and any error code for both profile-icon verification and Riot Sign On. This allows role assignment and audit work to finish after an interrupted operation.</li>
-        <li><strong>Riot sign-in after RSO launches:</strong> Riot will provide your PUUID, Riot ID and region, without your password or email. A short-lived access token will be used only in process memory and discarded after retrieving the data. We do not request offline access or store a refresh token.</li>
+        <li><strong>Discord:</strong> your user and server IDs and the roles the bot manages. When you start verifying, we also save your Discord username and the server name, so the sign-in page can show which account you're linking.</li>
+        <li><strong>Riot account:</strong> PUUID (a permanent Riot account ID), Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling.</li>
+        <li><strong>Riot sign-in:</strong> Riot gives us your PUUID, Riot ID and region. We don't get your password or email. The one-time access token from Riot is used only for a moment and isn't stored. The sign-in itself is saved as a short session: its status, time, any error code, the Riot account data from the sign-in and a hash of a random ID for the browser where the sign-in started.</li>
         <li><strong>Moderation:</strong> warnings (who they concern, who issued them, reason, level, dates), monthly moderator statistics, and messages in moderation channels about verifications and about people who left, were removed from or were banned from the server.</li>
         <li><strong>Alt account protection:</strong> if an administrator turns it on, the bot checks how old your Discord account is when you join and bans accounts that are too new.</li>
         <li><strong>Administrator lookups:</strong> when an administrator checks which accounts are linked, we log who looked up whom, when and why.</li>
-        <li><strong>IP address:</strong> after the RSO sign-in page launches, it will be kept briefly in the server's memory to limit attempts. This mechanism does not write it to the database.</li>
+        <li><strong>IP address</strong> on the sign-in page is kept briefly in the server's memory to limit attempts. It isn't stored.</li>
         <li><strong>Technical logs</strong> needed to fix errors.</li>
       </ul>
       <p>The data comes from you, from Discord and directly from Riot Games. Accounts can't be linked without the Discord and Riot IDs.</p>
@@ -62,7 +60,7 @@ const email = siteConfig.contactEmail;
       <h2>5. How long</h2>
       <ul>
         <li><strong>Account link and rank:</strong> until you or an administrator remove it. Leaving the server doesn't remove it, and the bot restores your roles if you come back.</li>
-        <li><strong>Sessions in the prepared update:</strong> an icon challenge normally lasts 2 minutes and an RSO link 10 minutes. Completed or expired sessions of both methods are deleted after 7 days during the next daily cleanup. Work needed to finish assigning roles or handling audit messages is kept until completed.</li>
+        <li><strong>Riot sign-in session:</strong> the link expires after 10 minutes, and session data is deleted after 7 days. If assigning roles or the message in the moderation channel isn't finished yet, the session stays until it is, or until the link is removed.</li>
         <li><strong>Administrator lookup log:</strong> 90 days.</li>
         <li><strong>Warnings, statistics and moderation messages:</strong> as long as needed to moderate the server.</li>
         <li><strong>Database backups:</strong> up to 90 days. Deleted data may remain in a backup until then; backups are used only for disaster recovery.</li>
@@ -72,7 +70,12 @@ const email = siteConfig.contactEmail;
 
     <section>
       <h2>6. Cookies</h2>
-      <p>The static pages do not set cookies. After its public launch, the dynamic RSO service will set two strictly necessary cookies: <code>moon_poro_rso</code> to show the session result and <code>moon_poro_rso_browser</code> to confirm that sign-in finishes in the browser where it started. Both use HttpOnly, Secure and SameSite=Lax and expire 10 minutes after being set or renewed.</p>
+      <p>We use two strictly necessary cookies. The Riot sign-in page sets both:</p>
+      <ul>
+        <li><code>moon_poro_rso</code>, to show you the result when you come back from Riot,</li>
+        <li><code>moon_poro_rso_browser</code>, to check that the sign-in finishes in the same browser where it started.</li>
+      </ul>
+      <p>Both expire after 10 minutes. The other pages don't use cookies.</p>
     </section>
 
     <section>

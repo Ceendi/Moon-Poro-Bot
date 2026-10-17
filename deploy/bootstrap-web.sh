@@ -48,8 +48,9 @@ cp -a "$SITE_SOURCE"/. /opt/moon-poro/site/dist/
 find /opt/moon-poro/site/dist -type d -exec chmod 0755 {} +
 find /opt/moon-poro/site/dist -type f -exec chmod 0644 {} +
 
+# Validate before installing so a bad file never replaces the working config.
+/usr/bin/caddy validate --config "$CADDY_SOURCE" --adapter caddyfile
 install -o root -g root -m 0644 "$CADDY_SOURCE" /etc/caddy/Caddyfile
-/usr/bin/caddy validate --config /etc/caddy/Caddyfile
 systemctl enable caddy >/dev/null
 systemctl restart caddy
 
