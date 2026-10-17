@@ -507,13 +507,13 @@ def create_riot_api_client(
             riot_path_params_middleware(),
             json_response_middleware(),
             http_error_middleware(max_retries=RIOT_HTTP_MAX_RETRIES),
-            # Before the limiter: a request refused by an open auth gate never
-            # takes a rate limiter lease, so it cannot stall other requests.
-            riot_auth_breaker_middleware(shared_auth_breaker),
+            # The limiter wrapper releases its lease when a gate below refuses a
+            # request, so a refusal cannot stall other requests for the region.
             riot_rate_limiter_middleware(RiotAPIRateLimiter()),
-            # Keep the 429 gate closest to the transport so a request delayed by
-            # Pulsefire's adaptive limiter checks it immediately before I/O.
             riot_circuit_breaker_middleware(shared_breaker),
+            # Both gates sit after every wait, so a request delayed by the limiter
+            # or a 429 pause is checked again immediately before I/O.
+            riot_auth_breaker_middleware(shared_auth_breaker),
             riot_api_monitoring_middleware(shared_monitor),
         ],
     )

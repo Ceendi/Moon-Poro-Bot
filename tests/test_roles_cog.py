@@ -176,7 +176,7 @@ async def test_publish_role_panels_uses_single_shared_flow(
 
 GUILD_ROLES = {
     name: FakeRole(name)
-    for name in ("Member", "No LoL", "Verified", "EUNE", "Gold", "Silver", "Mid", "TFT")
+    for name in ("Member", "No LoL", "Verified", "EUNE", "Gold", "Silver", "Iron", "Mid", "TFT")
 }
 
 
@@ -352,6 +352,25 @@ async def test_failed_old_rank_removal_rolls_back_new_rank(
         (GUILD_ROLES["Gold"],),
         (GUILD_ROLES["Silver"],),
     ]
+
+
+async def test_partial_old_rank_removal_restores_the_previous_ranks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_guild_roles(monkeypatch)
+    member = FakeMember(roles_=[GUILD_ROLES["Gold"], GUILD_ROLES["Iron"]])
+    member.remove_roles = AsyncMock(side_effect=[None, forbidden(), None])
+    state = roles._RoleState(member)
+    settings = make_real_settings()
+    settings.lol_ranks = ["Gold", "Silver", "Iron"]
+
+    with pytest.raises(discord.Forbidden):
+        await roles._swap_rank_role(state, GUILD_ROLES["Silver"], settings)
+
+    removed = [call.args for call in member.remove_roles.await_args_list]
+    first_removed = removed[0][0]
+    assert removed[-1] == (GUILD_ROLES["Silver"],)
+    assert member.add_roles.await_args_list[-1].args == (first_removed,)
 
 
 @pytest.mark.parametrize(

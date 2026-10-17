@@ -242,6 +242,20 @@ async def test_moderator_add_remove_and_multi_rank_keep_dependencies():
     assert env.selected() == {"Silver"}
 
 
+async def test_moderator_can_remove_member_role_from_a_qualifying_member():
+    env = DiscordRoles("Gold", "EUNE", "Member")
+    cog = env.cog()
+    await RolesCog.remove_roles.callback(cog, env.interaction(), env.member, env.roles["Member"])
+    assert env.selected() == {"Gold", "EUNE"}
+
+
+async def test_moderator_rank_change_adds_the_new_rank_before_removing_the_old_one():
+    env = DiscordRoles("Gold", "EUNE", "Member")
+    cog = env.cog()
+    await RolesCog.add_roles.callback(cog, env.interaction(), env.member, env.roles["Silver"])
+    assert env.selected() == {"Silver", "EUNE", "Member"}
+
+
 async def test_repair_counts_http_changes_and_skips_consistent_members():
     env = DiscordRoles("Gold", "EUNE")
     cog = env.cog()

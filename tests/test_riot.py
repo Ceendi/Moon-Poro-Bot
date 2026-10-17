@@ -1,11 +1,13 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import ClientTimeout, web
 from aiohttp.test_utils import TestServer
 from pulsefire.invocation import Invocation
+from pulsefire.ratelimiters import BaseRateLimiter
 
 from moon_poro import riot
 from moon_poro.riot import (
@@ -240,11 +242,52 @@ def test_riot_client_places_monitor_and_shared_breaker_near_transport(
         path_params,
         json_middleware,
         http_error,
-        auth_middleware,
         rate_limiter,
         breaker_middleware,
+        auth_middleware,
         monitoring_middleware,
     ]
+
+
+async def test_requests_waiting_in_the_limiter_are_refused_after_a_401() -> None:
+    class SlowLimiter(BaseRateLimiter):
+        async def acquire(self, invocation: Invocation) -> float:
+            if invocation.params["who"] == "first":
+                return 0
+            if invocation.params.setdefault("waited", False):
+                return 0
+            invocation.params["waited"] = True
+            return 0.05
+
+        async def synchronize(self, invocation: Invocation, headers: dict[str, str]) -> None:
+            return None
+
+    sent: list[str] = []
+
+    async def transport(invocation: Invocation) -> SimpleNamespace:
+        sent.append(invocation.params["who"])
+        await asyncio.sleep(0.02)
+        return SimpleNamespace(status=401, headers={})
+
+    call = riot.riot_rate_limiter_middleware(SlowLimiter())(
+        riot.riot_auth_breaker_middleware(RiotAuthBreaker())(transport)
+    )
+
+    async def request(who: str) -> object:
+        invocation = Invocation(
+            "GET",
+            "https://{region}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}",
+            {"region": "eun1", "puuid": "p", "who": who},
+        )
+        try:
+            return (await call(invocation)).status
+        except riot.RiotAuthCircuitOpen:
+            return "refused"
+
+    results = await asyncio.gather(*(request(who) for who in ("first", "a", "b", "c")))
+
+    assert results == [401, "refused", "refused", "refused"]
+    assert sent == ["first"]
 
 
 async def test_riot_api_call_returns_successful_response() -> None:

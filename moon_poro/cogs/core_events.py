@@ -13,6 +13,10 @@ from moon_poro.permissions import administrator_only
 ACCOUNT_AGE_FEATURE = "account_age_gate"
 
 
+def _days_word(days: int) -> str:
+    return "dzień" if days == 1 else "dni"
+
+
 class AccountAgeGateAction(StrEnum):
     ENABLE = "on"
     DISABLE = "off"
@@ -36,11 +40,9 @@ class CoreEventsCog(commands.Cog):
         required_age = timedelta(days=self.bot.settings.minimum_account_age_days)
         if age >= required_age:
             return
+        days = self.bot.settings.minimum_account_age_days
         await member.ban(
-            reason=(
-                "Automatyczna ochrona: konto młodsze niż "
-                f"{self.bot.settings.minimum_account_age_days} dni"
-            ),
+            reason=f"Automatyczna ochrona: konto młodsze niż {days} {_days_word(days)}",
             delete_message_seconds=0,
         )
         await self._log(
@@ -108,10 +110,9 @@ class CoreEventsCog(commands.Cog):
                 "Bot nie banuje nowych kont Discord przy dołączaniu."
             )
         days = self.bot.settings.minimum_account_age_days
-        unit = "dzień" if days == 1 else "dni"
         return (
             f"Ochrona przed multikontami {prefix} **włączona**. "
-            f"Bot zbanuje konta Discord młodsze niż {days} {unit} przy dołączaniu."
+            f"Bot zbanuje konta Discord młodsze niż {days} {_days_word(days)} przy dołączaniu."
         )
 
 

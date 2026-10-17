@@ -167,7 +167,7 @@ class RankDropdown(discord.ui.Select[discord.ui.View]):
 async def _swap_rank_role(
     member: discord.Member, new_role: discord.Role, settings: Settings
 ) -> None:
-    """Add the new rank before removing old ones, so a failure never leaves no rank."""
+    """Add the new rank before removing old ones; on failure restore the previous ranks."""
     removable = [
         role
         for role in member_roles_named(member, settings.lol_ranks, settings)
@@ -176,17 +176,21 @@ async def _swap_rank_role(
     added = new_role not in member.roles
     if added:
         await member.add_roles(new_role, reason="Wybór rangi")
-    if not removable:
-        return
+    removed: list[discord.Role] = []
     try:
-        await member.remove_roles(*removable, reason="Zmiana wybranej rangi")
-    except discord.HTTPException:
-        if added:
-            # Best effort: go back to the previous rank instead of keeping two.
-            try:
+        # One role at a time, so a partial failure knows exactly what to undo.
+        for role in removable:
+            await member.remove_roles(role, reason="Zmiana wybranej rangi")
+            removed.append(role)
+    except Exception:
+        # Best effort: go back to the previous ranks instead of a mixed state.
+        try:
+            if removed:
+                await member.add_roles(*removed, reason="Cofnięcie nieudanej zmiany rangi")
+            if added:
                 await member.remove_roles(new_role, reason="Cofnięcie nieudanej zmiany rangi")
-            except discord.HTTPException:
-                logger.warning("Could not roll back rank role for Discord user %s", member.id)
+        except Exception:
+            logger.warning("Could not roll back rank role for Discord user %s", member.id)
         raise
 
 
@@ -297,7 +301,7 @@ class MiscRolesView(_RolePanelView):
         async with _current_roles(interaction.user) as member:
             if member_has_role(member, settings.verified_role_name, settings):
                 await interaction.followup.send(
-                    "Najpierw usuń powiązanie z kontem Riot w „Moje konto”.", ephemeral=True
+                    "Najpierw usuń powiązanie z kontem Riot w sekcji „Moje konto”.", ephemeral=True
                 )
                 return
             league_roles = settings.lol_ranks + settings.lol_servers + settings.lol_positions
@@ -455,13 +459,11 @@ class RolesCog(commands.Cog):
                 await interaction.followup.send("Wybierz tylko jedną rangę Solo/Duo.")
                 return
             if rank_roles:
-                existing = member_roles_named(
-                    member, self.bot.settings.lol_ranks, self.bot.settings
-                )
-                if existing:
-                    await member.remove_roles(*existing, reason=f"Zmiana przez {interaction.user}")
-            if allowed:
-                await member.add_roles(*allowed, reason=f"Nadanie przez {interaction.user}")
+                # Same swap as the panel: never leave the member without a rank.
+                await _swap_rank_role(member, rank_roles[0], self.bot.settings)
+            other_roles = [role for role in allowed if role not in rank_roles]
+            if other_roles:
+                await member.add_roles(*other_roles, reason=f"Nadanie przez {interaction.user}")
             await _update_member_role(self.bot, member)
         message = f"Dodano: {', '.join(role.mention for role in allowed) or 'brak'}"
         if denied:
@@ -486,8 +488,9 @@ class RolesCog(commands.Cog):
         async with _current_roles(uzytkownik) as member:
             allowed = [role for role in configured if role in member.roles]
             if allowed:
+                # No member role sync here: removing roles cannot newly qualify
+                # anyone, and it would put back an explicitly removed „Użytkownik”.
                 await member.remove_roles(*allowed, reason=f"Usunięcie przez {interaction.user}")
-            await _update_member_role(self.bot, member)
         await interaction.followup.send(
             f"Usunięto: {', '.join(role.mention for role in allowed) or 'brak'}."
         )
