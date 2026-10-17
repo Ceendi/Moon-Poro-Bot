@@ -132,19 +132,23 @@
   .tag { color: var(--cream); font-weight: 700; white-space: nowrap; }
 
   .section-lead { max-width: 40rem; margin: -14px 0 24px; color: var(--muted); }
-  .ranks { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; max-width: 860px; list-style: none; }
-  .ranks li { display: inline-flex; gap: 8px; align-items: center; padding: 8px 16px 8px 12px; border-radius: 999px; background: var(--card); color: var(--text); font-weight: 800; }
-  .ranks li::before { width: 12px; height: 12px; border-radius: 50%; background: var(--tier); box-shadow: 0 0 12px var(--tier); content: ""; }
-  .ranks .iron { --tier: #8c7f78; }
-  .ranks .bronze { --tier: #b9805f; }
-  .ranks .silver { --tier: #b8c4cc; }
-  .ranks .gold { --tier: #e8bd62; }
-  .ranks .platinum { --tier: #4fc1b0; }
-  .ranks .emerald { --tier: #35c98a; }
-  .ranks .diamond { --tier: #7d9cf0; }
-  .ranks .master { --tier: #c174e6; }
-  .ranks .grandmaster { --tier: #ef5a5e; }
-  .ranks .challenger { --tier: #f6d98a; }
+  /* Role colours copied from the server's role list. */
+  .ranks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; max-width: 760px; list-style: none; }
+  .ranks li { position: relative; display: flex; gap: 10px; align-items: center; overflow: hidden; padding: 10px 16px 10px 12px; border: 1px solid color-mix(in srgb, var(--role) 35%, transparent); border-radius: 999px; background: linear-gradient(120deg, color-mix(in srgb, var(--role) 26%, var(--card)), var(--card) 70%); color: var(--text); font-weight: 800; }
+  .ranks li::before { flex: 0 0 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgb(255 255 255 / 0.75), var(--role) 45%); box-shadow: 0 0 14px var(--role); content: ""; }
+  .ranks li::after { position: absolute; inset: 0; background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / 0.14) 50%, transparent 65%); content: ""; translate: -100% 0; transition: translate 700ms ease; }
+  .ranks li:hover::after { translate: 100% 0; }
+  .ranks .challenger { --role: #4fcae4; }
+  .ranks .grandmaster { --role: #d65247; }
+  .ranks .master { --role: #ba59e6; }
+  .ranks .diamond { --role: #6279c2; }
+  .ranks .emerald { --role: #3d905b; }
+  .ranks .platinum { --role: #4b8f93; }
+  .ranks .gold { --role: #b8905b; }
+  .ranks .silver { --role: #8597a3; }
+  .ranks .bronze { --role: #9f7361; }
+  .ranks .iron { --role: #8b8078; }
+  .ranks .unranked { --role: #9f9e9b; }
   .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; list-style: none; }
   .features li { padding: 24px 22px; border-radius: var(--radius); background: var(--card); }
   .features .feature-key { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; color: var(--text); }
@@ -210,7 +214,7 @@
   .button { width: 100%; }
   .poro { width: 104px; height: 104px; }
   .steps { grid-template-columns: minmax(0, 1fr); }
-  .ranks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ranks { display: flex; flex-wrap: wrap; }
   .callout { flex-direction: column; gap: 18px; padding: 24px 20px; }
 }
 
