@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     postgres_host: str
     postgres_port: int = 5432
     postgres_db: str
-    database_pool_size: int = Field(default=3, ge=1, le=10)
-    database_max_overflow: int = Field(default=2, ge=0, le=10)
+    database_pool_size: int = Field(default=5, ge=1, le=10)
+    database_max_overflow: int = Field(default=5, ge=0, le=10)
 
     guild_id: int = Field(gt=0)
     warn_channel_id: int | None = None

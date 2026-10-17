@@ -2228,3 +2228,194 @@ async def test_rso_callback_reload_on_postgres_waits_for_first_request(
         assert "Riot potwierdził konto" in await page.text()
     finally:
         await _stop_rso_web_against_postgres(guild_id, database, client)
+
+
+def _launch_fix_settings(
+    settings_factory: Callable[..., Settings],
+    guild_id: int,
+) -> Settings:
+    return settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(  # pragma: allowlist secret
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+
+
+async def test_manual_rank_refresh_jumps_the_backlog_without_spending_cooldown(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    now = datetime.now(UTC)
+    try:
+        for user_id in (801, 802, 803, 804, 805):
+            await repository.create(
+                guild_id=guild_id,
+                user_id=user_id,
+                message_id=None,
+                platform="EUN1",
+                puuid=f"priority-{guild_id}-{user_id}",
+                rank_snapshot=RankSnapshot("GOLD"),
+            )
+        async with database.session_factory.begin() as session:
+            for user_id, hours in ((801, 3), (802, 2), (803, 1)):
+                link = await session.get(VerificationLink, (guild_id, user_id))
+                assert link is not None
+                link.rank_next_refresh_at = now - timedelta(hours=hours)
+            failing = await session.get(VerificationLink, (guild_id, 805))
+            assert failing is not None
+            failing.rank_refresh_failures = 1
+            failing.rank_next_refresh_at = now + timedelta(hours=1)
+        oldest_before = (await repository.rank_refresh_queue_stats(guild_id)).oldest_due_at
+        assert oldest_before is not None
+
+        enqueued = await repository.request_rank_refresh(
+            guild_id, 804, cooldown_seconds=1800, source="user"
+        )
+        assert enqueued.status is RankRefreshRequestStatus.ENQUEUED
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [804]
+        again = await repository.request_rank_refresh(
+            guild_id, 804, cooldown_seconds=1800, source="user"
+        )
+        assert again.status is RankRefreshRequestStatus.COOLDOWN
+
+        # 803 is the newest overdue row; a click moves it ahead of 801 and 802
+        # without spending the user's cooldown.
+        due = await repository.request_rank_refresh(
+            guild_id, 803, cooldown_seconds=1800, source="user"
+        )
+        assert due.status is RankRefreshRequestStatus.ALREADY_DUE
+        assert (await repository.get_by_user(guild_id, 803)).rank_user_refresh_requested_at is None
+        stats = await repository.rank_refresh_queue_stats(guild_id)
+        assert stats.oldest_due_at is not None
+        assert oldest_before - stats.oldest_due_at < timedelta(seconds=1)
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=1, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [803]
+        running = await repository.request_rank_refresh(
+            guild_id, 803, cooldown_seconds=1800, source="user"
+        )
+        assert running.status is RankRefreshRequestStatus.ALREADY_CLAIMED
+        assert (await repository.get_by_user(guild_id, 803)).rank_user_refresh_requested_at is None
+
+        for _attempt in range(2):
+            backoff = await repository.request_rank_refresh(
+                guild_id, 805, cooldown_seconds=1800, source="user"
+            )
+            assert backoff.status is RankRefreshRequestStatus.BACKOFF_ACTIVE
+        assert (await repository.get_by_user(guild_id, 805)).rank_user_refresh_requested_at is None
+
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=2, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [801, 802]
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
+        await database.close()
+
+
+async def test_stalled_role_operation_releases_the_link_lock_and_keeps_retry_state(
+    settings_factory: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from moon_poro import repositories
+
+    monkeypatch.setattr(repositories, "ROLE_OPERATION_TIMEOUT_SECONDS", 0.2)
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    try:
+        link = await repository.create(
+            guild_id=guild_id,
+            user_id=811,
+            message_id=None,
+            platform="EUN1",
+            puuid=f"timeout-{guild_id}",
+        )
+        identity = VerificationLinkIdentity.from_link(link)
+
+        async def stalled_discord_call() -> None:
+            await asyncio.sleep(30)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                repository.run_verification_role_update_with_identity(
+                    guild_id,
+                    811,
+                    identity=identity,
+                    expected_rank_last_checked_at=None,
+                    operation=stalled_discord_call,
+                ),
+                timeout=5,
+            )
+        # The row lock is gone: another locking write completes immediately.
+        refresh = await asyncio.wait_for(
+            repository.request_rank_refresh(guild_id, 811, cooldown_seconds=60, source="user"),
+            timeout=2,
+        )
+        assert refresh.status is RankRefreshRequestStatus.ALREADY_DUE
+
+        request = await repository.request_verification_deletion_with_identity(
+            guild_id,
+            811,
+            identity=identity,
+            policy=VerificationDeletionPolicy.USER,
+        )
+        assert request.link is not None
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                repository.run_verification_deletion_role_cleanup_with_identity(
+                    guild_id,
+                    811,
+                    identity=identity,
+                    expected_requested_at=request.link.deletion_requested_at,
+                    expected_remove_rank_region_roles=False,
+                    operation=stalled_discord_call,
+                ),
+                timeout=5,
+            )
+
+        async def stalled_cleanup() -> bool:
+            await asyncio.sleep(30)
+            return True
+
+        claimed_at = request.link.deletion_claimed_at
+        assert claimed_at is not None
+        result = await asyncio.wait_for(
+            repository.process_verification_deletion_with_identity(
+                guild_id,
+                811,
+                identity=identity,
+                expected_claimed_at=claimed_at,
+                base_delay_seconds=30,
+                operation=stalled_cleanup,
+            ),
+            timeout=5,
+        )
+        assert result.status is VerificationDeletionProcessStatus.RETRY_SCHEDULED
+        pending = await repository.get_by_user(guild_id, 811)
+        assert pending is not None
+        assert pending.deletion_requested_at is not None
+        assert pending.deletion_failures == 1
+        assert pending.deletion_claimed_at is None
+    finally:
+        await _delete_verification_link(repository, guild_id, 811)
+        await database.close()

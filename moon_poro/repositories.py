@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -26,6 +27,11 @@ from moon_poro.models import (
 from moon_poro.outbox import mark_outbox_claimed
 from moon_poro.rank_refresh import RankRefreshDecision, RankSnapshot, retry_delay_with_jitter
 from moon_poro.time_utils import timestamps_match
+
+# Discord role I/O runs while a link row is locked. Bound it so a stalled request
+# cannot pin a pooled connection and the row lock; callers treat a timeout like a
+# failed Discord request and use their durable retry path.
+ROLE_OPERATION_TIMEOUT_SECONDS = 20.0
 
 
 class RankRefreshRequestStatus(StrEnum):
@@ -618,13 +624,18 @@ class VerificationRepository:
                         retry_after_seconds=retry_after,
                         baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                     )
-            setattr(link, timestamp_name, now)
+            # A user's cooldown is spent only when this request adds a refresh.
+            # Automatic role-tamper requests keep their own cooldown on every call.
+            if source != "user":
+                setattr(link, timestamp_name, now)
             if link.rank_refresh_claimed_at is not None:
                 return RankRefreshRequestResult(
                     RankRefreshRequestStatus.ALREADY_CLAIMED,
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                 )
             if link.rank_next_refresh_at <= now:
+                # The refresh is already queued; only move it ahead of the backlog.
+                link.rank_next_refresh_at = await _priority_refresh_at(session, guild_id, now)
                 return RankRefreshRequestResult(
                     RankRefreshRequestStatus.ALREADY_DUE,
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
@@ -634,7 +645,8 @@ class VerificationRepository:
                     RankRefreshRequestStatus.BACKOFF_ACTIVE,
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                 )
-            link.rank_next_refresh_at = now
+            setattr(link, timestamp_name, now)
+            link.rank_next_refresh_at = await _priority_refresh_at(session, guild_id, now)
             return RankRefreshRequestResult(
                 RankRefreshRequestStatus.ENQUEUED,
                 baseline_rank_last_checked_at=baseline_rank_last_checked_at,
@@ -1041,7 +1053,10 @@ class VerificationRepository:
                 return False
             if not timestamps_match(link.rank_last_checked_at, expected_rank_last_checked_at):
                 raise VerificationSnapshotChanged("Cached verification rank snapshot changed")
-            await operation()
+            # TimeoutError rolls back this read-only transaction and reaches the
+            # caller, which schedules the same retry as for a Discord HTTP error.
+            async with asyncio.timeout(ROLE_OPERATION_TIMEOUT_SECONDS):
+                await operation()
             return True
 
     async def run_verification_deletion_role_cleanup_with_identity(
@@ -1074,7 +1089,9 @@ class VerificationRepository:
                 or link.deletion_remove_rank_region_roles != expected_remove_rank_region_roles
             ):
                 return False
-            await operation()
+            # The deletion queue retries the cleanup, so a timeout only ends this pass.
+            async with asyncio.timeout(ROLE_OPERATION_TIMEOUT_SECONDS):
+                await operation()
             return True
 
     async def process_verification_deletion_with_identity(
@@ -1116,7 +1133,13 @@ class VerificationRepository:
                     VerificationDeletionProcessStatus.CLAIM_LOST
                 )
 
-            if await operation():
+            try:
+                async with asyncio.timeout(ROLE_OPERATION_TIMEOUT_SECONDS):
+                    completed = await operation()
+            except TimeoutError:
+                # Treat a stalled Discord cleanup as failed and schedule a retry.
+                completed = False
+            if completed:
                 await session.delete(link)
                 return VerificationDeletionProcessResult(VerificationDeletionProcessStatus.DELETED)
 
@@ -1165,6 +1188,31 @@ class VerificationRepository:
                 )
             )
             return cast(CursorResult[Any], result).rowcount or 0
+
+
+async def _priority_refresh_at(session: AsyncSession, guild_id: int, now: datetime) -> datetime:
+    """Return a due time that sorts a manual request ahead of the overdue backlog.
+
+    The claim query orders by ``rank_next_refresh_at``. Placing a manual request
+    just before the oldest due row keeps that ordering (and its partial index)
+    intact, while the queue age reported by monitoring barely changes.
+    """
+
+    oldest_due = cast(
+        datetime | None,
+        await session.scalar(
+            select(func.min(VerificationLink.rank_next_refresh_at)).where(
+                VerificationLink.guild_id == guild_id,
+                VerificationLink.puuid.is_not(None),
+                VerificationLink.rank_next_refresh_at <= now,
+            )
+        ),
+    )
+    if oldest_due is None:
+        return now
+    if oldest_due.tzinfo is None:
+        oldest_due = oldest_due.replace(tzinfo=UTC)
+    return min(now, oldest_due - timedelta(microseconds=1))
 
 
 def _percentile_timestamp(values: list[datetime], percentile: float) -> datetime | None:

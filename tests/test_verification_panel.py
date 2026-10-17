@@ -1311,43 +1311,79 @@ async def test_profile_delete_passes_captured_identity_to_confirmation(
     )
 
 
-@pytest.mark.parametrize(
-    ("status", "fragment"),
-    [
-        (RankRefreshRequestStatus.ENQUEUED, "czeka w kolejce"),
-        (RankRefreshRequestStatus.ALREADY_DUE, "jest już w kolejce"),
-        (RankRefreshRequestStatus.ALREADY_CLAIMED, "Trwa już odświeżanie"),
-        (RankRefreshRequestStatus.BACKOFF_ACTIVE, "automatycznie"),
-        (RankRefreshRequestStatus.LINK_CHANGED, "Powiązanie konta zmieniło się"),
-        (RankRefreshRequestStatus.NOT_LINKED, "Najpierw kliknij „Zweryfikuj konto”"),
-    ],
-)
-async def test_refresh_button_returns_private_queue_status(
-    monkeypatch: pytest.MonkeyPatch,
-    status: RankRefreshRequestStatus,
-    fragment: str,
-) -> None:
-    monkeypatch.setattr(verification.discord, "Member", FakeMember)
-    bot = _panel_bot()
-    bot.verifications = SimpleNamespace(
-        request_rank_refresh=AsyncMock(return_value=RankRefreshRequestResult(status))
-    )
-    interaction = SimpleNamespace(
+def _panel_interaction() -> SimpleNamespace:
+    return SimpleNamespace(
         guild_id=123,
         user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        edit_original_response=AsyncMock(),
     )
 
-    await _request_rank_refresh_from_panel(bot, interaction)
+
+async def test_panel_refresh_defers_then_follows_the_private_profile_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    monkeypatch.setattr(verification, "_ACCOUNT_PROFILE_REFRESH_POLL_INTERVAL_SECONDS", 0.0)
+    bot = _panel_bot()
+    original = _profile_link()
+    requested_at = datetime.now(UTC)
+    queued = _profile_link(
+        created_at=original.created_at,
+        rank_last_checked_at=original.rank_last_checked_at,
+        rank_next_refresh_at=requested_at - timedelta(seconds=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    completed = _profile_link(
+        created_at=original.created_at,
+        last_known_rank="DIAMOND",
+        last_known_division="IV",
+        rank_last_checked_at=requested_at + timedelta(seconds=1),
+        rank_user_refresh_requested_at=requested_at,
+    )
+    interaction = _panel_interaction()
+    reads = iter([original, queued, completed])
+
+    async def get_by_user(_guild_id: int, _user_id: int) -> SimpleNamespace:
+        # Discord must be answered before the first database call.
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        return next(reads)
+
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(side_effect=get_by_user),
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=original.rank_last_checked_at,
+            )
+        ),
+    )
+    starter = AsyncMock()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=starter)
 
     bot.verifications.request_rank_refresh.assert_awaited_once_with(
         123,
         101,
         cooldown_seconds=1800,
         source="user",
+        expected_puuid=original.puuid,
+        expected_platform=original.platform,
+        expected_created_at=original.created_at,
     )
-    assert fragment in interaction.response.send_message.await_args.args[0]
-    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    interaction.response.send_message.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    edits = interaction.edit_original_response.await_args_list
+    assert len(edits) == 2
+    queued_view = edits[0].kwargs["view"]
+    assert isinstance(queued_view, AccountProfileView)
+    assert queued_view.start_verification is starter
+    assert queued_view.children[0].label == "W kolejce…"
+    assert queued_view.children[0].disabled is True
+    fields = {field.name: field.value for field in edits[1].kwargs["embed"].fields}
+    assert fields["Solo/Duo"] == "Diamond IV"
+    assert edits[1].kwargs["view"].children[0].label == "Odśwież rangę"
 
 
 @pytest.mark.parametrize(
@@ -1358,33 +1394,186 @@ async def test_refresh_button_returns_private_queue_status(
         (0, "Rangę będzie można odświeżyć za chwilę."),
     ],
 )
-async def test_refresh_button_reports_persistent_cooldown(
+async def test_panel_second_click_shows_cooldown_in_the_private_profile(
     monkeypatch: pytest.MonkeyPatch,
     retry_after_seconds: int,
     expected_message: str,
 ) -> None:
     monkeypatch.setattr(verification.discord, "Member", FakeMember)
     bot = _panel_bot()
+    link = _profile_link(rank_user_refresh_requested_at=datetime.now(UTC))
     bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=link),
         request_rank_refresh=AsyncMock(
             return_value=RankRefreshRequestResult(
                 RankRefreshRequestStatus.COOLDOWN,
                 retry_after_seconds=retry_after_seconds,
+                baseline_rank_last_checked_at=link.rank_last_checked_at,
             )
-        )
+        ),
     )
-    interaction = SimpleNamespace(
-        guild_id=123,
-        user=FakeMember(101),
-        response=SimpleNamespace(send_message=AsyncMock()),
+    interaction = _panel_interaction()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    interaction.edit_original_response.assert_awaited_once()
+    rendered = interaction.edit_original_response.await_args.kwargs
+    assert rendered["content"] == expected_message
+    assert rendered["embed"].title == "Moje konto"
+    assert isinstance(rendered["view"], AccountProfileView)
+    interaction.followup.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("link", "expected_message"),
+    [
+        (None, "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."),
+        (
+            _profile_link(deletion_requested_at=datetime.now(UTC)),
+            "Usuwanie powiązania jeszcze trwa.",
+        ),
+        (
+            _profile_link(puuid=None),
+            "Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
+        ),
+    ],
+)
+async def test_panel_refresh_explains_accounts_that_cannot_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    link: SimpleNamespace | None,
+    expected_message: str,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=link),
+        request_rank_refresh=AsyncMock(),
+    )
+    interaction = _panel_interaction()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    bot.verifications.request_rank_refresh.assert_not_awaited()
+    interaction.edit_original_response.assert_awaited_once_with(content=expected_message)
+
+
+async def test_panel_refresh_reports_a_link_change_during_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=_profile_link()),
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(RankRefreshRequestStatus.LINK_CHANGED)
+        ),
+    )
+    interaction = _panel_interaction()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”.",
+        embed=None,
+        view=None,
     )
 
-    await _request_rank_refresh_from_panel(bot, interaction)
 
+async def test_panel_refresh_tells_the_user_when_the_riot_breaker_is_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.riot_auth_breaker.snapshot = Mock(return_value=SimpleNamespace(blocked=True))
+    link = _profile_link()
+    queued = _profile_link(
+        created_at=link.created_at,
+        rank_last_checked_at=link.rank_last_checked_at,
+        rank_next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+        rank_user_refresh_requested_at=datetime.now(UTC),
+    )
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(side_effect=[link, queued]),
+        request_rank_refresh=AsyncMock(
+            return_value=RankRefreshRequestResult(
+                RankRefreshRequestStatus.ENQUEUED,
+                baseline_rank_last_checked_at=link.rank_last_checked_at,
+            )
+        ),
+    )
+    interaction = _panel_interaction()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    # The worker is paused, so the profile is rendered once without polling.
+    assert bot.verifications.get_by_user.await_count == 2
+    rendered = interaction.edit_original_response.await_args.kwargs
+    assert rendered["embed"].fields[-1].value == (
+        "Riot jest chwilowo niedostępny.\n"
+        "Odświeżymy rangę automatycznie, gdy Riot znów zacznie działać."
+    )
+    assert "administratorem" not in str(rendered["embed"].to_dict())
+
+
+async def test_panel_refresh_hides_internal_errors_in_the_thinking_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(
+        get_by_user=AsyncMock(return_value=_profile_link()),
+        request_rank_refresh=AsyncMock(side_effect=RuntimeError("database details")),
+    )
+    interaction = _panel_interaction()
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Nie udało się rozpocząć odświeżania. Spróbuj ponownie.",
+        embed=None,
+        view=None,
+    )
+    interaction.followup.send.assert_not_awaited()
+
+
+async def test_panel_refresh_rejects_other_guilds_without_deferring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verification.discord, "Member", FakeMember)
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock())
+    interaction = _panel_interaction()
+    interaction.guild_id = 999
+
+    await _request_rank_refresh_from_panel(bot, interaction, start_verification=AsyncMock())
+
+    interaction.response.defer.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once_with(
-        expected_message,
-        ephemeral=True,
+        "Rangę możesz odświeżyć tylko na serwerze Moon Poro.", ephemeral=True
     )
+
+
+async def test_both_panels_pass_their_verification_starter_to_the_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _panel_bot()
+    limiter = LegacyVerificationRateLimiter(global_rate=4, global_period_seconds=10)
+    rso_view = VerificationStartView(bot)
+    legacy_view = LegacyVerificationStartView(bot, limiter)
+    rso_handler = AsyncMock()
+    legacy_handler = AsyncMock()
+    monkeypatch.setattr(verification, "_request_rank_refresh_from_panel", rso_handler)
+    monkeypatch.setattr(verification_legacy, "_request_rank_refresh_from_panel", legacy_handler)
+    interaction = SimpleNamespace()
+
+    for view in (rso_view, legacy_view):
+        button = next(
+            item for item in view.children if item.custom_id == "verification:rank-refresh:v1"
+        )
+        await button.callback(interaction)
+
+    assert rso_handler.await_args.kwargs["start_verification"].__self__ is rso_view
+    assert legacy_handler.await_args.kwargs["start_verification"].__self__ is legacy_view
 
 
 async def test_delete_button_requires_ephemeral_confirmation(

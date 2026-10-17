@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from moon_poro import member_role_lock as member_role_lock_module
 from moon_poro.cogs import verification
 from moon_poro.cogs.verification import (
     VerificationStartView,
@@ -1615,3 +1616,546 @@ async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
         101,
         expected_generation=1,
     )
+
+
+# Launch fixes: worker resilience, rankless completion and durable role retries.
+
+
+def _completion_cog(
+    *,
+    claim_pending: AsyncMock,
+    complete: AsyncMock,
+    retry: AsyncMock,
+) -> verification.VerificationCog:
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = SimpleNamespace(
+        verification_sessions=SimpleNamespace(claim_pending=claim_pending),
+    )
+    cog._complete_rso_verification = complete
+    cog._retry_rso_completion = retry
+    return cog
+
+
+async def test_completion_loop_survives_a_database_error_while_claiming(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    claim = AsyncMock(side_effect=ConnectionError("terminating connection"))
+    cog = _completion_cog(claim_pending=claim, complete=AsyncMock(), retry=AsyncMock())
+
+    await verification.VerificationCog.complete_rso_verifications.coro(cog)
+
+    claim.assert_awaited_once_with(limit=5, method=None)
+    assert "next run will retry" in caplog.text
+
+
+async def test_one_failed_completion_retry_does_not_abort_the_batch() -> None:
+    first = SimpleNamespace(id=1, completion_attempts=1)
+    second = SimpleNamespace(id=2, completion_attempts=1)
+    complete = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    retry = AsyncMock(side_effect=ConnectionError("database is gone"))
+    cog = _completion_cog(
+        claim_pending=AsyncMock(return_value=[first, second]),
+        complete=complete,
+        retry=retry,
+    )
+
+    await verification.VerificationCog.complete_rso_verifications.coro(cog)
+
+    assert [call.args[0] for call in complete.await_args_list] == [first, second]
+    retry.assert_awaited_once_with(first, "UNEXPECTED_COMPLETION_ERROR")
+
+
+async def test_audit_reconciliation_continues_after_a_failed_retry_write() -> None:
+    first = SimpleNamespace(id=1, completion_attempts=1)
+    second = SimpleNamespace(id=2, completion_attempts=1)
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = SimpleNamespace(
+        verification_sessions=SimpleNamespace(
+            claim_audit_reconciliations=AsyncMock(return_value=[first, second])
+        )
+    )
+    cog._publish_rso_audit = AsyncMock(side_effect=[RuntimeError("discord"), True])
+    cog._retry_rso_completion = AsyncMock(side_effect=ConnectionError("database"))
+
+    await cog._reconcile_rso_audits()
+
+    assert cog._publish_rso_audit.await_count == 2
+
+
+async def test_riot_monitoring_loop_survives_unexpected_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = SimpleNamespace(
+        riot_monitor=SimpleNamespace(snapshot=Mock(side_effect=RuntimeError("broken"))),
+    )
+
+    await verification.VerificationCog.report_riot_monitoring.coro(cog)
+
+    assert "Riot monitoring report failed" in caplog.text
+
+
+def _rankless_completion_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    riot_error: Exception,
+) -> tuple[verification.VerificationCog, SimpleNamespace, SimpleNamespace, SimpleNamespace]:
+    member = SimpleNamespace(id=101, send=AsyncMock())
+    guild = SimpleNamespace(id=123, name="Moon Poro", get_member=Mock(return_value=member))
+    member.guild = guild
+    link = SimpleNamespace(
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        created_at=datetime(2026, 8, 15, 10, 1, tzinfo=UTC),
+        deletion_requested_at=None,
+        last_known_rank=None,
+        rank_last_checked_at=None,
+    )
+    verifications = _guarded_verifications(
+        link,
+        get_by_user=AsyncMock(return_value=link),
+        record_rank_snapshot=AsyncMock(),
+        acknowledge_rank_role_sync=AsyncMock(return_value=True),
+        retry_rank_role_sync=AsyncMock(),
+        schedule_rank_refresh_now=AsyncMock(return_value=True),
+    )
+    sessions = SimpleNamespace(retry_discord=AsyncMock(), fail_discord=AsyncMock())
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            rank_refresh_retry_base_seconds=300,
+            zweryfikowani_channel_id=None,
+        ),
+        verifications=verifications,
+        verification_sessions=sessions,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = object.__new__(verification.VerificationCog)
+    cog.bot = bot
+    cog.apply_verified_roles = AsyncMock()
+    cog._publish_rso_audit = AsyncMock(return_value=True)
+    monkeypatch.setattr(verification, "_get_leagues", AsyncMock(side_effect=riot_error))
+    record = SimpleNamespace(
+        id=1,
+        guild_id=123,
+        discord_user_id=101,
+        platform="EUN1",
+        puuid="puuid",
+        completion_attempts=8,
+        created_at=datetime(2026, 8, 15, 10, tzinfo=UTC),
+    )
+    return cog, record, verifications, member
+
+
+@pytest.mark.parametrize(
+    "riot_error",
+    [
+        verification.RiotAPIUnavailable(status=503),
+        verification.RiotAPIUnavailable(status=None),
+        RiotAPINotFound(status=404),
+    ],
+)
+async def test_riot_outage_completes_verification_without_a_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    riot_error: Exception,
+) -> None:
+    cog, record, verifications, member = _rankless_completion_setup(
+        monkeypatch, riot_error=riot_error
+    )
+
+    await cog._complete_rso_verification(record)
+
+    # Verified, member and region roles only: no rank and never Unranked.
+    cog.apply_verified_roles.assert_awaited_once_with(member, "EUN1", None)
+    guard = verifications.run_verification_role_update_with_identity.await_args.kwargs
+    assert guard["expected_rank_last_checked_at"] is None
+    verifications.record_rank_snapshot.assert_not_awaited()
+    cog.bot.verification_sessions.retry_discord.assert_not_awaited()
+    verifications.schedule_rank_refresh_now.assert_awaited_once_with(123, 101)
+    cog._publish_rso_audit.assert_awaited_once_with(record)
+    message = member.send.await_args.args[0]
+    assert "Rolę rangi dodamy automatycznie" in message
+    assert "\u2014" not in message and "\u2013" not in message
+
+
+async def test_rankless_completion_keeps_the_snapshot_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cog, record, verifications, _member = _rankless_completion_setup(
+        monkeypatch, riot_error=verification.RiotAPIUnavailable(status=503)
+    )
+    verifications.run_verification_role_update_with_identity.side_effect = (
+        verification.VerificationSnapshotChanged("newer snapshot")
+    )
+    cog._retry_rso_completion = AsyncMock()
+
+    await cog._complete_rso_verification(record)
+
+    cog._retry_rso_completion.assert_awaited_once_with(record, "RANK_SNAPSHOT_CONFLICT")
+    verifications.schedule_rank_refresh_now.assert_not_awaited()
+    cog._publish_rso_audit.assert_not_awaited()
+
+
+async def test_completion_role_timeout_uses_the_discord_retry_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cog, record, verifications, _member = _rankless_completion_setup(
+        monkeypatch, riot_error=verification.RiotAPIUnavailable(status=503)
+    )
+    verifications.run_verification_role_update_with_identity.side_effect = TimeoutError()
+    cog._retry_rso_completion = AsyncMock()
+
+    await cog._complete_rso_verification(record)
+
+    verifications.retry_rank_role_sync.assert_awaited_once()
+    cog._retry_rso_completion.assert_awaited_once_with(record, "DISCORD_ROLES_UNAVAILABLE")
+
+
+def _role_sync_link(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "guild_id": 123,
+        "discord_user_id": 101,
+        "platform": "EUN1",
+        "puuid": "puuid",
+        "created_at": datetime(2026, 8, 14, tzinfo=UTC),
+        "deletion_requested_at": None,
+        "last_known_rank": None,
+        "rank_last_checked_at": None,
+        "rank_role_sync_pending": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+async def test_role_sync_worker_restores_rankless_roles_then_requests_the_rank() -> None:
+    member = SimpleNamespace(id=101)
+    link = _role_sync_link()
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    member.guild = guild
+    verifications = _guarded_verifications(
+        link,
+        claim_due_rank_role_syncs=AsyncMock(return_value=[link]),
+        acknowledge_rank_role_sync=AsyncMock(return_value=True),
+        retry_rank_role_sync=AsyncMock(),
+        schedule_rank_refresh_now=AsyncMock(),
+        get_by_user=AsyncMock(return_value=link),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+
+    await _retry_next_rank_role_sync(cog)
+
+    cog.apply_verified_roles.assert_awaited_once_with(member, "EUN1", None)
+    verifications.acknowledge_rank_role_sync.assert_awaited_once()
+    verifications.schedule_rank_refresh_now.assert_awaited_once_with(123, 101)
+
+
+async def test_role_sync_worker_retries_a_timed_out_role_write() -> None:
+    member = SimpleNamespace(id=101)
+    link = _role_sync_link(
+        last_known_rank="GOLD", rank_last_checked_at=datetime(2026, 8, 15, tzinfo=UTC)
+    )
+    guild = SimpleNamespace(id=123, get_member=Mock(return_value=member))
+    member.guild = guild
+    verifications = SimpleNamespace(
+        claim_due_rank_role_syncs=AsyncMock(return_value=[link]),
+        run_verification_role_update_with_identity=AsyncMock(side_effect=TimeoutError()),
+        acknowledge_rank_role_sync=AsyncMock(),
+        retry_rank_role_sync=AsyncMock(return_value=300),
+    )
+    bot = SimpleNamespace(
+        settings=_rank_refresh_settings(),
+        verifications=verifications,
+        get_guild=Mock(return_value=guild),
+    )
+    cog = SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock())
+
+    await _retry_next_rank_role_sync(cog)
+
+    verifications.retry_rank_role_sync.assert_awaited_once()
+    assert (
+        verifications.retry_rank_role_sync.await_args.kwargs["expected_rank_last_checked_at"]
+        == link.rank_last_checked_at
+    )
+    verifications.acknowledge_rank_role_sync.assert_not_awaited()
+
+
+def _join_cog(link: SimpleNamespace, **verification_overrides: object) -> SimpleNamespace:
+    attributes: dict[str, object] = {
+        "get_by_user": AsyncMock(return_value=link),
+        "acknowledge_rank_role_sync": AsyncMock(return_value=True),
+        "retry_rank_role_sync": AsyncMock(return_value=300),
+        "request_rank_refresh": AsyncMock(),
+        "schedule_rank_refresh_now": AsyncMock(),
+    }
+    attributes.update(verification_overrides)
+    verifications = _guarded_verifications(link, **attributes)
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            rank_refresh_retry_base_seconds=300,
+            rank_refresh_manual_priority_cooldown_seconds=3600,
+        ),
+        verifications=verifications,
+    )
+    return SimpleNamespace(bot=bot, apply_verified_roles=AsyncMock(), _managed_role_updates=set())
+
+
+async def test_rejoin_without_cached_rank_restores_rankless_roles_and_requests_rank() -> None:
+    link = _role_sync_link(rank_role_sync_pending=False)
+    cog = _join_cog(link)
+    member = SimpleNamespace(id=101, guild=SimpleNamespace(id=123))
+
+    await verification._restore_cached_roles_on_join(cog, member)
+
+    cog.apply_verified_roles.assert_awaited_once_with(member, "EUN1", None)
+    cog.bot.verifications.request_rank_refresh.assert_awaited_once_with(
+        123,
+        101,
+        cooldown_seconds=3600,
+        source="role_tamper",
+    )
+
+
+@pytest.mark.parametrize("cached_rank", [None, "GOLD"])
+async def test_rejoin_role_failure_schedules_the_durable_role_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    cached_rank: str | None,
+) -> None:
+    class FakeHTTPException(Exception):
+        pass
+
+    monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
+    checked_at = datetime(2026, 8, 15, tzinfo=UTC) if cached_rank else None
+    link = _role_sync_link(last_known_rank=cached_rank, rank_last_checked_at=checked_at)
+    cog = _join_cog(link)
+    cog.apply_verified_roles.side_effect = FakeHTTPException()
+    member = SimpleNamespace(id=101, guild=SimpleNamespace(id=123))
+
+    await verification._restore_cached_roles_on_join(cog, member)
+
+    cog.bot.verifications.retry_rank_role_sync.assert_awaited_once_with(
+        123,
+        101,
+        base_delay_seconds=300,
+        expected_rank_last_checked_at=checked_at,
+        expected_puuid="puuid",
+        expected_platform="EUN1",
+        expected_created_at=link.created_at,
+    )
+    cog.bot.verifications.acknowledge_rank_role_sync.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cached_rank", [None, "GOLD"])
+async def test_role_tamper_restore_failure_schedules_the_durable_role_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    cached_rank: str | None,
+) -> None:
+    class FakeHTTPException(Exception):
+        pass
+
+    monkeypatch.setattr(verification.discord, "HTTPException", FakeHTTPException)
+    checked_at = datetime(2026, 8, 15, tzinfo=UTC) if cached_rank else None
+    link = _role_sync_link(last_known_rank=cached_rank, rank_last_checked_at=checked_at)
+    cog = _join_cog(link)
+    cog.apply_verified_roles.side_effect = FakeHTTPException()
+    cog.bot.settings.lol_ranks = ["Gold"]
+    cog.bot.settings.lol_servers = ["EUNE"]
+    cog.bot.settings.verified_role_name = "Verified"
+    cog.bot.settings.member_role_name = "Member"
+    cog.bot.settings.no_lol_role_name = None
+    cog.bot.settings.role_ids = {}
+    guild = SimpleNamespace(id=123)
+    verified = FakeRole("Verified")
+    verified.id = 1  # type: ignore[attr-defined]
+    before = SimpleNamespace(id=101, guild=guild, roles=[verified])
+    after = SimpleNamespace(id=101, guild=guild, roles=[])
+
+    await verification._reconcile_cached_role_change(cog, before, after)
+
+    cog.bot.verifications.retry_rank_role_sync.assert_awaited_once()
+    assert (
+        cog.bot.verifications.retry_rank_role_sync.await_args.kwargs[
+            "expected_rank_last_checked_at"
+        ]
+        == checked_at
+    )
+
+
+async def test_missing_configured_roles_are_logged_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(verification, "_reported_missing_roles", set())
+    settings = SimpleNamespace(
+        lol_ranks=["Gold"],
+        lol_servers=["EUNE"],
+        verified_role_name="Verified",
+        member_role_name="Member",
+        role_ids={"EUNE": 999},
+    )
+    bot = SimpleNamespace(settings=settings)
+    guild = SimpleNamespace(id=123, roles=[], get_role=Mock(return_value=None))
+    member = SimpleNamespace(
+        id=101,
+        guild=guild,
+        roles=[],
+        remove_roles=AsyncMock(),
+        add_roles=AsyncMock(),
+    )
+    guild.fetch_member = AsyncMock(return_value=member)
+    leagues = [{"queueType": "RANKED_SOLO_5x5", "tier": "GOLD"}]
+
+    await _apply_verified_roles(bot, member, "EUN1", leagues)
+    await _apply_verified_roles(bot, member, "EUN1", leagues)
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 4
+    for role_name in ("Gold", "EUNE", "Verified", "Member"):
+        assert sum(repr(role_name) in message for message in warnings) == 1
+    member.add_roles.assert_not_awaited()
+
+
+async def test_rso_start_clears_an_orphan_verified_role_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = Mock(spec=verification.discord.Member)
+    member.id = 101
+    member.roles = [FakeRole("Verified")]
+    guild = SimpleNamespace(id=123, name="Moon Poro")
+    member.guild = guild
+    response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_cooldown=30,
+            verified_role_name="Verified",
+            role_ids={},
+            rso_session_ttl_seconds=600,
+            rso_base_url="https://bot.example.com",
+        ),
+        verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_sessions=SimpleNamespace(
+            create=AsyncMock(
+                return_value=CreatedVerificationSession(
+                    token="a" * 43,
+                    expires_at=verification.discord.utils.utcnow(),
+                )
+            )
+        ),
+    )
+    lock_held: list[bool] = []
+
+    async def remove_marker(*_args: object, **_kwargs: object) -> None:
+        lock_held.append((123, 101) in member_role_lock_module._entries)
+
+    remove = AsyncMock(side_effect=remove_marker)
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove)
+    interaction = SimpleNamespace(
+        user=member,
+        guild=guild,
+        guild_id=123,
+        response=response,
+        edit_original_response=AsyncMock(),
+    )
+
+    await VerificationStartView(bot).begin_verification(interaction)
+
+    remove.assert_awaited_once()
+    assert lock_held == [True]
+    # The link is checked once before and once inside the member role lock.
+    assert bot.verifications.get_by_user.await_count == 2
+    bot.verification_sessions.create.assert_awaited_once()
+    assert interaction.edit_original_response.await_args.kwargs["embed"].title == (
+        "Połącz konto Riot"
+    )
+
+
+async def test_rso_start_keeps_the_role_when_a_link_appears_under_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = Mock(spec=verification.discord.Member)
+    member.id = 101
+    member.roles = [FakeRole("Verified")]
+    guild = SimpleNamespace(id=123, name="Moon Poro")
+    member.guild = guild
+    bot = SimpleNamespace(
+        settings=SimpleNamespace(
+            guild_id=123,
+            verification_cooldown=30,
+            verified_role_name="Verified",
+            role_ids={},
+        ),
+        verifications=SimpleNamespace(
+            get_by_user=AsyncMock(side_effect=[None, SimpleNamespace(puuid="new")])
+        ),
+        verification_sessions=SimpleNamespace(create=AsyncMock()),
+    )
+    remove = AsyncMock()
+    monkeypatch.setattr(verification, "_remove_verified_marker", remove)
+    interaction = SimpleNamespace(
+        user=member,
+        guild=guild,
+        guild_id=123,
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+
+    await VerificationStartView(bot).begin_verification(interaction)
+
+    remove.assert_not_awaited()
+    bot.verification_sessions.create.assert_not_awaited()
+    assert (
+        "Masz już połączone konto Riot"
+        in (interaction.edit_original_response.await_args.kwargs["content"])
+    )
+
+
+def _lookup_cog(account_call: AsyncMock) -> verification.VerificationCog:
+    cog = object.__new__(verification.VerificationCog)
+    link = SimpleNamespace(discord_user_id=101, puuid="puuid", platform="EUN1")
+    cog.bot = SimpleNamespace(
+        verifications=SimpleNamespace(
+            get_by_user=AsyncMock(return_value=link),
+            log_access=AsyncMock(),
+        ),
+        riot_client=SimpleNamespace(get_account_v1_by_puuid=account_call),
+    )
+    return cog
+
+
+@pytest.mark.parametrize(
+    ("account_call", "expected_fragment"),
+    [
+        (AsyncMock(side_effect=RiotAPINotFound(status=404)), "Riot nie znalazł konta"),
+        (AsyncMock(return_value={"puuid": "puuid"}), "Riot nie zwrócił Riot ID"),
+        (AsyncMock(return_value={"gameName": "Moon_*", "tagLine": "EUNE"}), r"Moon\_\*#EUNE"),
+    ],
+)
+async def test_show_wer_discord_handles_missing_accounts_and_fields(
+    account_call: AsyncMock,
+    expected_fragment: str,
+) -> None:
+    cog = _lookup_cog(account_call)
+    interaction = SimpleNamespace(
+        guild_id=123,
+        user=SimpleNamespace(id=900),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await verification.VerificationCog.lookup_by_discord.callback(
+        cog, interaction, SimpleNamespace(id=101), "Moderacja"
+    )
+
+    message = interaction.followup.send.await_args.args[0]
+    assert expected_fragment in message
+    assert "chwilowo niedostępny" not in message
+    assert "dzienniku audytowym" in message
+    cog.bot.verifications.log_access.assert_awaited_once()

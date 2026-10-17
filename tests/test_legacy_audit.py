@@ -121,7 +121,7 @@ async def test_legacy_audit_recovery_after_send_and_restart(
     assert [item.message_id for item in cleanups] == ([987] if cancelled else [])
 
 
-async def test_legacy_worker_only_claims_icon_sessions() -> None:
+async def test_legacy_worker_claims_icon_and_rso_sessions() -> None:
     cog = object.__new__(LegacyVerificationCog)
     record = SimpleNamespace(id=1)
     cog.bot = SimpleNamespace(
@@ -129,7 +129,5 @@ async def test_legacy_worker_only_claims_icon_sessions() -> None:
     )
     cog._complete_rso_verification = AsyncMock()
     await LegacyVerificationCog.complete_legacy_verifications.coro(cog)
-    cog.bot.verification_sessions.claim_pending.assert_awaited_once_with(
-        limit=5, method="PROFILE_ICON"
-    )
+    cog.bot.verification_sessions.claim_pending.assert_awaited_once_with(limit=5, method=None)
     cog._complete_rso_verification.assert_awaited_once_with(record)
