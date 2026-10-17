@@ -513,26 +513,22 @@ async def show_start(request: web.Request) -> web.Response:
         return redirect_response
 
     minutes = max(1, int((as_utc(record.expires_at) - now).total_seconds() // 60))
-    user_id = html.escape(str(record.discord_user_id))
-    guild_id = html.escape(str(record.guild_id))
-    if record.discord_username:
-        user = f"<strong>{html.escape(record.discord_username)}</strong> (ID: {user_id})"
-    else:
-        user = f"o ID <strong>{user_id}</strong>"
-    if record.discord_guild_name:
-        guild = f"<strong>{html.escape(record.discord_guild_name)}</strong> (ID: {guild_id})"
-    else:
-        guild = f"o ID <strong>{guild_id}</strong>"
+    # Names make a forwarded link easy to spot; IDs are only a fallback for
+    # sessions created before the names were stored.
+    user = html.escape(record.discord_username or f"ID {record.discord_user_id}")
+    guild = html.escape(record.discord_guild_name or f"ID {record.guild_id}")
     body = f"""
         {_avatar("start")}
         <h1>Połącz konto przez Riot</h1>
-        <p class="lead">Zalogujesz się na stronie Riot Games. Moon Poro nie widzi Twojego hasła, a Riot przekaże nam Twoje Riot ID i region.</p>
-        <p class="identity">Łączysz konto Riot z kontem Discord {user} na serwerze {guild}.</p>
-        <p class="warning">Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę. Rozpocznij weryfikację samodzielnie w panelu bota.</p>
+        <p class="lead">Hasło wpisujesz tylko na stronie Riot.<br>Link wygaśnie za {minutes}&nbsp;min.</p>
+        <dl class="who">
+          <div><dt>Discord</dt><dd>{user}</dd></div>
+          <div><dt>Serwer</dt><dd>{guild}</dd></div>
+        </dl>
         <form method="post" action="/verify/start/{html.escape(token)}">
           <button type="submit">Przejdź do logowania Riot</button>
         </form>
-        <p class="fine">Link wygaśnie za około {minutes} min. Klikając, akceptujesz <a href="/terms/">warunki</a> i <a href="/privacy/">politykę prywatności</a>.</p>
+        <p class="fine">To nie Twoje konto? Zamknij tę stronę.<br>Klikając, akceptujesz <a href="/terms/">warunki</a> i <a href="/privacy/">politykę prywatności</a>.</p>
     """
     response = _html_page("Połącz konto Riot", body)
     _set_session_cookie(response, token, settings)
@@ -910,8 +906,10 @@ def _html_page(title: str, body: str, *, status: int = 200) -> web.Response:
     @keyframes blink {{ 0%,80%,100% {{ opacity:.25; }} 40% {{ opacity:1; }} }}
     h1 {{ margin:0 0 12px; font-size:clamp(28px,6vw,36px); font-weight:800; line-height:1.15; text-wrap:balance; }}
     .lead {{ margin:0 0 28px; color:var(--muted); text-wrap:pretty; }}
-    .identity {{ width:100%; margin:0 0 16px; overflow-wrap:anywhere; }}
-    .warning {{ margin:0 0 24px; padding:14px 16px; border:1px solid var(--pink); border-radius:16px; color:var(--text); text-wrap:pretty; }}
+    .who {{ display:grid; gap:1px; width:100%; margin:0 0 24px; overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--line); text-align:left; }}
+    .who div {{ display:flex; justify-content:space-between; gap:16px; padding:12px 16px; background:rgba(255,255,255,.03); }}
+    .who dt {{ color:var(--quiet); }}
+    .who dd {{ margin:0; font-weight:800; text-align:right; overflow-wrap:anywhere; min-width:0; }}
     form {{ width:100%; margin:0; }}
     button,.button {{ display:inline-flex; align-items:center; justify-content:center; width:100%; min-height:52px; padding:12px 24px; border:0; border-radius:999px; color:#241a3f; background:linear-gradient(180deg,#fff0cc,var(--moon)); box-shadow:0 6px 24px rgba(255,226,163,.18); font:800 17px "Nunito",system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .15s ease; }}
     button:hover,.button:hover {{ transform:translateY(-2px); }}

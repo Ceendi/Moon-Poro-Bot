@@ -404,23 +404,20 @@ async def test_landing_identifies_discord_target_before_riot_button(
     document = await response.text()
 
     assert response.status == 200
-    assert "Łączysz konto Riot z kontem Discord" in document
-    assert "<strong></strong>" not in document
-    warning = "Jeśli to nie Twoje konto Discord lub ktoś przesłał Ci ten link, zamknij stronę."
+    assert "<dd></dd>" not in document
+    warning = "To nie Twoje konto? Zamknij tę stronę."
     assert warning in document
-    assert "Rozpocznij weryfikację samodzielnie w panelu bota." in document
-    assert document.index("Łączysz konto Riot") < document.index("<button")
-    assert document.index(warning) < document.index("<button")
+    # The account check comes before the button, the warning right below it.
+    assert document.index("<dt>Discord</dt>") < document.index("<button")
+    assert document.index("<dt>Serwer</dt>") < document.index("<button")
     if username is not None:
         assert username not in document and guild_name not in document
-        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;" in document
-        assert "&lt;script&gt;guild&lt;/script&gt;&amp;" in document
-        assert "(ID: 456) na serwerze <strong>" in document
-        assert "(ID: 123)." in document
+        assert "<dd>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;</dd>" in document
+        assert "<dd>&lt;script&gt;guild&lt;/script&gt;&amp;</dd>" in document
     else:
         assert "None" not in document
-        assert "z kontem Discord o ID <strong>456</strong>" in document
-        assert "na serwerze o ID <strong>123</strong>." in document
+        assert "<dd>ID 456</dd>" in document
+        assert "<dd>ID 123</dd>" in document
     assert 'src="/moon-poro.png"' in document
     assert "/fonts/nunito-latin.woff2" in document
 
@@ -440,7 +437,7 @@ async def test_complete_browser_flow_from_landing_to_result(
     assert landing.status == 200
     landing_html = await landing.text()
     assert "Połącz konto przez Riot" in landing_html
-    assert "Riot przekaże nam Twoje Riot ID i region" in landing_html
+    assert "Hasło wpisujesz tylko na stronie Riot.<br>Link wygaśnie za" in landing_html
     assert "Przejdź do logowania Riot" in landing_html
     assert untouched is not None and untouched.status == VerificationSessionStatus.CREATED.value
 
