@@ -298,6 +298,50 @@ async def test_apply_verified_roles_treats_a_corrupt_cached_tier_as_unknown(
     assert set(member.add_roles.await_args.args) == {server, verified, member_role}
 
 
+async def test_a_corrupt_cached_tier_keeps_the_current_rank_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gold = FakeRole("Gold")
+    server = FakeRole("EUNE")
+    verified = FakeRole("Verified")
+    member_role = FakeRole("Member")
+    settings = SimpleNamespace(
+        lol_ranks=["Gold"],
+        lol_servers=["EUNE"],
+        verified_role_name="Verified",
+        member_role_name="Member",
+    )
+    member = SimpleNamespace(
+        id=101,
+        guild=SimpleNamespace(fetch_member=AsyncMock()),
+        roles=[gold, server],
+        remove_roles=AsyncMock(),
+        add_roles=AsyncMock(),
+    )
+    member.guild.fetch_member.return_value = member
+    monkeypatch.setattr(
+        verification,
+        "find_role",
+        Mock(side_effect=[server, verified, member_role]),
+    )
+    monkeypatch.setattr(
+        verification,
+        "member_roles_named",
+        lambda current, names, _settings: [
+            role for role in current.roles if role.name in set(names)
+        ],
+    )
+
+    await _apply_verified_roles(
+        SimpleNamespace(settings=settings),
+        member,
+        "EUN1",
+        [{"queueType": "RANKED_SOLO_5x5", "tier": "WOOD"}],
+    )
+
+    member.remove_roles.assert_not_awaited()
+
+
 async def test_remove_verified_roles_removes_every_managed_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -371,7 +415,7 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
     assert sent_embed.title == "Połącz konto Riot"
     assert sent_embed.description == (
         "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
-        "Moon Poro nie zobaczy Twojego hasła. Link działa tylko dla Ciebie i wygaśnie za 10 min. Nie przekazuj go nikomu."
+        "Moon Poro nie zobaczy Twojego hasła. Link jest przypisany do Twojego konta Discord i wygaśnie za 10 min. Nie przekazuj go nikomu."
     )
     assert "token" not in sent_embed.description.lower()
     assert interaction.edit_original_response.await_args.kwargs["content"] is None

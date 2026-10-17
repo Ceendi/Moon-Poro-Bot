@@ -18,7 +18,6 @@ from moon_poro.account_profile import (
     AccountProfilePresentation,
     AccountProfileState,
     build_account_profile,
-    set_account_profile_status,
 )
 from moon_poro.bot import MoonPoroBot
 from moon_poro.member_role_lock import member_role_lock
@@ -57,6 +56,9 @@ from moon_poro.verification_sessions import SessionAlreadyUsed
 
 logger = logging.getLogger("moon_poro.verification")
 
+# Members whose rank refresh is already followed by a private reply.
+_ACTIVE_RANK_REFRESH_WATCHES: set[tuple[int, int]] = set()
+
 type RiotPayload = dict[str, Any]
 type LeagueEntries = list[RiotPayload]
 type VerificationStarter = Callable[[discord.Interaction], Awaitable[None]]
@@ -82,10 +84,6 @@ _ACCOUNT_PROFILE_REFRESH_TIMEOUT_MESSAGE = (
 )
 _ACCOUNT_PROFILE_REFRESH_OBSERVATION_ERROR_MESSAGE = (
     "Nie udało się pokazać wyniku. Odświeżanie może jeszcze trwać, sprawdź „Moje konto” za chwilę."
-)
-_RANK_REFRESH_RIOT_UNAVAILABLE_MESSAGE = (
-    "Riot jest chwilowo niedostępny.\n"
-    "Odświeżymy rangę automatycznie, gdy Riot znów zacznie działać."
 )
 _PANEL_LINK_CHANGED_MESSAGE = (
     "Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”."
@@ -226,6 +224,7 @@ async def _apply_verified_roles(
     settings = bot.settings
     # A missing cache is unknown, not a Riot-confirmed unranked account.
     rank_role = None
+    keep_current_rank = False
     if leagues is not None:
         try:
             rank = get_rank_from_leagues(leagues)
@@ -233,6 +232,7 @@ async def _apply_verified_roles(
             # Fresh Riot data is validated by the client, so only a corrupt cached
             # tier lands here. Treat it as unknown rather than failing the restore.
             logger.warning("Ignoring an unknown cached rank for Discord user %s", member.id)
+            keep_current_rank = True
         else:
             rank_role = get_discord_rank_role(member.guild, rank, settings)
             if rank_role is None:
@@ -247,6 +247,8 @@ async def _apply_verified_roles(
     if no_lol_role_name:
         managed_names.add(no_lol_role_name)
     desired = {role for role in (rank_role, server_role) if role is not None}
+    if keep_current_rank:
+        desired.update(member_roles_named(member, settings.lol_ranks, settings))
     current_managed = set(member_roles_named(member, managed_names, settings))
     to_remove = current_managed - desired
     to_add = desired - set(member.roles)
@@ -511,11 +513,26 @@ async def _ensure_active_link_roles_once(
 ) -> bool:
     cached = _cached_rank_leagues(link)
     if cached is None:
-        applied = await _run_active_link_role_update(
-            cog.bot,
-            link,
-            lambda: _apply_verified_roles(cog.bot, member, link.platform, None),
-        )
+        try:
+            applied = await _run_active_link_role_update(
+                cog.bot,
+                link,
+                lambda: _apply_verified_roles(cog.bot, member, link.platform, None),
+            )
+        except (discord.HTTPException, TimeoutError):
+            await cog.bot.verifications.retry_rank_role_sync(
+                member.guild.id,
+                member.id,
+                base_delay_seconds=cog.bot.settings.rank_refresh_retry_base_seconds,
+                expected_rank_last_checked_at=link.rank_last_checked_at,
+                expected_puuid=link.puuid,
+                expected_platform=link.platform,
+                expected_created_at=link.created_at,
+            )
+            logger.exception(
+                "Could not restore roles after obsolete marker cleanup for %s", member.id
+            )
+            return False
         if not applied:
             return False
         await cog.bot.verifications.schedule_rank_refresh_now(member.guild.id, member.id)
@@ -1249,7 +1266,7 @@ async def _remove_user_verification(
         return "Usunięto poprzednie powiązanie. Możesz teraz ponownie połączyć konto Riot."
     return (
         "Usunięto powiązanie z kontem Riot oraz rolę „Zweryfikowany”. "
-        "Role regionu, rangi i „Użytkownik” zostają."
+        "Role regionu i rangi oraz rola „Użytkownik” zostają."
     )
 
 
@@ -1567,6 +1584,30 @@ class AccountProfileView(discord.ui.View):
         baseline_rank_last_checked_at: datetime | None,
     ) -> None:
         guild_id = interaction.guild_id or 0
+        watch_key = (guild_id, self.owner_id)
+        if watch_key in _ACTIVE_RANK_REFRESH_WATCHES:
+            # Another reply already follows this refresh; repeated clicks only
+            # show the current state instead of polling the database again.
+            return
+        _ACTIVE_RANK_REFRESH_WATCHES.add(watch_key)
+        try:
+            await self._poll_rank_refresh(
+                interaction,
+                guild_id=guild_id,
+                initial_state=initial_state,
+                baseline_rank_last_checked_at=baseline_rank_last_checked_at,
+            )
+        finally:
+            _ACTIVE_RANK_REFRESH_WATCHES.discard(watch_key)
+
+    async def _poll_rank_refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        initial_state: AccountProfileState,
+        baseline_rank_last_checked_at: datetime | None,
+    ) -> None:
         current_state = initial_state
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _ACCOUNT_PROFILE_REFRESH_WATCH_TIMEOUT_SECONDS
@@ -1711,12 +1752,6 @@ class AccountProfileView(discord.ui.View):
                 await self._edit_profile(interaction, link)
                 return
             presentation = _build_account_profile(self.bot, link)
-            if presentation.state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
-                # The worker pauses while the Riot breaker is open and resumes
-                # queued refreshes after the next successful probe.
-                set_account_profile_status(
-                    presentation.embed, _RANK_REFRESH_RIOT_UNAVAILABLE_MESSAGE
-                )
             if result.status is RankRefreshRequestStatus.COOLDOWN:
                 if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
                     request_recorded = True
@@ -1946,14 +1981,14 @@ async def _show_delete_confirmation(
         confirmation = (
             "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i „Użytkownik” zostaną.\n"
+            "Role regionu i rangi oraz rola „Użytkownik” zostaną.\n"
             "Po usunięciu możesz ponownie połączyć konto Riot."
         )
     else:
         confirmation = (
             "Czy na pewno chcesz usunąć powiązanie z kontem Riot?\n\n"
             "Rola „Zweryfikowany” zostanie usunięta. "
-            "Role regionu, rangi i „Użytkownik” zostaną."
+            "Role regionu i rangi oraz rola „Użytkownik” zostaną."
         )
     await interaction.response.send_message(
         confirmation,
@@ -2184,7 +2219,7 @@ class VerificationStartView(discord.ui.View):
             description=(
                 "Kliknij przycisk poniżej i zaloguj się na stronie Riot.\n"
                 "Moon Poro nie zobaczy Twojego hasła. "
-                f"Link działa tylko dla Ciebie i wygaśnie za {minutes} min. "
+                f"Link jest przypisany do Twojego konta Discord i wygaśnie za {minutes} min. "
                 "Nie przekazuj go nikomu."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
@@ -2460,7 +2495,7 @@ class VerificationCog(commands.Cog):
             message = (
                 "Twoje konto Riot jest połączone. "
                 f"Na serwerze **{guild.name}** masz już rolę regionu, "
-                "a rolę rangi bot doda, gdy tylko Riot ją poda."
+                "a rolę rangi bot doda, gdy Riot ją potwierdzi."
             )
         else:
             message = (
@@ -2672,7 +2707,7 @@ class VerificationCog(commands.Cog):
             title="Weryfikacja konta League of Legends",
             description=(
                 "Zaloguj się przez Riot, a bot nada Ci role regionu i rangi Solo/Duo. "
-                "Potem sam pilnuje, żeby ranga była aktualna."
+                "Potem będzie sam dbał o to, żeby ranga była aktualna."
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )

@@ -220,7 +220,7 @@ def _add_state_field(embed: discord.Embed, state: AccountProfileState) -> None:
     elif state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
         set_account_profile_status(
             embed,
-            "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera.",
+            "Odświeżanie rangi jest wstrzymane.\nJeśli to potrwa dłużej, daj znać administracji serwera.",
         )
     elif state is AccountProfileState.TEMPORARY_UNAVAILABLE:
         set_account_profile_status(
@@ -292,9 +292,9 @@ def _rank_label(link: VerificationLinkLike) -> str:
 
 def _lp_label(link: VerificationLinkLike) -> str:
     if (link.last_known_rank or "").strip().upper() == "UNRANKED":
-        return "brak"
+        return "Brak"
     if link.last_known_league_points is None or link.last_known_league_points < 0:
-        return "brak"
+        return "Brak"
     return f"{link.last_known_league_points} LP"
 
 
@@ -306,13 +306,13 @@ def _valid_record(wins: int | None, losses: int | None) -> tuple[int | None, int
 
 def _record_label(wins: int | None, losses: int | None) -> str:
     if wins is None or losses is None:
-        return "brak"
+        return "Brak"
     return f"{wins} W / {losses} P"
 
 
 def _win_rate_label(wins: int | None, losses: int | None) -> str:
     if wins is None or losses is None or wins + losses == 0:
-        return "brak"
+        return "Brak"
     rate = wins / (wins + losses) * 100
     return f"{rate:.1f}".replace(".", ",").removesuffix(",0") + "%"
 

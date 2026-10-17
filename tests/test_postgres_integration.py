@@ -2299,7 +2299,7 @@ async def test_manual_rank_refresh_jumps_the_backlog_without_spending_cooldown(
         assert (await repository.get_by_user(guild_id, 803)).rank_user_refresh_requested_at is None
         stats = await repository.rank_refresh_queue_stats(guild_id)
         assert stats.oldest_due_at is not None
-        assert oldest_before - stats.oldest_due_at < timedelta(seconds=1)
+        assert oldest_before - stats.oldest_due_at <= timedelta(seconds=1)
         claimed = await repository.claim_due_rank_refreshes(
             guild_id, limit=1, claim_timeout_seconds=300
         )
@@ -2321,6 +2321,66 @@ async def test_manual_rank_refresh_jumps_the_backlog_without_spending_cooldown(
             guild_id, limit=2, claim_timeout_seconds=300
         )
         assert [link.discord_user_id for link in claimed] == [801, 802]
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id = :guild_id"),
+                {"guild_id": guild_id},
+            )
+        await database.close()
+
+
+async def test_requested_rank_refreshes_are_served_first_come_first_served(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = _launch_fix_settings(settings_factory, guild_id)
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationRepository(database.session_factory)
+    now = datetime.now(UTC)
+    try:
+        for user_id in (901, 902, 903, 904, 905):
+            await repository.create(
+                guild_id=guild_id,
+                user_id=user_id,
+                message_id=None,
+                platform="EUN1",
+                puuid=f"fifo-{guild_id}-{user_id}",
+                rank_snapshot=RankSnapshot("GOLD"),
+            )
+        async with database.session_factory.begin() as session:
+            backlog = await session.get(VerificationLink, (guild_id, 901))
+            assert backlog is not None
+            backlog.rank_next_refresh_at = now - timedelta(hours=3)
+            already_due = await session.get(VerificationLink, (guild_id, 904))
+            assert already_due is not None
+            already_due.rank_next_refresh_at = now - timedelta(minutes=1)
+            deleting = await session.get(VerificationLink, (guild_id, 905))
+            assert deleting is not None
+            deleting.rank_next_refresh_at = now - timedelta(days=30)
+            deleting.deletion_requested_at = now
+
+        for user_id in (902, 903):
+            result = await repository.request_rank_refresh(
+                guild_id, user_id, cooldown_seconds=1800, source="user"
+            )
+            assert result.status is RankRefreshRequestStatus.ENQUEUED
+        # Clicking again while already due must not jump ahead of earlier requests.
+        for _attempt in range(5):
+            result = await repository.request_rank_refresh(
+                guild_id, 904, cooldown_seconds=1800, source="user"
+            )
+            assert result.status is RankRefreshRequestStatus.ALREADY_DUE
+
+        claimed = await repository.claim_due_rank_refreshes(
+            guild_id, limit=4, claim_timeout_seconds=300
+        )
+        assert [link.discord_user_id for link in claimed] == [902, 903, 904, 901]
+        # A link waiting for deletion never anchors the priority far in the past.
+        first = await repository.get_by_user(guild_id, 902)
+        assert first is not None
+        assert now - first.rank_next_refresh_at < timedelta(hours=4)
     finally:
         async with database.engine.begin() as connection:
             await connection.execute(

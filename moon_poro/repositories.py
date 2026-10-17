@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, cast
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -577,7 +577,10 @@ class VerificationRepository:
             if link.rank_refresh_claimed_at is not None or link.rank_refresh_failures > 0:
                 return True
             if link.rank_next_refresh_at > now:
-                link.rank_next_refresh_at = now
+                # Links without a rank role go ahead of the automatic backlog.
+                link.rank_next_refresh_at = await _priority_refresh_at(
+                    session, guild_id, user_id, now
+                )
             return True
 
     async def request_rank_refresh(
@@ -634,8 +637,11 @@ class VerificationRepository:
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                 )
             if link.rank_next_refresh_at <= now:
-                # The refresh is already queued; only move it ahead of the backlog.
-                link.rank_next_refresh_at = await _priority_refresh_at(session, guild_id, now)
+                # The refresh is already queued; only ever move it ahead of the backlog.
+                link.rank_next_refresh_at = min(
+                    link.rank_next_refresh_at,
+                    await _priority_refresh_at(session, guild_id, user_id, now),
+                )
                 return RankRefreshRequestResult(
                     RankRefreshRequestStatus.ALREADY_DUE,
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
@@ -646,7 +652,7 @@ class VerificationRepository:
                     baseline_rank_last_checked_at=baseline_rank_last_checked_at,
                 )
             setattr(link, timestamp_name, now)
-            link.rank_next_refresh_at = await _priority_refresh_at(session, guild_id, now)
+            link.rank_next_refresh_at = await _priority_refresh_at(session, guild_id, user_id, now)
             return RankRefreshRequestResult(
                 RankRefreshRequestStatus.ENQUEUED,
                 baseline_rank_last_checked_at=baseline_rank_last_checked_at,
@@ -1190,29 +1196,57 @@ class VerificationRepository:
             return cast(CursorResult[Any], result).rowcount or 0
 
 
-async def _priority_refresh_at(session: AsyncSession, guild_id: int, now: datetime) -> datetime:
-    """Return a due time that sorts a manual request ahead of the overdue backlog.
+async def _priority_refresh_at(
+    session: AsyncSession, guild_id: int, user_id: int, now: datetime
+) -> datetime:
+    """Return a due time that puts a requested refresh ahead of the automatic backlog.
 
-    The claim query orders by ``rank_next_refresh_at``. Placing a manual request
-    just before the oldest due row keeps that ordering (and its partial index)
-    intact, while the queue age reported by monitoring barely changes.
+    The claim query orders by ``rank_next_refresh_at``. A requested refresh is
+    placed just before the oldest automatically due row and just after the
+    newest earlier request, so requests are served first come, first served and
+    the claim ordering (and its partial index) stays intact. The requesting link
+    itself is ignored, so clicking again never moves it further ahead.
     """
 
-    oldest_due = cast(
-        datetime | None,
-        await session.scalar(
-            select(func.min(VerificationLink.rank_next_refresh_at)).where(
-                VerificationLink.guild_id == guild_id,
-                VerificationLink.puuid.is_not(None),
-                VerificationLink.rank_next_refresh_at <= now,
-            )
+    requested = or_(
+        and_(
+            VerificationLink.rank_user_refresh_requested_at.is_not(None),
+            VerificationLink.rank_next_refresh_at
+            <= VerificationLink.rank_user_refresh_requested_at,
+        ),
+        and_(
+            VerificationLink.rank_manual_refresh_requested_at.is_not(None),
+            VerificationLink.rank_next_refresh_at
+            <= VerificationLink.rank_manual_refresh_requested_at,
         ),
     )
-    if oldest_due is None:
-        return now
-    if oldest_due.tzinfo is None:
-        oldest_due = oldest_due.replace(tzinfo=UTC)
-    return min(now, oldest_due - timedelta(microseconds=1))
+    due = and_(
+        VerificationLink.guild_id == guild_id,
+        VerificationLink.discord_user_id != user_id,
+        VerificationLink.puuid.is_not(None),
+        VerificationLink.deletion_requested_at.is_(None),
+        VerificationLink.rank_next_refresh_at <= now,
+    )
+    row = (
+        await session.execute(
+            select(
+                func.min(VerificationLink.rank_next_refresh_at).filter(not_(requested)),
+                func.max(VerificationLink.rank_next_refresh_at).filter(requested),
+            ).where(due)
+        )
+    ).one()
+    oldest_automatic = cast(datetime | None, row[0])
+    newest_requested = cast(datetime | None, row[1])
+    candidate = now
+    if oldest_automatic is not None:
+        candidate = _as_utc(oldest_automatic) - timedelta(seconds=1)
+    if newest_requested is not None:
+        candidate = max(candidate, _as_utc(newest_requested) + timedelta(microseconds=1))
+    return min(now, candidate)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _percentile_timestamp(values: list[datetime], percentile: float) -> datetime | None:

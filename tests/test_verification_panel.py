@@ -532,6 +532,30 @@ async def test_unverified_profile_only_reuses_active_verification_provider() -> 
     starter.assert_awaited_once_with(interaction)
 
 
+async def test_only_one_reply_follows_a_member_rank_refresh() -> None:
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock())
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=build_account_profile(None),
+        link=None,
+        start_verification=AsyncMock(),
+    )
+    interaction = SimpleNamespace(guild_id=123)
+    verification._ACTIVE_RANK_REFRESH_WATCHES.add((123, 101))
+    try:
+        await view._watch_rank_refresh(
+            interaction,
+            initial_state=verification.AccountProfileState.REFRESH_QUEUED,
+            baseline_rank_last_checked_at=None,
+        )
+    finally:
+        verification._ACTIVE_RANK_REFRESH_WATCHES.discard((123, 101))
+
+    bot.verifications.get_by_user.assert_not_awaited()
+
+
 def test_incomplete_legacy_profile_only_offers_previous_link_removal() -> None:
     bot = _panel_bot()
     link = _profile_link(puuid=None)
@@ -1508,11 +1532,10 @@ async def test_panel_refresh_tells_the_user_when_the_riot_breaker_is_open(
     # The worker is paused, so the profile is rendered once without polling.
     assert bot.verifications.get_by_user.await_count == 2
     rendered = interaction.edit_original_response.await_args.kwargs
+    # A key-level pause does not recover by itself, so the panel says so.
     assert rendered["embed"].fields[-1].value == (
-        "Riot jest chwilowo niedostępny.\n"
-        "Odświeżymy rangę automatycznie, gdy Riot znów zacznie działać."
+        "Odświeżanie rangi jest wstrzymane.\nJeśli to potrwa dłużej, daj znać administracji serwera."
     )
-    assert "administratorem" not in str(rendered["embed"].to_dict())
 
 
 async def test_panel_refresh_hides_internal_errors_in_the_thinking_response(
@@ -1595,7 +1618,7 @@ async def test_delete_button_requires_ephemeral_confirmation(
     assert kwargs["ephemeral"] is True
     confirmation = interaction.response.send_message.await_args.args[0]
     assert "Rola „Zweryfikowany” zostanie usunięta." in confirmation
-    assert "Role regionu, rangi i „Użytkownik” zostaną." in confirmation
+    assert "Role regionu i rangi oraz rola „Użytkownik” zostaną." in confirmation
     view = kwargs["view"]
     assert isinstance(view, DeleteVerificationConfirmationView)
     assert view.identity == VerificationLinkIdentity.from_link(link)
@@ -1673,7 +1696,7 @@ async def test_null_puuid_link_can_be_confirmed_and_deleted_with_strict_identity
     assert confirmation == (
         "Czy na pewno chcesz usunąć poprzednie powiązanie?\n\n"
         "Rola „Zweryfikowany” zostanie usunięta. "
-        "Role regionu, rangi i „Użytkownik” zostaną.\n"
+        "Role regionu i rangi oraz rola „Użytkownik” zostaną.\n"
         "Po usunięciu możesz ponownie połączyć konto Riot."
     )
     view = open_interaction.response.send_message.await_args.kwargs["view"]

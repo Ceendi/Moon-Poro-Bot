@@ -628,7 +628,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             return False
         if not self._is_current():
             await interaction.response.send_message(
-                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return False
@@ -711,7 +711,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         # A newer challenge or cancellation must invalidate an in-flight request.
         if not self._is_current():
             await interaction.followup.send(
-                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return
@@ -735,7 +735,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             )
         except SessionError:
             await interaction.followup.send(
-                "Ta weryfikacja wygasła albo zaczęto nową. Zacznij jeszcze raz.",
+                "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return

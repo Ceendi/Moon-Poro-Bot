@@ -146,7 +146,7 @@ def test_authorization_message_does_not_claim_an_alert_was_sent() -> None:
 
     assert profile.embed.description is None
     assert fields["Stan odświeżania"] == (
-        "Odświeżanie rangi jest niedostępne.\nSkontaktuj się z administratorem serwera."
+        "Odświeżanie rangi jest wstrzymane.\nJeśli to potrwa dłużej, daj znać administracji serwera."
     )
 
 
@@ -186,9 +186,9 @@ def test_unranked_profile_does_not_invent_lp_or_results() -> None:
     fields = {field.name: field.value for field in profile.embed.fields}
 
     assert fields["Solo/Duo"] == "Brak rangi"
-    assert fields["LP"] == "brak"
-    assert fields["Bilans"] == "brak"
-    assert fields["Procent wygranych"] == "brak"
+    assert fields["LP"] == "Brak"
+    assert fields["Bilans"] == "Brak"
+    assert fields["Procent wygranych"] == "Brak"
 
 
 def test_grandmaster_profile_keeps_user_facing_capitalization() -> None:
