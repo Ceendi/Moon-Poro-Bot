@@ -14,7 +14,7 @@ const email = siteConfig.contactEmail;
       <h2>W skrócie</h2>
       <ul>
         <li>Nie znamy Twojego hasła ani adresu e-mail z konta Riot.</li>
-        <li>Zapisujemy ID z Discorda, Riot ID, region i rangę, żeby nadawać role.</li>
+        <li>Zapisujemy identyfikator konta Discord, Riot ID, region i rangę, żeby nadawać role.</li>
         <li>Nie ma reklam, analityki ani śledzenia. Nie sprzedajemy danych.</li>
         <li>Powiązanie usuniesz sam komendą <code>/usun_weryfikacje</code>.</li>
       </ul>
@@ -28,16 +28,16 @@ const email = siteConfig.contactEmail;
     <section>
       <h2>2. Jakie dane przetwarzamy</h2>
       <ul>
-        <li><strong>Discord:</strong> ID Twojego konta i serwera oraz role nadawane przez bota.</li>
-        <li><strong>Konto Riot:</strong> PUUID, Riot ID, region i ranga Solo/Duo (dywizja, LP, wygrane, przegrane, nieaktywność), data i sposób weryfikacji oraz terminy odświeżania rangi.</li>
-        <li><strong>Logowanie przez Riot:</strong> od Riot dostajemy PUUID, Riot ID i region. Nie dostajemy hasła ani adresu e-mail. Token od Riot jest używany tylko przez chwilę i nie jest zapisywany. Samo logowanie zapisujemy jako krótką sesję: jej status, czas i ewentualny kod błędu.</li>
+        <li><strong>Discord:</strong> identyfikator Twojego konta i serwera oraz role nadawane przez bota.</li>
+        <li><strong>Konto Riot:</strong> PUUID (stały identyfikator konta Riot), Riot ID, region i ranga Solo/Duo (dywizja, LP, wygrane, przegrane, nieaktywność), data i sposób weryfikacji oraz terminy odświeżania rangi.</li>
+        <li><strong>Logowanie przez Riot:</strong> od Riot dostajemy PUUID, Riot ID i region. Nie dostajemy hasła ani adresu e-mail. Jednorazowy klucz dostępu od Riot wykorzystujemy tylko przez chwilę i go nie zapisujemy. Samo logowanie zapisujemy jako krótką sesję: jej status, czas i ewentualny kod błędu.</li>
         <li><strong>Moderacja:</strong> ostrzeżenia (kogo dotyczą, kto je dał, powód, poziom, daty), miesięczne statystyki moderatorów oraz wiadomości na kanałach moderacji o weryfikacjach, wejściach, wyjściach i banach.</li>
-        <li><strong>Opcjonalne funkcje serwera:</strong> jeśli są włączone, bot sprawdza wiek konta Discord przy dołączaniu, a wiadomości z określonymi słowami (np. ofertą boostingu) może przekazać moderacji.</li>
+        <li><strong>Opcjonalne funkcje serwera:</strong> jeśli są włączone, bot sprawdza wiek konta Discord przy dołączaniu, a wiadomości z określonymi słowami (np. z ofertą wbicia rangi) może przekazać moderacji albo usunąć.</li>
         <li><strong>Wyszukiwania administratorów:</strong> gdy administrator sprawdza, kto jest połączony z jakim kontem, zapisujemy, kto sprawdzał, kogo, kiedy i z jakiego powodu.</li>
         <li><strong>Adres IP</strong> na stronie logowania jest trzymany przez chwilę w pamięci serwera, żeby ograniczyć liczbę prób. Nie zapisujemy go.</li>
-        <li><strong>Logi techniczne</strong> serwera, potrzebne do naprawiania błędów.</li>
+        <li><strong>Logi techniczne</strong>, czyli zapisy działania serwera, potrzebne do naprawiania błędów.</li>
       </ul>
-      <p>Dane pochodzą od Ciebie, z Discorda i z oficjalnego Riot API. Bez ID z Discorda i Riot nie da się połączyć kont.</p>
+      <p>Dane pochodzą od Ciebie, z Discorda i bezpośrednio od Riot Games. Bez identyfikatorów kont Discord i Riot nie da się ich połączyć.</p>
       <p>Twoje konto i rangę z ostatniego odświeżenia możesz zobaczyć w <code>/profil</code>. Role widzą inni na serwerze, a wiadomości moderacyjne tylko osoby z dostępem do tych kanałów.</p>
     </section>
 
@@ -53,7 +53,7 @@ const email = siteConfig.contactEmail;
 
     <section>
       <h2>4. Kto ma dostęp</h2>
-      <p>Operator oraz administratorzy i moderatorzy serwera, w zakresie potrzebnym do moderacji i pomocy. Dane przetwarzają też dostawcy usług: Discord, Riot Games i Google Cloud (hosting bota i bazy). Mogą to robić poza Europejskim Obszarem Gospodarczym na podstawie zabezpieczeń opisanych w ich politykach.</p>
+      <p>Operator oraz administratorzy i moderatorzy serwera, w zakresie potrzebnym do moderacji i pomocy. Dane przetwarzają też dostawcy usług: Discord, Riot Games i Google Cloud (serwery, na których działa bot i baza danych). Mogą to robić poza Europejskim Obszarem Gospodarczym na podstawie zabezpieczeń opisanych w ich politykach.</p>
     </section>
 
     <section>

@@ -3,11 +3,11 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import { siteConfig } from "../../config";
 ---
 
-<BaseLayout lang="en" canonicalPath="/en/" title="Your LoL rank on Discord" description="Moon Poro is the bot of the League of Legends PL Discord server. Sign in with Riot and get a role with your region and Solo/Duo rank.">
+<BaseLayout lang="en" canonicalPath="/en/" title="Your LoL rank on Discord" description="Moon Poro is the bot of the League of Legends PL Discord server. Sign in with Riot and get roles with your region and Solo/Duo rank.">
   <section class="hero">
     <div class="hero-text">
       <h1>Show your rank on the server</h1>
-      <p class="lead">Moon Poro is the bot of the League of Legends PL server. Sign in with Riot and the bot gives you a role with your region and Solo/Duo rank. It keeps it up to date when you climb.</p>
+      <p class="lead">Moon Poro is the bot of the League of Legends PL server. Sign in with Riot and the bot gives you roles with your region and Solo/Duo rank. After that, it keeps your rank up to date.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Join the server</a>
         <a class="button ghost" href="#how">How to verify</a>
@@ -34,14 +34,31 @@ import { siteConfig } from "../../config";
         <p>Click “Zaloguj się przez Riot” (“Sign in with Riot”), then “Przejdź do logowania Riot”. The link works once and only for a few minutes.</p>
       </li>
       <li>
-        <h3>Sign in with Riot</h3>
-        <p>You sign in on the Riot Games website, the same way as in the game client. Riot shares your Riot ID and region with us.</p>
+        <h3>Sign in to your Riot account</h3>
+        <p>You sign in on the Riot Games website with the same account you play on. Riot shares your Riot ID and region with us.</p>
       </li>
       <li>
         <h3>Done</h3>
-        <p>Go back to Discord. You now have the “Zweryfikowany” (Verified) role plus region and rank roles.</p>
+        <p>Go back to Discord. You now have the “Zweryfikowany” (Verified) and “Użytkownik” (Member) roles plus region and rank roles.</p>
       </li>
     </ol>
+  </section>
+
+  <section class="section">
+    <h2>Every rank has its role</h2>
+    <p class="section-lead">From Iron to Challenger. If you're not ranked in Solo/Duo yet, you get the role for unranked players.</p>
+    <ul class="ranks">
+      <li class="iron">Iron</li>
+      <li class="bronze">Bronze</li>
+      <li class="silver">Silver</li>
+      <li class="gold">Gold</li>
+      <li class="platinum">Platinum</li>
+      <li class="emerald">Emerald</li>
+      <li class="diamond">Diamond</li>
+      <li class="master">Master</li>
+      <li class="grandmaster">Grandmaster</li>
+      <li class="challenger">Challenger</li>
+    </ul>
   </section>
 
   <section class="section">
@@ -68,7 +85,7 @@ import { siteConfig } from "../../config";
       <div>
         <h2>Your password goes to Riot only</h2>
         <p>You sign in on riotgames.com. Moon Poro never sees your password, and the bot will never ask for it on Discord. Poros prefer Poro-Snax. If someone asks for your password “on behalf of Moon Poro”, it's a scam. Report it to the moderators.</p>
-        <p>We only store what's needed for roles: your Discord ID, Riot ID, region and rank. Details are in the <a href="/en/privacy/">privacy policy</a>.</p>
+        <p>We only store what's needed for roles: your Discord account ID, Riot ID, region and rank. Details are in the <a href="/en/privacy/">privacy policy</a>.</p>
       </div>
     </div>
   </section>
@@ -93,7 +110,7 @@ import { siteConfig } from "../../config";
         <p>The bot shows the rank from the last refresh. Click “Odśwież rangę” in “Moje konto” and give it a moment.</p>
       </details>
       <details>
-        <summary>What happens if I leave the server?</summary>
+        <summary>What happens if I leave the Discord server?</summary>
         <p>The link stays, and the bot restores your roles when you come back. If you want it removed and you're no longer on the server, email <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>.</p>
       </details>
     </div>

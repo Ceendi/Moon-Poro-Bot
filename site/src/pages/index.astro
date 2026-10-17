@@ -3,11 +3,11 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import { siteConfig } from "../config";
 ---
 
-<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Zaloguj się przez Riot i dostań rolę z regionem i rangą Solo/Duo.">
+<BaseLayout title="Ranga z LoL-a na Discordzie" description="Moon Poro to bot serwera League of Legends PL. Zaloguj się przez Riot i dostań role z regionem i rangą Solo/Duo.">
   <section class="hero">
     <div class="hero-text">
       <h1>Pokaż swoją rangę na serwerze</h1>
-      <p class="lead">Moon Poro to bot serwera League of Legends PL. Logujesz się przez Riot, a bot nadaje Ci rolę z regionem i rangą Solo/Duo. Potem sam ją aktualizuje, kiedy wbijesz wyżej.</p>
+      <p class="lead">Moon Poro to bot serwera League of Legends PL. Logujesz się przez Riot, a bot nadaje Ci role regionu i rangi Solo/Duo. Potem sam pilnuje, żeby ranga była aktualna.</p>
       <div class="actions">
         <a class="button" href={siteConfig.discordInviteUrl}>Dołącz do serwera</a>
         <a class="button ghost" href="#jak">Jak się zweryfikować</a>
@@ -34,14 +34,31 @@ import { siteConfig } from "../config";
         <p>Kliknij „Zaloguj się przez Riot”, a potem „Przejdź do logowania Riot”. Link działa tylko raz i przez kilka minut.</p>
       </li>
       <li>
-        <h3>Zaloguj się w Riot</h3>
-        <p>Logujesz się na stronie Riot Games, tak jak w kliencie gry. Riot przekazuje nam Twoje Riot ID i region.</p>
+        <h3>Zaloguj się na konto Riot</h3>
+        <p>Logujesz się na stronie Riot Games tym samym kontem, co w grze. Riot przekazuje nam Twoje Riot ID i region.</p>
       </li>
       <li>
         <h3>Gotowe</h3>
-        <p>Wróć do Discorda. Masz już rolę „Zweryfikowany” oraz role regionu i rangi.</p>
+        <p>Wróć do Discorda. Masz już role „Zweryfikowany” i „Użytkownik” oraz role regionu i rangi.</p>
       </li>
     </ol>
+  </section>
+
+  <section class="section">
+    <h2>Każda ranga ma swoją rolę</h2>
+    <p class="section-lead">Od Żelaza do Pretendenta. Jeśli nie masz jeszcze rangi w Solo/Duo, dostaniesz rolę dla graczy bez rangi.</p>
+    <ul class="ranks">
+      <li class="iron">Żelazo</li>
+      <li class="bronze">Brąz</li>
+      <li class="silver">Srebro</li>
+      <li class="gold">Złoto</li>
+      <li class="platinum">Platyna</li>
+      <li class="emerald">Szmaragd</li>
+      <li class="diamond">Diament</li>
+      <li class="master">Mistrz</li>
+      <li class="grandmaster">Arcymistrz</li>
+      <li class="challenger">Pretendent</li>
+    </ul>
   </section>
 
   <section class="section">
@@ -53,7 +70,7 @@ import { siteConfig } from "../config";
       </li>
       <li>
         <p class="feature-key"><span class="discord-button blurple">Odśwież rangę</span></p>
-        <p>Ranga odświeża się sama. Po awansie nie musisz czekać, wystarczy kliknąć ten przycisk w „Moje konto”.</p>
+        <p>Ranga odświeża się sama. Po awansie nie musisz czekać, wystarczy kliknąć ten przycisk w sekcji „Moje konto”.</p>
       </li>
       <li>
         <p class="feature-key"><span class="discord-button red">Usuń powiązanie</span> <span class="or">lub</span> <code>/usun_weryfikacje</code></p>
@@ -68,7 +85,7 @@ import { siteConfig } from "../config";
       <div>
         <h2>Hasło wpisujesz tylko u Riot</h2>
         <p>Logowanie odbywa się na stronie riotgames.com. Moon Poro nie widzi Twojego hasła, a bot nigdy nie zapyta o nie na Discordzie. Poro woli Poro-Snaxy. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
-        <p>Zapisujemy tylko to, co potrzebne do ról: ID z Discorda, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
+        <p>Zapisujemy tylko to, co potrzebne do ról: identyfikator konta Discord, Riot ID, region i rangę. Szczegóły są w <a href="/privacy/">polityce prywatności</a>.</p>
       </div>
     </div>
   </section>
@@ -86,14 +103,14 @@ import { siteConfig } from "../config";
       </details>
       <details>
         <summary>Chcę podłączyć inne konto Riot</summary>
-        <p>Najpierw usuń obecne powiązanie w „Moje konto”, potem zweryfikuj nowe. Jedno konto Riot może być połączone tylko z jednym kontem Discord.</p>
+        <p>Najpierw usuń obecne powiązanie w sekcji „Moje konto”, potem zweryfikuj nowe. Jedno konto Riot może być połączone tylko z jednym kontem Discord.</p>
       </details>
       <details>
         <summary>Ranga na Discordzie się nie zgadza</summary>
-        <p>Bot pokazuje rangę z ostatniego odświeżenia. Kliknij „Odśwież rangę” w „Moje konto” i daj mu chwilę.</p>
+        <p>Bot pokazuje rangę z ostatniego odświeżenia. Kliknij „Odśwież rangę” w sekcji „Moje konto” i daj botowi chwilę.</p>
       </details>
       <details>
-        <summary>Co się dzieje, gdy wyjdę z serwera?</summary>
+        <summary>Co się dzieje, gdy wyjdę z serwera na Discordzie?</summary>
         <p>Powiązanie zostaje, a gdy wrócisz, bot przywróci Ci role. Jeśli chcesz je usunąć, a nie ma Cię już na serwerze, napisz na <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>.</p>
       </details>
     </div>
