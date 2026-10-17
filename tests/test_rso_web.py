@@ -277,7 +277,7 @@ async def test_complete_browser_flow_from_landing_to_result(
         headers={**headers, "Cookie": f"moon_poro_rso={created.token}"},
     )
     completed_html = await completed_page.text()
-    assert "Gotowe — konto zostało zweryfikowane" in completed_html
+    assert "Gotowe, konto zostało zweryfikowane" in completed_html
     assert "Moon#EUNE" in completed_html
 
 

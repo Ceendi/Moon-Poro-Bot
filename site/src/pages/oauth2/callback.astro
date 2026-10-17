@@ -5,21 +5,13 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 <BaseLayout
   lang="en"
   canonicalPath="/oauth2/callback"
-  title="Riot Sign On callback"
-  description="The registered Moon Poro Riot Sign On redirect endpoint."
+  title="Riot sign-in"
+  description="Return address for signing in with Riot to Moon Poro."
 >
-  <section class="not-found">
-    <div>
-      <p class="eyebrow">Riot Sign On · registered redirect endpoint</p>
-      <h1>Authorization has not been started</h1>
-      <p class="lead muted">
-        This HTTPS endpoint is reserved for the Riot Sign On callback. The interactive callback
-        will be enabled as soon as Riot issues the RSO client credentials for Moon Poro Bot.
-      </p>
-      <div class="actions">
-        <a class="button" href="/en/rso/">Review the planned verification flow</a>
-        <a class="button secondary" href="/en/">Return to Moon Poro</a>
-      </div>
-    </div>
+  <section class="center">
+    <img src="/moon-poro.png" alt="" width="96" height="96" />
+    <h1>Riot sign-in isn't available yet</h1>
+    <p class="lead">This is the return address for signing in with Riot. It will start working once Riot sign-in launches. Until then, verify on Discord by changing your profile icon.</p>
+    <div class="actions"><a class="button" href="/en/#how">How to verify</a></div>
   </section>
 </BaseLayout>

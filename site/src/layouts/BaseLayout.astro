@@ -1,4 +1,9 @@
 ---
+import "@fontsource/fredoka/latin-500.css";
+import "@fontsource/fredoka/latin-ext-500.css";
+import "@fontsource/fredoka/latin-600.css";
+import "@fontsource/fredoka/latin-ext-600.css";
+import "@fontsource-variable/nunito/wght.css";
 import "../styles/global.css";
 import { siteConfig } from "../config";
 
@@ -11,64 +16,72 @@ interface Props {
 
 const { title, description, lang = "pl", canonicalPath = Astro.url.pathname } = Astro.props;
 const isEnglish = lang === "en";
+const home = isEnglish ? "/en/" : "/";
 const nav = isEnglish
   ? [
-      ["Start", "/en/"],
-      ["Planned RSO", "/en/rso/"],
+      ["How it works", "/en/#how"],
       ["Privacy", "/en/privacy/"],
       ["Terms", "/en/terms/"],
     ]
   : [
-      ["Start", "/"],
-      ["Planowane RSO", "/rso/"],
+      ["Jak to działa", "/#jak"],
       ["Prywatność", "/privacy/"],
       ["Warunki", "/terms/"],
     ];
 const languageHref = isEnglish ? canonicalPath.replace(/^\/en/, "") || "/" : `/en${canonicalPath}`;
 const canonical = new URL(canonicalPath, siteConfig.siteUrl);
+const image = new URL("/moon-poro.png", siteConfig.siteUrl);
+const fullTitle = `${title} · Moon Poro`;
 ---
 
 <!doctype html>
 <html lang={lang}>
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#100e14" />
+    <meta name="theme-color" content="#b9a3f5" />
     <meta name="color-scheme" content="dark" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Moon Poro" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={image} />
     <link rel="canonical" href={canonical} />
     <link rel="icon" type="image/png" href="/moon-poro.png" />
-    <title>{title} · Moon Poro Bot</title>
+    <title>{fullTitle}</title>
   </head>
   <body>
     <a class="skip-link" href="#content">{isEnglish ? "Skip to content" : "Przejdź do treści"}</a>
     <header class="site-header">
-      <a class="brand" href={isEnglish ? "/en/" : "/"} aria-label="Moon Poro Bot — start">
-        <img src="/moon-poro.png" alt="" width="46" height="46" />
-        <span>Moon Poro <small>{isEnglish ? "Discord utility" : "Bot Discord"}</small></span>
+      <a class="brand" href={home}>
+        <img src="/moon-poro.png" alt="" width="40" height="40" />
+        <span>Moon Poro</span>
       </a>
       <nav aria-label={isEnglish ? "Main navigation" : "Główna nawigacja"}>
         {nav.map(([label, href]) => (
           <a href={href} aria-current={Astro.url.pathname === href ? "page" : undefined}>{label}</a>
         ))}
+        <a class="language" href={languageHref} hreflang={isEnglish ? "pl" : "en"} lang={isEnglish ? "pl" : "en"}>
+          {isEnglish ? "PL" : "EN"}
+        </a>
       </nav>
-      <a class="language" href={languageHref} hreflang={isEnglish ? "pl" : "en"}>{isEnglish ? "PL" : "EN"}</a>
     </header>
     <main id="content"><slot /></main>
     <footer class="site-footer">
-      <div>
-        <a class="brand footer-brand" href={isEnglish ? "/en/" : "/"}>
-          <img src="/moon-poro.png" alt="" width="40" height="40" />
-          <span>Moon Poro Bot</span>
-        </a>
-        <p>{isEnglish ? "A free Discord utility for the League of Legends PL community." : "Darmowy bot Discord dla społeczności League of Legends PL."}</p>
+      <div class="footer-row">
+        <p>
+          {isEnglish ? "Made by " : "Zrobione przez "}{siteConfig.operatorDisplayName}
+          {isEnglish ? " for the League of Legends PL server." : " dla serwera League of Legends PL."}
+        </p>
+        <div class="footer-links">
+          <a href={isEnglish ? "/en/privacy/" : "/privacy/"}>{isEnglish ? "Privacy" : "Prywatność"}</a>
+          <a href={isEnglish ? "/en/terms/" : "/terms/"}>{isEnglish ? "Terms" : "Warunki"}</a>
+          <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>
+        </div>
       </div>
-      <div class="footer-links">
-        <a href={`mailto:${siteConfig.contactEmail}`}>{siteConfig.contactEmail}</a>
-        <a href={isEnglish ? "/en/privacy/" : "/privacy/"}>{isEnglish ? "Privacy policy" : "Polityka prywatności"}</a>
-        <a href={isEnglish ? "/en/terms/" : "/terms/"}>{isEnglish ? "Terms" : "Warunki"}</a>
-      </div>
-      <p class="riot-disclaimer">Moon Poro Bot isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.</p>
+      <p class="riot-disclaimer" lang="en">Moon Poro Bot isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.</p>
     </footer>
   </body>
 </html>
