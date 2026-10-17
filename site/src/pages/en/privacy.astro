@@ -29,8 +29,8 @@ const email = siteConfig.contactEmail;
       <h2>2. What we process</h2>
       <ul>
         <li><strong>Discord:</strong> your user and server IDs and the roles the bot manages. When you start verifying, we also save your Discord username and the server name, so the sign-in page can show which account you're linking.</li>
-        <li><strong>Riot account:</strong> PUUID (a permanent Riot account ID), Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling.</li>
-        <li><strong>Riot sign-in:</strong> Riot gives us your PUUID, Riot ID and region. We don't get your password or email. The one-time access token from Riot is used only for a moment and isn't stored. The sign-in itself is saved as a short session: its status, time, any error code, the Riot account data from the sign-in and a hash of a random ID for the browser where the sign-in started.</li>
+        <li><strong>Riot account:</strong> PUUID (a permanent Riot account ID), Riot ID, region and Solo/Duo rank (division, LP, wins, losses, inactivity), verification date and method, and rank refresh scheduling and state.</li>
+        <li><strong>Riot sign-in:</strong> Riot gives us your PUUID, Riot ID and region. We don't get your password or email. The short-lived access token from Riot is used only for a moment and isn't stored. The sign-in itself is saved as a short session: its status, time, any error code, the Riot account data from the sign-in and a hash of a random ID for the browser where the sign-in started.</li>
         <li><strong>Moderation:</strong> warnings (who they concern, who issued them, reason, level, dates), monthly moderator statistics, and messages in moderation channels about verifications and about people who left, were removed from or were banned from the server.</li>
         <li><strong>Alt account protection:</strong> if an administrator turns it on, the bot checks how old your Discord account is when you join and bans accounts that are too new.</li>
         <li><strong>Administrator lookups:</strong> when an administrator checks which accounts are linked, we log who looked up whom, when and why.</li>
@@ -60,7 +60,7 @@ const email = siteConfig.contactEmail;
       <h2>5. How long</h2>
       <ul>
         <li><strong>Account link and rank:</strong> until you or an administrator remove it. Leaving the server doesn't remove it, and the bot restores your roles if you come back.</li>
-        <li><strong>Riot sign-in session:</strong> the link expires after 10 minutes, and session data is deleted after 7 days. If assigning roles or the message in the moderation channel isn't finished yet, the session stays until it is, or until the link is removed.</li>
+        <li><strong>Riot sign-in session:</strong> the link expires after 10 minutes, and session data is deleted 7 days after the session ends, during the daily cleanup. If assigning roles or the message in the moderation channel isn't finished yet, the session stays until it is, or until the link is removed.</li>
         <li><strong>Administrator lookup log:</strong> 90 days.</li>
         <li><strong>Warnings, statistics and moderation messages:</strong> as long as needed to moderate the server.</li>
         <li><strong>Database backups:</strong> up to 90 days. Deleted data may remain in a backup until then; backups are used only for disaster recovery.</li>

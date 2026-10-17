@@ -88,7 +88,7 @@ def test_warning_embed_contains_readable_audit_states() -> None:
 
     assert active.title == "Warn"
     assert active.footer.text == "ID kary: 42"
-    assert {field.name for field in active.fields} >= {"Użytkownik", "Moderatorzy"}
+    assert {field.name for field in active.fields} >= {"Osoba", "Moderatorzy"}
     assert expired.title == "Warn (wygasł)"
     assert next(field.value for field in expired.fields if field.name == "Status") == ("Wygasł")
     assert revoked.title == "Warn (cofnięty)"

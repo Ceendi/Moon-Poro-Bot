@@ -52,7 +52,7 @@ class StatsPaginator(discord.ui.View):
         year, month = self.periods[self.page]
         embed = discord.Embed(
             title=f"📊 Statystyki moderacji: {MONTHS[month - 1]} {year}",
-            description="Przy każdym moderatorze: zgłoszenia | warny",
+            description="Przy każdym moderatorze: dawne zgłoszenia | warny",
             colour=discord.Colour.blue(),
         )
         for user_id, (reports, warnings) in sorted(self.entries[(year, month)].items()):

@@ -22,7 +22,7 @@ kod tylko do odczytu i baza z oddzielnymi loginami.
 
 ## 1. Warunki wstępne
 
-- wspierany system Linux i Python 3.12 lub nowszy;
+- wspierany system Linux i Python 3.12, 3.13 lub 3.14;
 - Caddy 2.6 lub nowszy (pakiet z dystrybucji wystarczy);
 - wspierany PostgreSQL (nie wdrażaj publicznego RSO na niewspieranym PostgreSQL 11);
 - domena, której jesteś właścicielem, rekord `A` do stałego zewnętrznego IP VM;
@@ -126,7 +126,9 @@ skonfigurowany dla `moonporo.pl`. Sprawdź go przed skopiowaniem do `/etc/caddy/
 ```bash
 caddy validate --config deploy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
-systemctl enable --now moon-poro.service caddy.service
+systemctl enable moon-poro.service caddy.service
+# reload nie działa przy admin off, dlatego restart
+systemctl restart moon-poro.service caddy.service
 systemctl enable --now moon-poro-rso.service
 ```
 

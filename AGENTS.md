@@ -74,4 +74,5 @@ uv run pip-audit --skip-editable
 
 - Wdrożenie produkcji jest tylko ręczne: `sudo /usr/local/sbin/deploy-moon-poro-prod` na VM `moon-poro-web`. Nie uruchamiaj go sam.
 - Caddy na VM pochodzi z pakietu dystrybucji (2.6), więc składnia Caddyfile musi działać na 2.6. Przed instalacją zawsze uruchom `caddy validate --adapter caddyfile`.
+- Po zmianie Caddyfile użyj `systemctl restart caddy`. `reload` nie działa, bo Caddyfile ma `admin off`.
 - Strony logowania Riot ładują `/fonts/*` i `/moon-poro.png` ze strony statycznej, więc nowy `site/dist` wgrywaj razem z kodem RSO.

@@ -49,7 +49,9 @@ if [[ -n "$(git -C "$REPOSITORY" status --porcelain)" ]]; then
 fi
 
 rso_enabled=false
-if systemctl is-enabled --quiet "$RSO_SERVICE" 2>/dev/null; then
+# A callback started by hand without "enable" must not keep old code running either.
+if systemctl is-enabled --quiet "$RSO_SERVICE" 2>/dev/null \
+    || systemctl is-active --quiet "$RSO_SERVICE"; then
     rso_enabled=true
 fi
 
@@ -143,7 +145,8 @@ printf '%s\n' "$target_commit" >"$deployed_commit_tmp"
 mv -f -- "$deployed_commit_tmp" "$DEPLOYED_COMMIT_FILE"
 
 echo "Moon Poro deployed successfully: $current_commit -> $target_commit"
-systemctl --no-pager --full status "$SERVICE"
+# Status output is informational; a unit that is restarting must not fail a done deploy.
+systemctl --no-pager --full status "$SERVICE" || true
 if [[ "$rso_enabled" == true ]]; then
-    systemctl --no-pager --full status "$RSO_SERVICE"
+    systemctl --no-pager --full status "$RSO_SERVICE" || true
 fi

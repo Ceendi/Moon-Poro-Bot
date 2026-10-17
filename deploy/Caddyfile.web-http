@@ -2,9 +2,7 @@
 	admin off
 }
 
-:80 {
-	encode zstd gzip
-
+(site_headers) {
 	header {
 		Content-Security-Policy "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'none'; style-src 'self'"
 		Cross-Origin-Opener-Policy "same-origin"
@@ -15,6 +13,12 @@
 		X-Frame-Options "DENY"
 		-Server
 	}
+}
+
+:80 {
+	encode zstd gzip
+
+	import site_headers
 
 	@immutable path /_astro/*
 	header @immutable Cache-Control "public, max-age=31536000, immutable"
@@ -37,6 +41,10 @@
 			rewrite * /404.html
 			file_server
 		}
+		# Deferred site headers do not reach error responses, so repeat them.
+		import site_headers
+		header Cache-Control "no-cache"
+		encode zstd gzip
 	}
 
 	# Access logs stay disabled. Future RSO callback URLs contain short-lived

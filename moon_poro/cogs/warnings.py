@@ -51,7 +51,7 @@ def warning_embed(
         embed.add_field(name="Opis", value=warning.description[:1024], inline=False)
     embed.add_field(name="Data otrzymania", value=f"<t:{int(warning.starts_at.timestamp())}:F>")
     embed.add_field(name="Data zakończenia", value=f"<t:{int(warning.expires_at.timestamp())}:F>")
-    embed.add_field(name="Użytkownik", value=f"<@{warning.discord_user_id}>", inline=False)
+    embed.add_field(name="Osoba", value=f"<@{warning.discord_user_id}>", inline=False)
     moderators = ", ".join(f"<@{item.moderator_id}>" for item in warning.moderators) or "brak"
     embed.add_field(name="Moderatorzy", value=moderators, inline=False)
     if resolved_status is not WarningStatus.ACTIVE:
@@ -276,7 +276,7 @@ class WarningsCog(commands.Cog):
             active = await self.bot.warnings.get_active(interaction.guild_id or 0, uzytkownik.id)
             if active is not None and active.level >= 3:
                 await interaction.followup.send(
-                    "Użytkownik ma już najwyższy poziom kary.", ephemeral=True
+                    "Ta osoba ma już najwyższy poziom kary.", ephemeral=True
                 )
                 return
             channel_id = self.bot.settings.warn_channel_id
@@ -374,7 +374,7 @@ class WarningsCog(commands.Cog):
         async with self._member_locks[(interaction.guild.id, uzytkownik.id)]:
             result = await self.bot.warnings.revert(interaction.guild_id or 0, uzytkownik.id)
             if result is None:
-                await interaction.followup.send("Użytkownik nie ma aktywnej kary.", ephemeral=True)
+                await interaction.followup.send("Ta osoba nie ma aktywnej kary.", ephemeral=True)
                 return
             current, previous = result
             channel_id = self.bot.settings.warn_channel_id
