@@ -212,12 +212,16 @@ def test_backup_units_send_an_alert_on_failure() -> None:
     assert "enable --now moon-poro-prod-alert" not in installer
 
 
-def test_failure_alert_keeps_the_webhook_off_command_lines_and_pings_nobody() -> None:
+def test_failure_alert_keeps_the_webhook_off_command_lines_and_pings_one_person() -> None:
     script = (ROOT / "deploy/alert-prod-failure.sh").read_text(encoding="utf-8")
     assert r"^https://(discord\.com|discordapp\.com)/api/webhooks/" in script
     assert r"""--config <(printf 'url = "%s"\n' "$WEBHOOK_URL")""" in script
     assert script.count("$WEBHOOK_URL") == 2
+    # Without an ID nobody is pinged; with one, only that person can be.
+    assert "readonly USER_ID_PATTERN='^[0-9]{17,20}$'" in script
     assert '"allowed_mentions": {"parse": []}' in script
+    assert '"allowed_mentions": {"users": [mention]}' in script
+    assert '"parse": ["' not in script
     assert "set -x" not in script
     for unit in (
         "moon-poro-prod-backup.service",
