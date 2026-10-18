@@ -26,7 +26,7 @@ i baza, każde z osobnym loginem.
 | Strona | `/opt/moon-poro/site/dist`, serwowana przez Caddy (`deploy/Caddyfile`) |
 | Backupy | `/var/backups/moon-poro-prod/{daily,pre-deploy}` i bucket Cloud Storage |
 
-Jednostka bota i obie jednostki backupu wymagają jednostki klastra. Pliki env mają tryb `0600`
+Jednostka bota, obie jednostki backupu i test odtworzenia wymagają jednostki klastra. Pliki env mają tryb `0600`
 i należą do kont, które z nich korzystają.
 
 ## Wdrażanie zmian
@@ -90,6 +90,42 @@ Jednorazowa konfiguracja (mieści się w darmowym limicie Cloud Storage w `us-ea
 
 **Odtworzenie:** pobierz dump i jego `.sha256`, uruchom `sha256sum --check`, potem `pg_restore`
 do pustej bazy, zanim wystartuje bot.
+
+### Test odtworzenia
+
+`moon-poro-prod-restore-test.timer` 1. dnia każdego miesiąca o 05:30 UTC uruchamia
+`moon-poro-prod-restore-test.service`. Test bierze najnowszy dump z `daily`, który nie może być
+starszy niż 2 dni, i sprawdza jego `.sha256`. Potem odtwarza go do tymczasowej bazy
+`moon_poro_restore_test` na tym samym klastrze i porównuje liczbę wierszy każdej tabeli z dumpem
+oraz wersję Alembic. Tabele `verification_links`, `warnings`, `moderation_stats` i
+`guild_features` muszą być w dumpie, a `verification_links` nie może być pusta. Tymczasowa baza
+jest usuwana zawsze, także po błędzie.
+
+Test nigdy nie łączy się z `moon_poro_prod`, nie ma dostępu do sieci, katalog backupów widzi tylko
+do odczytu i ma limit 128 MB. Po stronie serwera ogranicza `maintenance_work_mem` do 16 MB.
+Ręczny przebieg:
+
+```bash
+sudo systemctl start moon-poro-prod-restore-test.service
+journalctl -u moon-poro-prod-restore-test.service -n 20
+```
+
+### Powiadomienia o błędach
+
+Gdy codzienny backup, backup przed wdrożeniem, kopia w Cloud Storage albo test odtworzenia skończy
+się błędem, `OnFailure=` uruchamia `moon-poro-prod-alert@<jednostka>.service`. Ta jednostka
+wysyła przez webhook Discorda krótką wiadomość: co się nie udało, nazwę jednostki, czas i
+polecenie `journalctl`. Nie wysyła logów i nikogo nie oznacza. Dopóki nie ma pliku env, alert jest
+pomijany.
+
+Jednorazowa konfiguracja:
+
+1. Na kanale moderacji: Ustawienia kanału, Integracje, Webhooki, nowy webhook. Skopiuj jego adres.
+2. Plik `/etc/moon-poro/prod-alert.env` (`root:root`, `0600`) z jedną linią
+   `DISCORD_ALERT_WEBHOOK_URL=<adres webhooka>`. Adres trzymaj też w menedżerze haseł; każdy, kto
+   go zna, może pisać na tym kanale.
+3. Próba: `sudo systemctl start moon-poro-prod-alert@test.service`. Na kanale pojawi się
+   testowe powiadomienie.
 
 ## Kontrola działania
 
@@ -181,7 +217,8 @@ tylko do TCP 80 i 443 oraz SSH tylko przez IAP. Porty 5433 i 8080 nie mogą być
    `sudo -u moon-poro-rso /opt/moon-poro-prod/.venv/bin/python -c 'import moon_poro.rso_web'`,
    potem `sudo systemctl enable --now moon-poro-prod-rso.service` i
    `curl --fail http://127.0.0.1:8080/readyz`.
-9. Kopie poza VM według sekcji „Kopie poza VM”.
+9. Kopie poza VM według sekcji „Kopie poza VM”, potem powiadomienia według sekcji „Powiadomienia
+   o błędach”.
 10. Na koniec `VERIFICATION_MODE=rso` i `RSO_PUBLIC_BASE_URL` w `prod-bot.env`, restart bota i nowy
     panel `/weryfikacja`. Na kanale audytu bot potrzebuje uprawnień: wyświetlanie kanału, wysyłanie
     wiadomości, zamieszczanie linków i czytanie historii wiadomości.

@@ -81,8 +81,8 @@ PostgreSQL integration tests run only when the `TEST_POSTGRES_*` variables are s
 
 ## Documentation
 
-- [`docs/PRODUCTION.md`](docs/PRODUCTION.md): the production server, deployments, backups and
-  rebuilding the VM;
+- [`docs/PRODUCTION.md`](docs/PRODUCTION.md): the production server, deployments, backups (with
+  the monthly restore test and failure alerts) and rebuilding the VM;
 - [`docs/RANKS_AND_VERIFICATION.md`](docs/RANKS_AND_VERIFICATION.md): how rank refresh and
   verification behave;
 - [`docs/LEGACY_ARCHIVE_REVIEW.md`](docs/LEGACY_ARCHIVE_REVIEW.md): checking the old verification

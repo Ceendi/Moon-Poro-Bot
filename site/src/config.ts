@@ -15,6 +15,6 @@ export const siteConfig = {
   operatorName: required("PUBLIC_OPERATOR_NAME", "Moon Poro development operator"),
   operatorLocation: required("PUBLIC_OPERATOR_LOCATION", "Polska"),
   discordInviteUrl: required("PUBLIC_DISCORD_INVITE_URL", "https://discord.com/app"),
-  lastUpdated: "17 października 2026",
-  lastUpdatedEn: "17 October 2026",
+  lastUpdated: "18 października 2026",
+  lastUpdatedEn: "18 October 2026",
 } as const;

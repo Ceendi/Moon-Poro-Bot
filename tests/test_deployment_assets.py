@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,3 +140,89 @@ def test_bootstrap_validates_caddyfile_before_installing_it() -> None:
     validate = script.index('caddy validate --config "$CADDY_SOURCE"')
     install = script.index('"$CADDY_SOURCE" /etc/caddy/Caddyfile')
     assert validate < install
+
+
+def test_monthly_restore_test_runs_offline_and_keeps_backups_read_only() -> None:
+    unit = (ROOT / "deploy/moon-poro-prod-restore-test.service").read_text(encoding="utf-8")
+    assert "User=postgres\n" in unit
+    assert "Requires=postgresql-moon-poro-prod.service" in unit
+    assert "ExecStart=/usr/local/sbin/restore-test-moon-poro-prod-db\n" in unit
+    assert "RestrictAddressFamilies=AF_UNIX\n" in unit
+    assert "MemoryMax=128M" in unit
+    assert "ReadWritePaths=" not in unit
+    timer = (ROOT / "deploy/moon-poro-prod-restore-test.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-01 05:30:00" in timer
+    assert "Persistent=true" in timer
+    assert "Unit=moon-poro-prod-restore-test.service" in timer
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    assert "/usr/local/sbin/restore-test-moon-poro-prod-db" in installer
+    assert "/etc/systemd/system/moon-poro-prod-restore-test.service" in installer
+    assert "systemctl enable --now moon-poro-prod-restore-test.timer" in installer
+
+
+def test_restore_test_never_touches_the_production_database() -> None:
+    script = (ROOT / "deploy/restore-test-prod-db.sh").read_text(encoding="utf-8")
+    assert 'readonly RESTORE_DATABASE="moon_poro_restore_test"' in script
+    assert 'if [[ "$RESTORE_DATABASE" == "$PROD_DATABASE" ]]' in script
+    assert 'export PGCLUSTER="18/moon-poro-prod"' in script
+    assert "export PGPORT=5433" in script
+    assert "maintenance_work_mem=16MB" in script
+    # Only the test database and the maintenance database are ever named as targets.
+    targets = re.findall(r"--dbname=(\S+)", script)
+    assert targets
+    assert set(targets) == {'"$RESTORE_DATABASE"', "postgres"}
+    for command in ("createdb", "dropdb"):
+        for line in script.splitlines():
+            if line.lstrip().startswith(command):
+                assert line.rstrip().endswith('"$RESTORE_DATABASE"'), line
+    for line in script.splitlines():
+        if "moon_poro_prod" in line:
+            assert line.startswith(("readonly PROD_DATABASE=", "readonly BACKUP_NAME_PATTERN=")), (
+                line
+            )
+    assert "sha256sum --check" in script
+    assert "--exit-on-error --single-transaction" in script
+    assert "--no-owner --no-privileges" in script
+    assert "trap cleanup EXIT" in script
+    assert "SELECT version_num FROM alembic_version" in script
+    for table in ("verification_links", "warnings", "moderation_stats", "guild_features"):
+        assert table in script
+
+
+def test_backup_units_send_an_alert_on_failure() -> None:
+    for name in (
+        "moon-poro-prod-backup.service",
+        "moon-poro-prod-pre-deploy-backup.service",
+        "moon-poro-prod-offsite-backup.service",
+        "moon-poro-prod-restore-test.service",
+    ):
+        unit = (ROOT / "deploy" / name).read_text(encoding="utf-8")
+        assert "OnFailure=moon-poro-prod-alert@%n.service\n" in unit, name
+        unit_section = unit.split("[Service]", 1)[0]
+        assert "OnFailure=" in unit_section, name
+    alert = (ROOT / "deploy/moon-poro-prod-alert@.service").read_text(encoding="utf-8")
+    assert "ConditionPathExists=/etc/moon-poro/prod-alert.env" in alert
+    assert "EnvironmentFile=/etc/moon-poro/prod-alert.env" in alert
+    assert "DynamicUser=true" in alert
+    assert "ExecStart=/usr/local/sbin/alert-moon-poro-prod-failure %i\n" in alert
+    assert "Environment=" not in alert.replace("EnvironmentFile=", "")
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    assert "/usr/local/sbin/alert-moon-poro-prod-failure" in installer
+    assert "/etc/systemd/system/moon-poro-prod-alert@.service" in installer
+    assert "enable --now moon-poro-prod-alert" not in installer
+
+
+def test_failure_alert_keeps_the_webhook_off_command_lines_and_pings_nobody() -> None:
+    script = (ROOT / "deploy/alert-prod-failure.sh").read_text(encoding="utf-8")
+    assert r"^https://(discord\.com|discordapp\.com)/api/webhooks/" in script
+    assert r"""--config <(printf 'url = "%s"\n' "$WEBHOOK_URL")""" in script
+    assert script.count("$WEBHOOK_URL") == 2
+    assert '"allowed_mentions": {"parse": []}' in script
+    assert "set -x" not in script
+    for unit in (
+        "moon-poro-prod-backup.service",
+        "moon-poro-prod-pre-deploy-backup.service",
+        "moon-poro-prod-offsite-backup.service",
+        "moon-poro-prod-restore-test.service",
+    ):
+        assert f"    {unit}) title=" in script

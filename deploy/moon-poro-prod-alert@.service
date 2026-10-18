@@ -1,0 +1,36 @@
+[Unit]
+Description=Discord alert about failed %i
+# Skipped until the webhook is configured.
+ConditionPathExists=/etc/moon-poro/prod-alert.env
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=true
+# Read by systemd as root, so the file stays root:root 0600.
+EnvironmentFile=/etc/moon-poro/prod-alert.env
+ExecStart=/usr/local/sbin/alert-moon-poro-prod-failure %i
+TimeoutStartSec=2min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=64M
