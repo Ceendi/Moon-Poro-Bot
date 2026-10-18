@@ -34,6 +34,3 @@ Usunięcie archiwum ograniczy możliwość cofnięcia do schematu sprzed `0001`;
 tego schematu będzie wymagało backupu. Dane archiwalne mogą jeszcze pozostawać w kopiach
 do końca ich retencji. Nie wolno traktować przywrócenia archiwum jako ponownej zgody
 użytkownika na aktywne powiązanie.
-
-W ramach bieżących poprawek przygotowano wyłącznie raport i tę procedurę.
-Nie wykonano inspekcji produkcji ani usuwania tabel lub danych.

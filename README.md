@@ -1,153 +1,92 @@
 # Moon Poro Bot
 
-A modular Discord bot for a League of Legends community, written in Python. It provides Riot
-account verification, rank synchronization, configurable roles, moderation warnings, and
-moderator statistics.
+A Discord bot for a Polish League of Legends community server. Players link their Riot account
+through Riot Sign On, the bot keeps their rank roles up to date, and moderators get warnings and
+monthly statistics. Website: [moonporo.pl](https://moonporo.pl).
 
 > Moon Poro Bot isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot
 > Games. Riot Games and related properties are trademarks of Riot Games, Inc.
 
 ## Features
 
-- Riot Sign On verification and automatic Solo/Duo rank synchronization;
-- a private self-service Riot account profile through `/profil` and the verification panel;
-- persistent role selection panels;
-- versioned moderation warnings with escalation, rollback, and automatic expiration;
-- monthly moderation statistics;
-- audited administrator lookups for Discord-Riot account links;
-- optional account-age protection, member logs, and message filters.
+- Riot account verification through Riot Sign On (RSO);
+- automatic Solo/Duo rank roles, refreshed in the background;
+- a private Riot account profile through `/profil` and the verification panel;
+- role selection panels;
+- moderation warnings with escalation, rollback and automatic expiry;
+- monthly moderator statistics;
+- logged administrator lookups of Discord-Riot account links;
+- optional member logs, account-age protection and message filters.
 
-Features, channels, and roles are configured through environment variables. The bot does not
-request the privileged `message_content` intent unless optional message filters are enabled.
+Features, channels and roles are set with environment variables. The bot asks for the privileged
+`message_content` intent only when message filters are enabled.
 
-## Setup
+## How it works
 
-Python 3.12 or 3.13 and PostgreSQL 17+ are required.
+- `main.py` starts the bot (discord.py). It runs database migrations on startup.
+- `rso_main.py` starts the Riot Sign On callback, a small aiohttp app behind Caddy. RSO client
+  credentials live only in its own settings, never in the bot's.
+- Both use the same PostgreSQL database with separate logins.
+- `site/` is a static Astro website (Polish and English) with the privacy policy and terms.
+
+| Path | Contents |
+|---|---|
+| `moon_poro/` | bot, commands (`cogs/`) and the RSO callback |
+| `alembic/` | database migrations |
+| `site/` | website |
+| `deploy/` | systemd units, Caddyfile, deployment and backup scripts |
+| `docs/` | production runbook and design notes (in Polish) |
+| `tests/` | tests |
+
+## Running locally
+
+You need Python 3.12-3.14, PostgreSQL 17 or newer, a Discord bot token and a Riot API key.
 
 ```bash
 python -m pip install uv==0.12.3
-uv sync --frozen
+uv sync --frozen --extra dev
 cp .env.example .env
 uv run python main.py
 ```
 
-Complete `.env` before starting the bot. `RSO_PUBLIC_BASE_URL` is required when verification is
-enabled. Alembic applies pending migrations during startup, so
-create a database backup before the first production deployment. On Linux, keep the secrets file
-readable only by the service account (`chmod 600 .env`). The supplied systemd unit writes logs to
-`/var/log/moon-poro` and keeps the application directory read-only.
+Fill in `.env` first. `RSO_PUBLIC_BASE_URL` is required while verification is enabled. To run the
+callback, copy `.env.rso.example` to `.env.rso` and start `uv run python rso_main.py`.
 
-The public Astro site is in `site/`; it builds to static files and does not require Node.js on the
-production VM. The isolated RSO callback starts through `rso_main.py` with `.env.rso`. Never place
-RSO client credentials in the bot environment. See `docs/DEPLOYMENT_RSO_GCP.md` for deployment
-instructions.
-
-## Production updates
-
-The `moon-poro-web` deployment uses a clean Git checkout at `/opt/moon-poro-prod`, systemd, and a
-pinned `uv` tool environment. Install the deployment and daily backup helpers once from the checked
-out repository:
+The website needs Node.js only on the machine that builds it:
 
 ```bash
-sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh
+cd site
+npm ci
+npm run dev
 ```
 
-The database is the PostgreSQL 18 cluster `18/moon-poro-prod` on port 5433. It is started by
-`postgresql-moon-poro-prod.service`, which the installer also installs. The bot unit
-(`moon-poro-prod.service`) and both backup units require it.
+`npm run build` also needs every `PUBLIC_*` value from `site/.env.example`.
 
-After a pull request has passed CI and been merged into `master`, deploy it with:
+## Checks
 
-```bash
-sudo /usr/local/sbin/deploy-moon-poro-prod
-```
-
-Before the first deployment containing migration `20260824_0007`, confirm the single Discord
-channel that contains all existing verification audit messages and add its ID to
-`/etc/moon-poro/prod-bot.env` as `LEGACY_AUDIT_CHANNEL_ID`. Do not infer it from the current
-`ZWERYFIKOWANI_CHANNEL_ID` if the channel may have changed. If historical messages span multiple
-channels, stop and prepare a verified per-record backfill first. This setting lets the bot's startup
-migration work safely even while the older installed deployment helper is completing that first
-update. Afterward, reinstall `deploy/install-prod-automation.sh` once so future deployments run
-migrations before restarting the service.
-
-The deployment refuses local tracked changes and non-fast-forward updates. It records the last
-successfully started commit and safely resumes an interrupted deployment. Before changing code it
-creates a custom-format dump of `moon_poro_prod`, verifies it with `pg_restore --list`, and writes a
-SHA-256 checksum. Daily backups use the same procedure through
-`moon-poro-prod-backup.timer`. Daily backup pairs remain for 90 days in
-`/var/backups/moon-poro-prod/daily`; cleanup runs only after a new dump and checksum have been
-verified. Backups made before deployments remain in `/var/backups/moon-poro-prod/pre-deploy` and
-are also retained for 90 days. Both directories are pruned only after a new verified backup.
-
-### Backup copies outside the VM
-
-After each successful backup, `moon-poro-prod-offsite-backup.service` copies dumps from the last
-7 days that are not copied yet, with their checksums, to a Cloud Storage bucket. The backup units
-themselves stay without network access. The copy checks the local SHA-256 first, never replaces an
-object (`ifGenerationMatch=0`) and compares the MD5 reported by Cloud Storage with the local file.
-A failed copy marks only this unit as failed; the local backup and deployments are unaffected.
-
-The database is the only data that cannot be rebuilt: code, site, units and the system come from
-this repository. Keep the secrets from `/etc/moon-poro/*.env` in a password manager, not in the
-bucket. One-time setup (it fits the Cloud Storage free tier in `us-east1`):
-
-1. Create a service account for the VM and allow it only to create objects in the bucket
-   (`roles/storage.objectCreator`), so the VM cannot read or delete existing copies.
-2. Add a lifecycle rule that deletes objects older than 83 days. With the bucket's 7-day soft
-   delete, copies are gone within 90 days, as the privacy policy states.
-3. Attach the service account to the VM with the `devstorage.read_write` scope (the VM must be
-   stopped for this).
-4. Create `/etc/moon-poro/prod-backup-offsite.env` (`root:root`, `0644`) with
-   `BACKUP_GCS_BUCKET=<bucket name>`, reinstall the helpers and check one copy with
-   `sudo systemctl start moon-poro-prod-offsite-backup.service`.
-
-To restore, download the dump and its `.sha256` file, run `sha256sum --check`, then use
-`pg_restore`.
-
-### Enabling Riot Sign On on `moon-poro-web`
-
-The callback runs from the same checkout as `moon-poro-prod-rso.service`. Once, after the first
-deployment that contains it:
-
-1. Reinstall the helpers so the deployment script also manages the callback:
-   `sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh`.
-2. Create the service account:
-   `sudo useradd --system --no-create-home --shell /usr/sbin/nologin moon-poro-rso`.
-3. Create `/etc/moon-poro/prod-rso.env` from `.env.rso.example`, owned by `moon-poro-rso`, mode
-   `0600`. Set `POSTGRES_DB=moon_poro_prod` and grant its database login only the tables listed in
-   `docs/DEPLOYMENT_RSO_GCP.md` (use `moon_poro_prod` in the `GRANT CONNECT` line).
-4. Check that the account can import the code:
-   `sudo -u moon-poro-rso /opt/moon-poro-prod/.venv/bin/python -c 'import moon_poro.rso_web'`.
-5. Copy the freshly built `site/dist` to `/opt/moon-poro/site/dist`. The callback pages load
-   `/fonts/*` and `/moon-poro.png` from the static site.
-6. Validate and install the Caddyfile, then restart Caddy. `reload` does not work because the
-   Caddyfile sets `admin off`:
-   `sudo caddy validate --config /opt/moon-poro-prod/deploy/Caddyfile --adapter caddyfile`,
-   copy it to `/etc/caddy/Caddyfile` and run `sudo systemctl restart caddy`.
-7. `sudo systemctl enable --now moon-poro-prod-rso.service`, check
-   `curl --fail http://127.0.0.1:8080/readyz`, set `VERIFICATION_MODE=rso` in
-   `/etc/moon-poro/prod-bot.env`, restart the bot and publish a new panel with `/weryfikacja`.
-
-After that, `deploy-moon-poro-prod` stops the callback before migrations and starts it again after
-the bot.
-
-## Development
+CI runs the same commands:
 
 ```bash
-uv sync --frozen --extra dev
 uv run ruff format --check .
 uv run ruff check .
-uv run pytest --cov=moon_poro --cov-branch
 uv run mypy moon_poro
+uv run pytest --cov=moon_poro --cov-branch
 uv run bandit -r moon_poro
 uv run pylint --disable=all --enable=duplicate-code moon_poro
 uv run detect-secrets-hook $(git ls-files)
 uv run pip-audit --skip-editable
 ```
 
-Application code is located in `moon_poro/`, database migrations in `alembic/`, and tests in
-`tests/`.
+PostgreSQL integration tests run only when the `TEST_POSTGRES_*` variables are set.
+
+## Documentation
+
+- [`docs/PRODUCTION.md`](docs/PRODUCTION.md): the production server, deployments, backups and
+  rebuilding the VM;
+- [`docs/RANKS_AND_VERIFICATION.md`](docs/RANKS_AND_VERIFICATION.md): how rank refresh and
+  verification behave;
+- [`docs/LEGACY_ARCHIVE_REVIEW.md`](docs/LEGACY_ARCHIVE_REVIEW.md): checking the old verification
+  archive.
 
 ## Rights and Riot Games
 
