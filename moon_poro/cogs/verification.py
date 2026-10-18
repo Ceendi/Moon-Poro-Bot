@@ -96,12 +96,12 @@ _DEFAULT_TERMS_OF_SERVICE_URL = "https://moonporo.pl/terms/"
 
 def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
     if retry_after_seconds is None or retry_after_seconds <= 0:
-        return "Rangę będzie można odświeżyć za chwilę."
+        return "⏳ **Rangę będzie można odświeżyć za chwilę.**"
     seconds = retry_after_seconds
     if seconds >= 60:
         minutes = math.ceil(seconds / 60)
-        return f"Rangę możesz odświeżyć za około {minutes} min."
-    return f"Rangę możesz odświeżyć za {seconds} s."
+        return f"⏳ **Rangę możesz odświeżyć ponownie za około {minutes} min.**"
+    return f"⏳ **Rangę możesz odświeżyć ponownie za {seconds} s.**"
 
 
 def _verification_legal_links(bot: MoonPoroBot) -> str:
@@ -2083,8 +2083,8 @@ class AdminDeleteVerificationConfirmationView(discord.ui.View):
                     link=result.link,
                 )
                 message = (
-                    "Usunięto powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi. "
-                    "Rola „Użytkownik” pozostała bez zmian."
+                    "Usunięto powiązanie i rolę „Zweryfikowany”. "
+                    "Role regionu i rangi oraz rola „Użytkownik” zostały."
                     if completed
                     else "Usuwanie powiązania jeszcze trwa. Bot dokończy je automatycznie."
                 )
@@ -2883,13 +2883,7 @@ class VerificationCog(commands.Cog):
             await interaction.followup.send("To konto nie było powiązane.", ephemeral=True)
             return
         if link.deletion_requested_at is not None:
-            if link.deletion_remove_rank_region_roles:
-                message = "Usuwanie tego powiązania już trwa."
-            else:
-                message = (
-                    "Ta osoba sama zaczęła już usuwać powiązanie. Role regionu i rangi zostaną."
-                )
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send("Usuwanie tego powiązania już trwa.", ephemeral=True)
             return
 
         riot_id = discord.utils.escape_markdown(
@@ -2902,8 +2896,8 @@ class VerificationCog(commands.Cog):
                 f"Discord: <@{link.discord_user_id}> (`{link.discord_user_id}`)\n"
                 f"Riot ID: **{riot_id}**\n"
                 f"Region: **{region}**\n\n"
-                "Bot usunie powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi.\n"
-                "Rola „Użytkownik” pozostanie bez zmian."
+                "Bot usunie powiązanie i rolę „Zweryfikowany”.\n"
+                "Role regionu i rangi oraz rola „Użytkownik” zostaną."
             ),
             view=AdminDeleteVerificationConfirmationView(
                 self.bot,

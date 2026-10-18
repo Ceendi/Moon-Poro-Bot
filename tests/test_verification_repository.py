@@ -659,7 +659,7 @@ async def test_null_puuid_identity_and_claim_token_fence_deletion_lifecycle(
     assert await verification_repository.get_by_user(123, 201) is None
 
 
-async def test_deletion_policy_is_idempotent_and_conflicts_do_not_change_policy(
+async def test_deletion_request_is_idempotent_for_members_and_admins(
     verification_repository: VerificationRepository,
 ) -> None:
     link = await verification_repository.create(
@@ -693,7 +693,8 @@ async def test_deletion_policy_is_idempotent_and_conflicts_do_not_change_policy(
 
     assert first.status is VerificationDeletionRequestStatus.REQUESTED
     assert repeated.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED
-    assert conflict.status is VerificationDeletionRequestStatus.POLICY_CONFLICT
+    # Both policies keep region and rank roles, so an admin request joins the pending one.
+    assert conflict.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED
     assert first.link is not None and repeated.link is not None and conflict.link is not None
     assert repeated.link.deletion_claimed_at is not None
     assert first.link.deletion_claimed_at is not None
@@ -752,7 +753,7 @@ async def test_admin_deletion_atomically_persists_policy_and_truncated_access_lo
     assert requested.status is VerificationDeletionRequestStatus.REQUESTED
     assert repeated.status is VerificationDeletionRequestStatus.ALREADY_REQUESTED
     assert requested.link is not None
-    assert requested.link.deletion_remove_rank_region_roles
+    assert not requested.link.deletion_remove_rank_region_roles
     assert requested.link.audit_channel_id == 401
     async with verification_repository._sessions() as session:
         logs = list(

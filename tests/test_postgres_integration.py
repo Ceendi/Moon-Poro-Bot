@@ -1339,7 +1339,8 @@ async def test_strict_null_puuid_admin_deletion_lifecycle_against_postgres(
         assert request.link is not None
         assert request.link.puuid is None
         assert request.link.audit_channel_id == 804
-        assert request.link.deletion_remove_rank_region_roles
+        # Admin removal keeps region and rank roles, like a member's own removal.
+        assert not request.link.deletion_remove_rank_region_roles
         claimed_at = request.link.deletion_claimed_at
         assert claimed_at is not None
         stale_operation = AsyncMock(return_value=True)

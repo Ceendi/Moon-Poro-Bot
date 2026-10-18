@@ -855,7 +855,10 @@ class VerificationRepository:
                 return VerificationDeletionRequestResult(
                     VerificationDeletionRequestStatus.LINK_CHANGED
                 )
-            remove_rank_region_roles = policy is VerificationDeletionPolicy.ADMIN
+            # Administrators and members remove a link the same way: only the
+            # Verified role goes, region, rank and member roles stay. The flag
+            # stays in the schema so deletions requested earlier finish as asked.
+            remove_rank_region_roles = False
             if link.deletion_requested_at is not None:
                 status = (
                     VerificationDeletionRequestStatus.ALREADY_REQUESTED

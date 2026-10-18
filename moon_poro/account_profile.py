@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -113,14 +114,21 @@ def build_account_profile(
         _add_profile_fields(embed, link, riot_id=riot_id)
 
     _add_state_field(embed, state)
-    refresh_enabled = state in {
-        AccountProfileState.REFRESH_COOLDOWN,
-        AccountProfileState.SUCCESS,
-    }
+    # A cooldown is shown on the button itself, so nobody has to read the
+    # message above the profile to know when the next refresh is possible.
+    refresh_enabled = state is AccountProfileState.SUCCESS
     if state is AccountProfileState.REFRESH_QUEUED:
         refresh_button_label = REFRESH_QUEUED_BUTTON_LABEL
     elif state is AccountProfileState.REFRESH_RUNNING:
         refresh_button_label = REFRESH_RUNNING_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_COOLDOWN:
+        minutes = _cooldown_minutes(cooldown_remaining)
+        refresh_button_label = f"Odśwież za {minutes} min"
+        available_at = int((current_time + cooldown_remaining).timestamp())
+        set_account_profile_status(
+            embed,
+            f"⏳ Kolejne odświeżenie rangi możliwe za {minutes} min (<t:{available_at}:t>).",
+        )
     else:
         refresh_button_label = REFRESH_BUTTON_LABEL
     return AccountProfilePresentation(
@@ -162,6 +170,10 @@ def _classify(
     if cooldown_remaining > timedelta(0):
         return AccountProfileState.REFRESH_COOLDOWN
     return AccountProfileState.SUCCESS
+
+
+def _cooldown_minutes(remaining: timedelta) -> int:
+    return max(1, math.ceil(remaining.total_seconds() / 60))
 
 
 def _cooldown_remaining(
