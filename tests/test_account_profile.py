@@ -225,7 +225,7 @@ def test_missing_cache_is_described_without_a_riot_call() -> None:
     assert profile.embed.description is None
 
 
-def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
+def test_cooldown_shows_the_wait_on_the_button_and_in_the_profile() -> None:
     profile = build_account_profile(
         _link(rank_user_refresh_requested_at=NOW - timedelta(seconds=1199)),
         now=NOW,
@@ -236,7 +236,11 @@ def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
     assert profile.embed.description is None
     assert profile.embed.footer.text is None
     assert profile.embed.colour == discord.Colour.green()
-    assert profile.refresh_enabled is True
+    assert profile.refresh_enabled is False
+    assert profile.refresh_button_label == "Odśwież za 11 min"
+    status = profile.embed.fields[-1]
+    assert status.name == "Stan odświeżania"
+    assert status.value.startswith("⏳ Kolejne odświeżenie rangi możliwe za 11 min (<t:")
 
 
 @pytest.mark.parametrize(
@@ -246,7 +250,7 @@ def test_cooldown_keeps_refresh_available_without_embed_footer() -> None:
         (AccountProfileState.INCOMPLETE_LEGACY, False),
         (AccountProfileState.DELETING, False),
         (AccountProfileState.AUTHORIZATION_UNAVAILABLE, False),
-        (AccountProfileState.REFRESH_COOLDOWN, True),
+        (AccountProfileState.REFRESH_COOLDOWN, False),
         (AccountProfileState.TEMPORARY_UNAVAILABLE, False),
         (AccountProfileState.REFRESH_RUNNING, False),
         (AccountProfileState.REFRESH_QUEUED, False),
@@ -285,6 +289,8 @@ def test_refresh_button_availability(
         expected_label = REFRESH_QUEUED_BUTTON_LABEL
     elif state is AccountProfileState.REFRESH_RUNNING:
         expected_label = REFRESH_RUNNING_BUTTON_LABEL
+    elif state is AccountProfileState.REFRESH_COOLDOWN:
+        expected_label = "Odśwież za 30 min"
     else:
         expected_label = REFRESH_BUTTON_LABEL
     assert profile.refresh_button_label == expected_label

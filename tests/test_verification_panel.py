@@ -664,8 +664,9 @@ async def test_profile_refresh_shows_queued_running_and_completed_states(
     fields = {field.name: field.value for field in completed_kwargs["embed"].fields}
     assert fields["Solo/Duo"] == "Diamond IV"
     assert fields["LP"] == "73 LP"
-    assert completed_kwargs["view"].children[0].label == "Odśwież rangę"
-    assert completed_kwargs["view"].children[0].disabled is False
+    # Right after a refresh the button shows the cooldown instead of a dead click.
+    assert completed_kwargs["view"].children[0].label == "Odśwież za 30 min"
+    assert completed_kwargs["view"].children[0].disabled is True
 
 
 async def test_profile_refresh_detects_completion_before_first_poll() -> None:
@@ -820,7 +821,8 @@ async def test_profile_refresh_timeout_final_read_prefers_terminal_state(
     assert final_embed.description is None
     if final_state == "completed":
         assert final_embed.footer.text is None
-        assert all(field.name != "Stan odświeżania" for field in final_embed.fields)
+        statuses = [field.value for field in final_embed.fields if field.name == "Stan odświeżania"]
+        assert all(value.startswith("⏳ Kolejne odświeżenie rangi") for value in statuses)
     else:
         assert final_embed.fields[-1].name == "Stan odświeżania"
         assert final_embed.fields[-1].value == (
@@ -1052,11 +1054,11 @@ async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
 @pytest.mark.parametrize(
     ("retry_after_seconds", "expected_message"),
     [
-        (1201, "Rangę możesz odświeżyć za około 21 min."),
-        (59, "Rangę możesz odświeżyć za 59 s."),
-        (None, "Rangę będzie można odświeżyć za chwilę."),
-        (0, "Rangę będzie można odświeżyć za chwilę."),
-        (-1, "Rangę będzie można odświeżyć za chwilę."),
+        (1201, "⏳ **Rangę możesz odświeżyć ponownie za około 21 min.**"),
+        (59, "⏳ **Rangę możesz odświeżyć ponownie za 59 s.**"),
+        (None, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
+        (0, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
+        (-1, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
     ],
 )
 async def test_profile_refresh_cooldown_uses_followup_without_rerendering(
@@ -1093,7 +1095,8 @@ async def test_profile_refresh_cooldown_uses_followup_without_rerendering(
     refresh = next(
         item for item in view.children if item.custom_id == "account-profile:rank-refresh:v1"
     )
-    assert refresh.disabled is False
+    # An older view can still be clicked; it answers with the cooldown.
+    refresh.disabled = False
 
     await refresh.callback(interaction)
 
@@ -1101,8 +1104,8 @@ async def test_profile_refresh_cooldown_uses_followup_without_rerendering(
     get_by_user.assert_awaited_once_with(123, 101)
     interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_awaited_once_with(expected_message, ephemeral=True)
-    assert refresh.label == "Odśwież rangę"
-    assert refresh.disabled is False
+    assert refresh.label.startswith("Odśwież za ")
+    assert refresh.disabled is True
     assert refresh.style.name == "primary"
     assert view._refresh_in_progress is False
 
@@ -1172,8 +1175,8 @@ async def test_second_open_profile_follows_refresh_hidden_by_cooldown(
     assert pending_view.children[0].label == expected_label
     assert pending_view.children[0].disabled is True
     completed_view = interaction.edit_original_response.await_args_list[1].kwargs["view"]
-    assert completed_view.children[0].label == "Odśwież rangę"
-    assert completed_view.children[0].disabled is False
+    assert completed_view.children[0].label == "Odśwież za 30 min"
+    assert completed_view.children[0].disabled is True
     interaction.followup.send.assert_not_awaited()
 
 
@@ -1407,15 +1410,15 @@ async def test_panel_refresh_defers_then_follows_the_private_profile_live(
     assert queued_view.children[0].disabled is True
     fields = {field.name: field.value for field in edits[1].kwargs["embed"].fields}
     assert fields["Solo/Duo"] == "Diamond IV"
-    assert edits[1].kwargs["view"].children[0].label == "Odśwież rangę"
+    assert edits[1].kwargs["view"].children[0].label == "Odśwież za 30 min"
 
 
 @pytest.mark.parametrize(
     ("retry_after_seconds", "expected_message"),
     [
-        (1201, "Rangę możesz odświeżyć za około 21 min."),
-        (59, "Rangę możesz odświeżyć za 59 s."),
-        (0, "Rangę będzie można odświeżyć za chwilę."),
+        (1201, "⏳ **Rangę możesz odświeżyć ponownie za około 21 min.**"),
+        (59, "⏳ **Rangę możesz odświeżyć ponownie za 59 s.**"),
+        (0, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
     ],
 )
 async def test_panel_second_click_shows_cooldown_in_the_private_profile(
@@ -2065,8 +2068,8 @@ async def test_admin_confirmation_uses_admin_policy_and_atomic_access_log(
     repository.delete_by_puuid.assert_not_awaited()
     interaction.edit_original_response.assert_awaited_once_with(
         content=(
-            "Usunięto powiązanie, rolę „Zweryfikowany” oraz role regionu i rangi. "
-            "Rola „Użytkownik” pozostała bez zmian."
+            "Usunięto powiązanie i rolę „Zweryfikowany”. "
+            "Role regionu i rangi oraz rola „Użytkownik” zostały."
         ),
         view=None,
     )
