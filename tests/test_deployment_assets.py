@@ -15,14 +15,12 @@ def test_legacy_archive_report_is_read_only_and_aggregated() -> None:
 
 
 def test_static_404_fallback_uses_error_handler_without_overriding_rso_headers() -> None:
-    for filename in ("Caddyfile", "Caddyfile.web-http", "Caddyfile.web-pre-rso"):
-        source = (ROOT / "deploy" / filename).read_text(encoding="utf-8")
-        assert "try_files {path} {path}/index.html =404" in source
-        # Status-code arguments need Caddy 2.8; the distro package is 2.6.
-        assert "handle_errors 404" not in source
-        assert "@not_found expression `{err.status_code} == 404`" in source
-        assert "rewrite * /404.html" in source
     production = (ROOT / "deploy/Caddyfile").read_text(encoding="utf-8")
+    assert "try_files {path} {path}/index.html =404" in production
+    # Status-code arguments need Caddy 2.8; the distro package is 2.6.
+    assert "handle_errors 404" not in production
+    assert "@not_found expression `{err.status_code} == 404`" in production
+    assert "rewrite * /404.html" in production
     assert "handle /verify/*" in production
     assert "handle /oauth2/callback" in production
     assert production.count("import moon_poro_static_headers") == 2
@@ -49,6 +47,35 @@ def test_production_rso_unit_runs_the_deployed_checkout() -> None:
     installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
     assert "moon-poro-prod-rso.service" in installer
     assert "enable --now moon-poro-prod-rso" not in installer.split("echo", 1)[0]
+
+
+def test_production_bot_unit_runs_the_deployed_checkout() -> None:
+    unit = (ROOT / "deploy/moon-poro-prod.service").read_text(encoding="utf-8")
+    assert "User=moon-poro-prod\n" in unit
+    assert "Group=moon-poro-prod\n" in unit
+    assert "WorkingDirectory=/opt/moon-poro-prod\n" in unit
+    assert "ExecStart=/opt/moon-poro-prod/.venv/bin/python /opt/moon-poro-prod/main.py" in unit
+    assert "EnvironmentFile=/etc/moon-poro/prod-bot.env" in unit
+    assert "Requires=postgresql-moon-poro-prod.service" in unit
+    assert "After=network-online.target postgresql-moon-poro-prod.service" in unit
+    assert "ReadWritePaths=/var/log/moon-poro-prod" in unit
+    # Settings come from the env file; the unit itself carries no secrets.
+    for line in unit.splitlines():
+        if line.startswith("Environment="):
+            assert line.split("=", 2)[1] in {
+                "MOON_PORO_LOG_FILE",
+                "PYTHONDONTWRITEBYTECODE",
+                "PYTHONUNBUFFERED",
+            }
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    assert "/etc/systemd/system/moon-poro-prod.service" in installer
+    assert "systemctl enable moon-poro-prod.service" in installer
+    # Reinstalling must not restart the running bot; echo lines only print hints.
+    commands = "\n".join(
+        line for line in installer.splitlines() if not line.lstrip().startswith("echo")
+    )
+    for command in ("restart", "start", "stop", "enable --now"):
+        assert f"systemctl {command} moon-poro-prod.service" not in commands
 
 
 def test_production_backups_require_the_renamed_cluster_unit() -> None:

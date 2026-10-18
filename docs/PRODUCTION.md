@@ -47,6 +47,9 @@ Gdy zmienią się pliki w `deploy/`, zainstaluj pomocników jeszcze raz:
 sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh
 ```
 
+Instalator nie restartuje bota. Jeśli zmieniła się jednostka `deploy/moon-poro-prod.service`,
+wypisze polecenie restartu, a nowe ustawienia zadziałają po restarcie bota.
+
 **Strona** nie jest częścią tego skryptu. Zbuduj ją na innym komputerze (w `site/`: `npm ci` i
 `npm run build` z wszystkimi wartościami `PUBLIC_*`) i podmień `/opt/moon-poro/site/dist`.
 Strony logowania Riot ładują z niej `/fonts/*` i `/moon-poro.png`, więc nowy build wgrywaj razem
@@ -171,10 +174,9 @@ tylko do TCP 80 i 443 oraz SSH tylko przez IAP. Porty 5433 i 8080 nie mogą być
    ```
 
 7. `sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh`, potem
-   `sudo /usr/local/sbin/deploy-moon-poro-prod`. Jednostki `moon-poro-prod.service` nie ma jeszcze
-   w repozytorium; zbuduj ją na wzór `deploy/moon-poro.service` z katalogiem `/opt/moon-poro-prod`,
-   kontem `moon-poro-prod`, plikiem `/etc/moon-poro/prod-bot.env`, logiem w
-   `/var/log/moon-poro-prod` i `Requires=postgresql-moon-poro-prod.service`.
+   `sudo /usr/local/sbin/deploy-moon-poro-prod`. Instalator kopiuje jednostki z `deploy/`, w tym
+   bota (`moon-poro-prod.service`), i włącza jego start przy uruchomieniu VM. Bota uruchamia
+   dopiero wdrożenie.
 8. Sprawdź import jako callback:
    `sudo -u moon-poro-rso /opt/moon-poro-prod/.venv/bin/python -c 'import moon_poro.rso_web'`,
    potem `sudo systemctl enable --now moon-poro-prod-rso.service` i
