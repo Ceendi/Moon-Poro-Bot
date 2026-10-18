@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 from pulsefire.clients import RiotAPIClient
 
+from moon_poro.account_profile import rank_emojis_from
 from moon_poro.database import Database
 from moon_poro.repositories import (
     GuildFeatureRepository,
@@ -35,6 +36,7 @@ class MoonPoroBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.settings = settings
         self.database = database
+        self.rank_emojis: dict[str, str] = {}
         self.riot_client = riot_client
         self.riot_monitor = riot_monitor
         self.riot_auth_breaker = riot_auth_breaker or RiotAuthBreaker(
@@ -67,10 +69,21 @@ class MoonPoroBot(commands.Bot):
             await self.load_extension(f"moon_poro.cogs.{extension}")
 
         install_error_handler(self)
+        await self._load_rank_emojis()
         guild = discord.Object(id=self.settings.guild_id)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
         logger.info("Loaded features: %s", ", ".join(extensions))
+
+    async def _load_rank_emojis(self) -> None:
+        # Rank emojis are optional decoration; messages work without them.
+        try:
+            emojis = await self.fetch_application_emojis()
+        except discord.HTTPException:
+            logger.warning("Could not load application emojis; rank emojis stay hidden")
+            return
+        self.rank_emojis = rank_emojis_from(emojis)
+        logger.info("Loaded %s rank emojis", len(self.rank_emojis))
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
