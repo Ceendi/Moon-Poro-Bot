@@ -6,6 +6,8 @@ umask 0077
 readonly UNIT="${1:-}"
 readonly WEBHOOK_PATTERN='^https://(discord\.com|discordapp\.com)/api/webhooks/[0-9]+/[A-Za-z0-9_-]+$'
 readonly WEBHOOK_URL="${DISCORD_ALERT_WEBHOOK_URL:-}"
+readonly USER_ID_PATTERN='^[0-9]{17,20}$'
+readonly MENTION_USER_ID="${DISCORD_ALERT_MENTION_USER_ID:-}"
 
 case "$UNIT" in
     moon-poro-prod-backup.service) title="backup bazy się nie udał" ;;
@@ -33,10 +35,26 @@ else
     message+=$'\n'"Sprawdź: \`journalctl -u $UNIT -n 50\`"
 fi
 
-# No mentions, so the message never pings anyone.
+# A bad ID only drops the ping; the alert itself still goes out.
+mention="$MENTION_USER_ID"
+if [[ -n "$mention" && ! "$mention" =~ $USER_ID_PATTERN ]]; then
+    echo "DISCORD_ALERT_MENTION_USER_ID is not a Discord user ID; sending without a ping." >&2
+    mention=""
+fi
+
+# Only the one configured person can be pinged, never @everyone or a role.
 payload="$(
-    python3 -c 'import json, sys; print(json.dumps({"content": sys.argv[1], "allowed_mentions": {"parse": []}}))' \
-        "$message"
+    python3 - "$message" "$mention" <<'PY'
+import json
+import sys
+
+message, mention = sys.argv[1], sys.argv[2]
+if mention:
+    payload = {"content": f"<@{mention}> {message}", "allowed_mentions": {"users": [mention]}}
+else:
+    payload = {"content": message, "allowed_mentions": {"parse": []}}
+print(json.dumps(payload))
+PY
 )"
 
 # curl reads the address from a pipe, so it never appears on a command line.

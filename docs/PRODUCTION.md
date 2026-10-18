@@ -115,16 +115,20 @@ journalctl -u moon-poro-prod-restore-test.service -n 20
 Gdy codzienny backup, backup przed wdrożeniem, kopia w Cloud Storage albo test odtworzenia skończy
 się błędem, `OnFailure=` uruchamia `moon-poro-prod-alert@<jednostka>.service`. Ta jednostka
 wysyła przez webhook Discorda krótką wiadomość: co się nie udało, nazwę jednostki, czas i
-polecenie `journalctl`. Nie wysyła logów i nikogo nie oznacza. Dopóki nie ma pliku env, alert jest
-pomijany.
+polecenie `journalctl`. Nie wysyła logów. Oznacza tylko osobę podaną w
+`DISCORD_ALERT_MENTION_USER_ID`, nigdy `@everyone` ani roli; bez tej linii nikogo nie oznacza.
+Dopóki nie ma pliku env, alert jest pomijany.
 
 Jednorazowa konfiguracja:
 
 1. Na kanale moderacji: Ustawienia kanału, Integracje, Webhooki, nowy webhook. Skopiuj jego adres.
-2. Plik `/etc/moon-poro/prod-alert.env` (`root:root`, `0600`) z jedną linią
+2. Plik `/etc/moon-poro/prod-alert.env` (`root:root`, `0600`) z linią
    `DISCORD_ALERT_WEBHOOK_URL=<adres webhooka>`. Adres trzymaj też w menedżerze haseł; każdy, kto
    go zna, może pisać na tym kanale.
-3. Próba: `sudo systemctl start moon-poro-prod-alert@test.service`. Na kanale pojawi się
+3. Żeby dostawać powiadomienie, dodaj linię `DISCORD_ALERT_MENTION_USER_ID=<Twoje ID>`. ID
+   skopiujesz w Discordzie po włączeniu trybu dewelopera (Ustawienia, Zaawansowane): prawy klik na
+   swój profil, „Kopiuj ID użytkownika”.
+4. Próba: `sudo systemctl start moon-poro-prod-alert@test.service`. Na kanale pojawi się
    testowe powiadomienie.
 
 ## Kontrola działania
