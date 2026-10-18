@@ -53,6 +53,15 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-offsite-backup.service" \
     /etc/systemd/system/moon-poro-prod-offsite-backup.service
+# Copied only when it differs and never restarted here: a running bot keeps
+# its current settings until the next deployment restarts it.
+bot_unit_changed=false
+if ! cmp -s "$SCRIPT_DIR/moon-poro-prod.service" /etc/systemd/system/moon-poro-prod.service; then
+    install -o root -g root -m 0644 \
+        "$SCRIPT_DIR/moon-poro-prod.service" \
+        /etc/systemd/system/moon-poro-prod.service
+    bot_unit_changed=true
+fi
 # Installed but not enabled: RSO starts only after /etc/moon-poro/prod-rso.env exists.
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-rso.service" \
@@ -60,6 +69,13 @@ install -o root -g root -m 0644 \
 
 systemctl daemon-reload
 systemctl enable --now moon-poro-prod-backup.timer
+# Enable only, so the bot starts at boot; the deployment starts it.
+systemctl enable moon-poro-prod.service
+
+if [[ "$bot_unit_changed" == true ]] && systemctl is-active --quiet moon-poro-prod.service; then
+    echo "moon-poro-prod.service changed; it applies after the next bot restart:"
+    echo "  sudo systemctl restart moon-poro-prod.service"
+fi
 
 echo "Production deployment command: sudo /usr/local/sbin/deploy-moon-poro-prod"
 echo "Manual verified backup: sudo systemctl start moon-poro-prod-backup.service"
