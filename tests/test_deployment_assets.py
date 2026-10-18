@@ -69,6 +69,35 @@ def test_production_backups_require_the_renamed_cluster_unit() -> None:
             assert "moon-poro-test" not in path.read_text(encoding="utf-8"), path.name
 
 
+def test_backups_stay_offline_and_trigger_the_offsite_copy() -> None:
+    for name in ("moon-poro-prod-backup.service", "moon-poro-prod-pre-deploy-backup.service"):
+        unit = (ROOT / "deploy" / name).read_text(encoding="utf-8")
+        assert "RestrictAddressFamilies=AF_UNIX\n" in unit
+        assert "OnSuccess=moon-poro-prod-offsite-backup.service" in unit
+    offsite = (ROOT / "deploy/moon-poro-prod-offsite-backup.service").read_text(encoding="utf-8")
+    assert "ConditionPathExists=/etc/moon-poro/prod-backup-offsite.env" in offsite
+    assert "EnvironmentFile=/etc/moon-poro/prod-backup-offsite.env" in offsite
+    assert "User=postgres" in offsite
+    assert "ProtectProc=invisible" in offsite
+    assert "ExecStart=/usr/local/sbin/upload-moon-poro-prod-backup" in offsite
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    assert "/usr/local/sbin/upload-moon-poro-prod-backup" in installer
+    assert "/etc/systemd/system/moon-poro-prod-offsite-backup.service" in installer
+    assert "enable --now moon-poro-prod-offsite-backup" not in installer
+
+
+def test_offsite_upload_never_replaces_objects_or_exposes_the_token() -> None:
+    script = (ROOT / "deploy/upload-prod-backup.sh").read_text(encoding="utf-8")
+    assert "ifGenerationMatch=0" in script
+    assert "sha256sum --check" in script
+    assert '"md5Hash"' in script
+    assert "--header @<(printf 'Authorization: Bearer %s\\n' \"$token\")" in script
+    assert script.count("Authorization: Bearer") == 1
+    assert "set -x" not in script
+    pruning = (ROOT / "deploy/backup-prod-db.sh").read_text(encoding="utf-8")
+    assert 'rm -f -- "${old_dump}.uploaded"' in pruning
+
+
 def test_production_deploy_stops_rso_before_migrations_and_restarts_it_after_the_bot() -> None:
     script = (ROOT / "deploy/deploy-prod.sh").read_text(encoding="utf-8")
     stop_rso = script.index('systemctl stop "$RSO_SERVICE"')

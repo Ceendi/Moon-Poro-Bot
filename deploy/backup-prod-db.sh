@@ -81,6 +81,8 @@ prune_expired_backups() {
         if [[ -f "$old_checksum" ]]; then
             rm -- "$old_checksum"
         fi
+        # Marker left by upload-prod-backup.sh after a verified Cloud Storage copy.
+        rm -f -- "${old_dump}.uploaded"
         echo "Removed expired backup: $old_name"
     done < <(
         find "$backup_dir" -maxdepth 1 -type f -name "${DATABASE}-*.dump" \
