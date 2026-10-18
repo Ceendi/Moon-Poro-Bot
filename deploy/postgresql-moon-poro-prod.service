@@ -1,0 +1,20 @@
+[Unit]
+Description=Moon Poro production PostgreSQL 18 cluster
+AssertPathExists=/etc/postgresql/18/moon-poro-prod/postgresql.conf
+RequiresMountsFor=/etc/postgresql/18/moon-poro-prod /var/lib/postgresql/18/moon-poro-prod
+After=network.target
+
+[Service]
+# start.conf is "manual", so postgresql@18-moon-poro-prod.service never starts
+# this cluster; the bot and the backups pull in this unit through Requires=.
+Type=forking
+ExecStart=/usr/bin/pg_ctlcluster --skip-systemctl-redirect 18 moon-poro-prod start
+ExecStop=/usr/bin/pg_ctlcluster --skip-systemctl-redirect -m fast 18 moon-poro-prod stop
+ExecReload=/usr/bin/pg_ctlcluster --skip-systemctl-redirect 18 moon-poro-prod reload
+PIDFile=/run/postgresql/18-moon-poro-prod.pid
+TimeoutStartSec=infinity
+TimeoutStopSec=1h
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

@@ -18,7 +18,8 @@ kod tylko do odczytu i baza z oddzielnymi loginami.
 > Produkcja weryfikuje przez RSO (`VERIFICATION_MODE=rso`). Weryfikacja ikoną zostaje w kodzie
 > tylko jako awaryjny powrót. Sama aktualizacja kodu nie zmienia `VERIFICATION_MODE` istniejącej
 > instalacji. Produkcyjna VM `moon-poro-web` używa układu z README (`/opt/moon-poro-prod`,
-> `moon-poro-prod-rso.service`); ten dokument opisuje ogólną instalację w `/opt/moon-poro`.
+> `moon-poro-prod-rso.service`, klaster PostgreSQL `18/moon-poro-prod` na porcie 5433 z usługą
+> `postgresql-moon-poro-prod.service`); ten dokument opisuje ogólną instalację w `/opt/moon-poro`.
 
 ## 1. Warunki wstępne
 

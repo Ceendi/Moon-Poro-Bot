@@ -51,6 +51,24 @@ def test_production_rso_unit_runs_the_deployed_checkout() -> None:
     assert "enable --now moon-poro-prod-rso" not in installer.split("echo", 1)[0]
 
 
+def test_production_backups_require_the_renamed_cluster_unit() -> None:
+    cluster = (ROOT / "deploy/postgresql-moon-poro-prod.service").read_text(encoding="utf-8")
+    assert "AssertPathExists=/etc/postgresql/18/moon-poro-prod/postgresql.conf" in cluster
+    assert "PIDFile=/run/postgresql/18-moon-poro-prod.pid" in cluster
+    for action in ("18 moon-poro-prod start", "-m fast 18 moon-poro-prod stop"):
+        assert f"--skip-systemctl-redirect {action}\n" in cluster
+    for name in ("moon-poro-prod-backup.service", "moon-poro-prod-pre-deploy-backup.service"):
+        unit = (ROOT / "deploy" / name).read_text(encoding="utf-8")
+        assert "After=postgresql-moon-poro-prod.service" in unit
+        assert "Requires=postgresql-moon-poro-prod.service" in unit
+    installer = (ROOT / "deploy/install-prod-automation.sh").read_text(encoding="utf-8")
+    check = installer.index('if [[ ! -f "$CLUSTER_CONFIG" ]]')
+    assert check < installer.index("/etc/systemd/system/postgresql-moon-poro-prod.service")
+    for path in (ROOT / "deploy").iterdir():
+        if path.is_file():
+            assert "moon-poro-test" not in path.read_text(encoding="utf-8"), path.name
+
+
 def test_production_deploy_stops_rso_before_migrations_and_restarts_it_after_the_bot() -> None:
     script = (ROOT / "deploy/deploy-prod.sh").read_text(encoding="utf-8")
     stop_rso = script.index('systemctl stop "$RSO_SERVICE"')

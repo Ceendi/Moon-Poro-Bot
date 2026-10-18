@@ -1,7 +1,7 @@
 [Unit]
 Description=Verified pre-deploy Moon Poro production PostgreSQL backup
-After=postgresql-moon-poro-test.service
-Requires=postgresql-moon-poro-test.service
+After=postgresql-moon-poro-prod.service
+Requires=postgresql-moon-poro-prod.service
 
 [Service]
 Type=oneshot
