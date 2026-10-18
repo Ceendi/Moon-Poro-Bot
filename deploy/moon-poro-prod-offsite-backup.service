@@ -4,6 +4,7 @@ Description=Copy recent verified Moon Poro production backups to Cloud Storage
 ConditionPathExists=/etc/moon-poro/prod-backup-offsite.env
 Wants=network-online.target
 After=network-online.target
+OnFailure=moon-poro-prod-alert@%n.service
 
 [Service]
 Type=oneshot

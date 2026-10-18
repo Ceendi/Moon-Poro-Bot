@@ -1,0 +1,12 @@
+[Unit]
+Description=Monthly Moon Poro production backup restore test
+
+[Timer]
+# After the daily backup at 04:15 UTC, on the first day of each month.
+OnCalendar=*-*-01 05:30:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=moon-poro-prod-restore-test.service
+
+[Install]
+WantedBy=timers.target

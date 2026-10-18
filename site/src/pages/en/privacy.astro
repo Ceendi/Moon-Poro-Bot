@@ -63,7 +63,7 @@ const email = siteConfig.contactEmail;
         <li><strong>Riot sign-in session:</strong> the link expires after 10 minutes, and session data is deleted 7 days after the session ends, during the daily cleanup. If assigning roles or the message in the moderation channel isn't finished yet, the session stays until it is, or until the link is removed.</li>
         <li><strong>Administrator lookup log:</strong> 90 days.</li>
         <li><strong>Warnings, statistics and moderation messages:</strong> as long as needed to moderate the server.</li>
-        <li><strong>Database backups:</strong> up to 90 days. Deleted data may remain in a backup until then; backups are used only for disaster recovery.</li>
+        <li><strong>Database backups:</strong> up to 90 days. Deleted data may remain in a backup until then. Backups are used only to restore the database after a failure and for a monthly restore test. The test copy is deleted right after the test.</li>
         <li><strong>Technical logs:</strong> size-limited, older entries are deleted.</li>
       </ul>
     </section>

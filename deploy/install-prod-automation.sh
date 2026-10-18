@@ -36,6 +36,10 @@ install -o root -g root -m 0755 \
 install -o root -g root -m 0755 \
     "$SCRIPT_DIR/upload-prod-backup.sh" /usr/local/sbin/upload-moon-poro-prod-backup
 install -o root -g root -m 0755 \
+    "$SCRIPT_DIR/restore-test-prod-db.sh" /usr/local/sbin/restore-test-moon-poro-prod-db
+install -o root -g root -m 0755 \
+    "$SCRIPT_DIR/alert-prod-failure.sh" /usr/local/sbin/alert-moon-poro-prod-failure
+install -o root -g root -m 0755 \
     "$SCRIPT_DIR/deploy-prod.sh" /usr/local/sbin/deploy-moon-poro-prod
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/postgresql-moon-poro-prod.service" \
@@ -53,6 +57,16 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-offsite-backup.service" \
     /etc/systemd/system/moon-poro-prod-offsite-backup.service
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/moon-poro-prod-restore-test.service" \
+    /etc/systemd/system/moon-poro-prod-restore-test.service
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/moon-poro-prod-restore-test.timer" \
+    /etc/systemd/system/moon-poro-prod-restore-test.timer
+# Started by OnFailure= of the backup units; skipped until /etc/moon-poro/prod-alert.env exists.
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/moon-poro-prod-alert@.service" \
+    /etc/systemd/system/moon-poro-prod-alert@.service
 # Copied only when it differs and never restarted here: a running bot keeps
 # its current settings until the next deployment restarts it.
 bot_unit_changed=false
@@ -69,6 +83,7 @@ install -o root -g root -m 0644 \
 
 systemctl daemon-reload
 systemctl enable --now moon-poro-prod-backup.timer
+systemctl enable --now moon-poro-prod-restore-test.timer
 # Enable only, so the bot starts at boot; the deployment starts it.
 systemctl enable moon-poro-prod.service
 
@@ -82,4 +97,7 @@ echo "Manual verified backup: sudo systemctl start moon-poro-prod-backup.service
 echo "Daily backups remain for 90 days in $BACKUP_DIR/daily."
 echo "Pre-deploy backups also remain for 90 days in $BACKUP_DIR/pre-deploy."
 echo "Cloud Storage copies: set BACKUP_GCS_BUCKET in /etc/moon-poro/prod-backup-offsite.env."
+echo "Monthly restore test now: sudo systemctl start moon-poro-prod-restore-test.service"
+echo "Failure alerts: set DISCORD_ALERT_WEBHOOK_URL in /etc/moon-poro/prod-alert.env (root, 0600)."
+echo "Test alert: sudo systemctl start moon-poro-prod-alert@test.service"
 echo "Enable Riot Sign On once: sudo systemctl enable --now moon-poro-prod-rso.service"

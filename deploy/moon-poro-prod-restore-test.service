@@ -1,0 +1,37 @@
+[Unit]
+Description=Monthly Moon Poro production backup restore test
+After=postgresql-moon-poro-prod.service
+Requires=postgresql-moon-poro-prod.service
+OnFailure=moon-poro-prod-alert@%n.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/sbin/restore-test-moon-poro-prod-db
+TimeoutStartSec=30min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+# No ReadWritePaths: the backups stay read-only for the test.
+MemoryMax=128M

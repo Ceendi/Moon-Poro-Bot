@@ -4,6 +4,7 @@ After=postgresql-moon-poro-prod.service
 Requires=postgresql-moon-poro-prod.service
 # The copy needs the network, which this unit does not have.
 OnSuccess=moon-poro-prod-offsite-backup.service
+OnFailure=moon-poro-prod-alert@%n.service
 
 [Service]
 Type=oneshot
