@@ -52,6 +52,10 @@ out repository:
 sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh
 ```
 
+The database is the PostgreSQL 18 cluster `18/moon-poro-prod` on port 5433. It is started by
+`postgresql-moon-poro-prod.service`, which the installer also installs. The bot unit
+(`moon-poro-prod.service`) and both backup units require it.
+
 After a pull request has passed CI and been merged into `master`, deploy it with:
 
 ```bash

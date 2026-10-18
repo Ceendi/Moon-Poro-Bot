@@ -5,6 +5,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly TOOL_ENV="/opt/moon-poro-deploy-tools"
 readonly RUNTIME_DIR="/opt/moon-poro-prod-runtime"
 readonly BACKUP_DIR="/var/backups/moon-poro-prod"
+readonly CLUSTER_CONFIG="/etc/postgresql/18/moon-poro-prod/postgresql.conf"
 
 if ((EUID != 0)); then
     echo "Run this installer as root." >&2
@@ -12,6 +13,11 @@ if ((EUID != 0)); then
 fi
 if ! getent passwd postgres >/dev/null; then
     echo "The postgres system user does not exist." >&2
+    exit 1
+fi
+# The backup units require the cluster unit, which needs this cluster.
+if [[ ! -f "$CLUSTER_CONFIG" ]]; then
+    echo "PostgreSQL cluster 18/moon-poro-prod does not exist: $CLUSTER_CONFIG" >&2
     exit 1
 fi
 
@@ -29,6 +35,9 @@ install -o root -g root -m 0755 \
     "$SCRIPT_DIR/backup-prod-db.sh" /usr/local/sbin/backup-moon-poro-prod-db
 install -o root -g root -m 0755 \
     "$SCRIPT_DIR/deploy-prod.sh" /usr/local/sbin/deploy-moon-poro-prod
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/postgresql-moon-poro-prod.service" \
+    /etc/systemd/system/postgresql-moon-poro-prod.service
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-backup.service" \
     /etc/systemd/system/moon-poro-prod-backup.service
