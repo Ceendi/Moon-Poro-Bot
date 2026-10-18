@@ -34,6 +34,8 @@ fi
 install -o root -g root -m 0755 \
     "$SCRIPT_DIR/backup-prod-db.sh" /usr/local/sbin/backup-moon-poro-prod-db
 install -o root -g root -m 0755 \
+    "$SCRIPT_DIR/upload-prod-backup.sh" /usr/local/sbin/upload-moon-poro-prod-backup
+install -o root -g root -m 0755 \
     "$SCRIPT_DIR/deploy-prod.sh" /usr/local/sbin/deploy-moon-poro-prod
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/postgresql-moon-poro-prod.service" \
@@ -47,6 +49,10 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-backup.timer" \
     /etc/systemd/system/moon-poro-prod-backup.timer
+# Started by the backup units; skipped until /etc/moon-poro/prod-backup-offsite.env exists.
+install -o root -g root -m 0644 \
+    "$SCRIPT_DIR/moon-poro-prod-offsite-backup.service" \
+    /etc/systemd/system/moon-poro-prod-offsite-backup.service
 # Installed but not enabled: RSO starts only after /etc/moon-poro/prod-rso.env exists.
 install -o root -g root -m 0644 \
     "$SCRIPT_DIR/moon-poro-prod-rso.service" \
@@ -59,4 +65,5 @@ echo "Production deployment command: sudo /usr/local/sbin/deploy-moon-poro-prod"
 echo "Manual verified backup: sudo systemctl start moon-poro-prod-backup.service"
 echo "Daily backups remain for 90 days in $BACKUP_DIR/daily."
 echo "Pre-deploy backups also remain for 90 days in $BACKUP_DIR/pre-deploy."
+echo "Cloud Storage copies: set BACKUP_GCS_BUCKET in /etc/moon-poro/prod-backup-offsite.env."
 echo "Enable Riot Sign On once: sudo systemctl enable --now moon-poro-prod-rso.service"

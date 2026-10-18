@@ -1,0 +1,40 @@
+[Unit]
+Description=Copy recent verified Moon Poro production backups to Cloud Storage
+# Skipped until the bucket is configured, so a missing setup never fails a backup.
+ConditionPathExists=/etc/moon-poro/prod-backup-offsite.env
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+EnvironmentFile=/etc/moon-poro/prod-backup-offsite.env
+ExecStart=/usr/local/sbin/upload-moon-poro-prod-backup
+TimeoutStartSec=15min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/backups/moon-poro-prod
+MemoryMax=128M

@@ -2,6 +2,8 @@
 Description=Verified pre-deploy Moon Poro production PostgreSQL backup
 After=postgresql-moon-poro-prod.service
 Requires=postgresql-moon-poro-prod.service
+# The copy needs the network, which this unit does not have.
+OnSuccess=moon-poro-prod-offsite-backup.service
 
 [Service]
 Type=oneshot

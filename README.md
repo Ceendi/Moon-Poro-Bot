@@ -80,6 +80,31 @@ SHA-256 checksum. Daily backups use the same procedure through
 verified. Backups made before deployments remain in `/var/backups/moon-poro-prod/pre-deploy` and
 are also retained for 90 days. Both directories are pruned only after a new verified backup.
 
+### Backup copies outside the VM
+
+After each successful backup, `moon-poro-prod-offsite-backup.service` copies dumps from the last
+7 days that are not copied yet, with their checksums, to a Cloud Storage bucket. The backup units
+themselves stay without network access. The copy checks the local SHA-256 first, never replaces an
+object (`ifGenerationMatch=0`) and compares the MD5 reported by Cloud Storage with the local file.
+A failed copy marks only this unit as failed; the local backup and deployments are unaffected.
+
+The database is the only data that cannot be rebuilt: code, site, units and the system come from
+this repository. Keep the secrets from `/etc/moon-poro/*.env` in a password manager, not in the
+bucket. One-time setup (it fits the Cloud Storage free tier in `us-east1`):
+
+1. Create a service account for the VM and allow it only to create objects in the bucket
+   (`roles/storage.objectCreator`), so the VM cannot read or delete existing copies.
+2. Add a lifecycle rule that deletes objects older than 83 days. With the bucket's 7-day soft
+   delete, copies are gone within 90 days, as the privacy policy states.
+3. Attach the service account to the VM with the `devstorage.read_write` scope (the VM must be
+   stopped for this).
+4. Create `/etc/moon-poro/prod-backup-offsite.env` (`root:root`, `0644`) with
+   `BACKUP_GCS_BUCKET=<bucket name>`, reinstall the helpers and check one copy with
+   `sudo systemctl start moon-poro-prod-offsite-backup.service`.
+
+To restore, download the dump and its `.sha256` file, run `sha256sum --check`, then use
+`pg_restore`.
+
 ### Enabling Riot Sign On on `moon-poro-web`
 
 The callback runs from the same checkout as `moon-poro-prod-rso.service`. Once, after the first
