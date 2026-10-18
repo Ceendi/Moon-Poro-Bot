@@ -556,6 +556,36 @@ async def test_only_one_reply_follows_a_member_rank_refresh() -> None:
     bot.verifications.get_by_user.assert_not_awaited()
 
 
+async def test_second_panel_click_points_to_the_reply_that_follows_the_refresh() -> None:
+    bot = _panel_bot()
+    bot.verifications = SimpleNamespace(get_by_user=AsyncMock())
+    view = AccountProfileView(
+        bot,
+        owner_id=101,
+        presentation=build_account_profile(None),
+        link=None,
+        start_verification=AsyncMock(),
+    )
+    view.compact = True
+    interaction = SimpleNamespace(guild_id=123, edit_original_response=AsyncMock())
+    verification._ACTIVE_RANK_REFRESH_WATCHES.add((123, 101))
+    try:
+        await view._watch_rank_refresh(
+            interaction,
+            initial_state=verification.AccountProfileState.REFRESH_QUEUED,
+            baseline_rank_last_checked_at=None,
+        )
+    finally:
+        verification._ACTIVE_RANK_REFRESH_WATCHES.discard((123, 101))
+
+    bot.verifications.get_by_user.assert_not_awaited()
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="Odświeżanie już trwa. Wynik pojawi się w poprzedniej wiadomości.",
+        embed=None,
+        view=None,
+    )
+
+
 def test_incomplete_legacy_profile_only_offers_previous_link_removal() -> None:
     bot = _panel_bot()
     link = _profile_link(puuid=None)
@@ -664,6 +694,8 @@ async def test_profile_refresh_shows_queued_running_and_completed_states(
     fields = {field.name: field.value for field in completed_kwargs["embed"].fields}
     assert fields["Solo/Duo"] == "Diamond IV"
     assert fields["LP"] == "73 LP"
+    # The line above the card says what changed.
+    assert completed_kwargs["content"].startswith("Emerald II → **Diamond IV**")
     # Right after a refresh the button shows the cooldown instead of a dead click.
     assert completed_kwargs["view"].children[0].label == "Odśwież za 30 min"
     assert completed_kwargs["view"].children[0].disabled is True
@@ -822,7 +854,7 @@ async def test_profile_refresh_timeout_final_read_prefers_terminal_state(
     if final_state == "completed":
         assert final_embed.footer.text is None
         statuses = [field.value for field in final_embed.fields if field.name == "Stan odświeżania"]
-        assert all(value.startswith("⏳ Kolejne odświeżenie rangi") for value in statuses)
+        assert all(value.startswith("Kolejne odświeżenie rangi") for value in statuses)
     else:
         assert final_embed.fields[-1].name == "Stan odświeżania"
         assert final_embed.fields[-1].value == (
@@ -1054,11 +1086,11 @@ async def test_profile_refresh_hides_internal_error_and_allows_retry() -> None:
 @pytest.mark.parametrize(
     ("retry_after_seconds", "expected_message"),
     [
-        (1201, "⏳ **Rangę możesz odświeżyć ponownie za około 21 min.**"),
-        (59, "⏳ **Rangę możesz odświeżyć ponownie za 59 s.**"),
-        (None, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
-        (0, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
-        (-1, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
+        (1201, "Rangę możesz odświeżyć ponownie za około 21 min (o <t:"),
+        (59, "Rangę możesz odświeżyć ponownie za 59 s."),
+        (None, "Rangę będzie można odświeżyć za chwilę."),
+        (0, "Rangę będzie można odświeżyć za chwilę."),
+        (-1, "Rangę będzie można odświeżyć za chwilę."),
     ],
 )
 async def test_profile_refresh_cooldown_uses_followup_without_rerendering(
@@ -1103,7 +1135,9 @@ async def test_profile_refresh_cooldown_uses_followup_without_rerendering(
     interaction.response.defer.assert_awaited_once_with()
     get_by_user.assert_awaited_once_with(123, 101)
     interaction.edit_original_response.assert_not_awaited()
-    interaction.followup.send.assert_awaited_once_with(expected_message, ephemeral=True)
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.args[0].startswith(expected_message)
+    assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
     assert refresh.label.startswith("Odśwież za ")
     assert refresh.disabled is True
     assert refresh.style.name == "primary"
@@ -1403,22 +1437,19 @@ async def test_panel_refresh_defers_then_follows_the_private_profile_live(
     interaction.followup.send.assert_not_awaited()
     edits = interaction.edit_original_response.await_args_list
     assert len(edits) == 2
-    queued_view = edits[0].kwargs["view"]
-    assert isinstance(queued_view, AccountProfileView)
-    assert queued_view.start_verification is starter
-    assert queued_view.children[0].label == "W kolejce…"
-    assert queued_view.children[0].disabled is True
-    fields = {field.name: field.value for field in edits[1].kwargs["embed"].fields}
-    assert fields["Solo/Duo"] == "Diamond IV"
-    assert edits[1].kwargs["view"].children[0].label == "Odśwież za 30 min"
+    assert edits[0].kwargs == {"content": "Sprawdzam rangę w Riot…", "embed": None, "view": None}
+    result = edits[1].kwargs
+    assert result["embed"] is None and result["view"] is None
+    assert "→ **Diamond IV**" in result["content"]
+    assert "Rola zmieniona:" in result["content"] and "**Diamond**" in result["content"]
 
 
 @pytest.mark.parametrize(
     ("retry_after_seconds", "expected_message"),
     [
-        (1201, "⏳ **Rangę możesz odświeżyć ponownie za około 21 min.**"),
-        (59, "⏳ **Rangę możesz odświeżyć ponownie za 59 s.**"),
-        (0, "⏳ **Rangę będzie można odświeżyć za chwilę.**"),
+        (1201, "Rangę możesz odświeżyć ponownie za około 21 min (o <t:"),
+        (59, "Rangę możesz odświeżyć ponownie za 59 s."),
+        (0, "Rangę będzie można odświeżyć za chwilę."),
     ],
 )
 async def test_panel_second_click_shows_cooldown_in_the_private_profile(
@@ -1445,9 +1476,10 @@ async def test_panel_second_click_shows_cooldown_in_the_private_profile(
 
     interaction.edit_original_response.assert_awaited_once()
     rendered = interaction.edit_original_response.await_args.kwargs
-    assert rendered["content"] == expected_message
-    assert rendered["embed"].title == "Moje konto"
-    assert isinstance(rendered["view"], AccountProfileView)
+    # The panel answers with one line only; the card lives in „Moje konto”.
+    assert rendered["content"].startswith(expected_message)
+    assert rendered["embed"] is None
+    assert rendered["view"] is None
     interaction.followup.send.assert_not_awaited()
 
 
@@ -1536,9 +1568,10 @@ async def test_panel_refresh_tells_the_user_when_the_riot_breaker_is_open(
     assert bot.verifications.get_by_user.await_count == 2
     rendered = interaction.edit_original_response.await_args.kwargs
     # A key-level pause does not recover by itself, so the panel says so.
-    assert rendered["embed"].fields[-1].value == (
-        "Odświeżanie rangi jest wstrzymane.\nJeśli to potrwa dłużej, daj znać administracji serwera."
+    assert rendered["content"] == (
+        "Odświeżanie rangi jest wstrzymane. Jeśli to potrwa dłużej, daj znać administracji serwera."
     )
+    assert rendered["embed"] is None
 
 
 async def test_panel_refresh_hides_internal_errors_in_the_thinking_response(

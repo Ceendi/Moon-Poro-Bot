@@ -17,7 +17,9 @@ from moon_poro.account_profile import (
     REFRESH_RUNNING_BUTTON_LABEL,
     AccountProfilePresentation,
     AccountProfileState,
+    RankView,
     build_account_profile,
+    rank_change_summary,
 )
 from moon_poro.bot import MoonPoroBot
 from moon_poro.member_role_lock import member_role_lock
@@ -89,6 +91,17 @@ _PANEL_LINK_CHANGED_MESSAGE = (
     "Powiązanie konta zmieniło się. Sprawdź aktualne dane w sekcji „Moje konto”."
 )
 _PANEL_NOT_LINKED_MESSAGE = "Najpierw kliknij „Zweryfikuj konto” i połącz konto Riot."
+_COMPACT_REFRESH_PENDING_MESSAGE = "Sprawdzam rangę w Riot…"
+_COMPACT_REFRESH_TIMEOUT_MESSAGE = (
+    "Odświeżanie trwa dłużej niż zwykle. Sprawdź „Moje konto” za chwilę."
+)
+_COMPACT_REFRESH_ALREADY_WATCHED_MESSAGE = (
+    "Odświeżanie już trwa. Wynik pojawi się w poprzedniej wiadomości."
+)
+_COMPACT_RIOT_UNAVAILABLE_MESSAGE = "Riot chwilowo nie odpowiada. Bot sam spróbuje później."
+_COMPACT_REFRESH_PAUSED_MESSAGE = (
+    "Odświeżanie rangi jest wstrzymane. Jeśli to potrwa dłużej, daj znać administracji serwera."
+)
 _ORPHAN_VERIFIED_ROLE_TIMEOUT_SECONDS = 10.0
 _DEFAULT_PRIVACY_POLICY_URL = "https://moonporo.pl/privacy/"
 _DEFAULT_TERMS_OF_SERVICE_URL = "https://moonporo.pl/terms/"
@@ -96,12 +109,13 @@ _DEFAULT_TERMS_OF_SERVICE_URL = "https://moonporo.pl/terms/"
 
 def _rank_refresh_cooldown_message(retry_after_seconds: int | None) -> str:
     if retry_after_seconds is None or retry_after_seconds <= 0:
-        return "⏳ **Rangę będzie można odświeżyć za chwilę.**"
+        return "Rangę będzie można odświeżyć za chwilę."
     seconds = retry_after_seconds
+    available_at = int(datetime.now(UTC).timestamp()) + seconds
     if seconds >= 60:
         minutes = math.ceil(seconds / 60)
-        return f"⏳ **Rangę możesz odświeżyć ponownie za około {minutes} min.**"
-    return f"⏳ **Rangę możesz odświeżyć ponownie za {seconds} s.**"
+        return f"Rangę możesz odświeżyć ponownie za około {minutes} min (o <t:{available_at}:t>)."
+    return f"Rangę możesz odświeżyć ponownie za {seconds} s."
 
 
 def _verification_legal_links(bot: MoonPoroBot) -> str:
@@ -1435,6 +1449,7 @@ async def _request_rank_refresh_from_panel(
         start_verification=start_verification,
     )
     view.stale_message = _PANEL_LINK_CHANGED_MESSAGE
+    view.compact = True
     await view.run_rank_refresh(interaction, deferred=True)
 
 
@@ -1465,6 +1480,7 @@ def _build_account_profile(
     return build_account_profile(
         link,
         riot_id=_riot_id_from_link(link),
+        rank_emojis=getattr(bot, "rank_emojis", None),
         manual_refresh_cooldown_seconds=(bot.settings.rank_refresh_button_cooldown_seconds),
         rank_refresh_claim_timeout_seconds=(bot.settings.rank_refresh_claim_timeout_seconds),
         riot_authorization_unavailable=bot.riot_auth_breaker.snapshot(
@@ -1495,6 +1511,9 @@ class AccountProfileView(discord.ui.View):
         self.start_verification = start_verification
         self.link_identity = VerificationLinkIdentity.from_link(link) if link is not None else None
         self.stale_message = _ACCOUNT_PROFILE_STALE_MESSAGE
+        # The public panel shows only a short result line instead of the card.
+        self.compact = False
+        self._rank_before = RankView.from_link(link) if link is not None else None
         self._refresh_in_progress = False
 
         if presentation.state is AccountProfileState.UNVERIFIED:
@@ -1546,13 +1565,23 @@ class AccountProfileView(discord.ui.View):
             start_verification=self.start_verification,
         )
 
+    def _change_summary(self, link: VerificationLink) -> str:
+        return rank_change_summary(
+            self._rank_before,
+            RankView.from_link(link),
+            getattr(self.bot, "rank_emojis", None),
+        )
+
     async def _edit_profile(
         self,
         interaction: discord.Interaction,
         link: VerificationLink,
+        *,
+        show_change: bool = False,
     ) -> AccountProfilePresentation:
         presentation = _build_account_profile(self.bot, link)
-        await self._edit_presentation(interaction, presentation, link)
+        content = self._change_summary(link) if show_change else None
+        await self._edit_presentation(interaction, presentation, link, content=content)
         return presentation
 
     async def _edit_presentation(
@@ -1563,11 +1592,29 @@ class AccountProfileView(discord.ui.View):
         *,
         content: str | None = None,
     ) -> None:
+        if self.compact:
+            await interaction.edit_original_response(
+                content=content or self._compact_status(presentation, link),
+                embed=None,
+                view=None,
+            )
+            return
         await interaction.edit_original_response(
             content=content,
             embed=presentation.embed,
             view=self._new_view(presentation, link),
         )
+
+    def _compact_status(
+        self, presentation: AccountProfilePresentation, link: VerificationLink
+    ) -> str:
+        if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+            return _COMPACT_REFRESH_PENDING_MESSAGE
+        if presentation.state is AccountProfileState.TEMPORARY_UNAVAILABLE:
+            return _COMPACT_RIOT_UNAVAILABLE_MESSAGE
+        if presentation.state is AccountProfileState.AUTHORIZATION_UNAVAILABLE:
+            return _COMPACT_REFRESH_PAUSED_MESSAGE
+        return self._change_summary(link)
 
     async def _edit_stale_profile(self, interaction: discord.Interaction) -> None:
         await interaction.edit_original_response(
@@ -1588,6 +1635,11 @@ class AccountProfileView(discord.ui.View):
         if watch_key in _ACTIVE_RANK_REFRESH_WATCHES:
             # Another reply already follows this refresh; repeated clicks only
             # show the current state instead of polling the database again.
+            if self.compact:
+                with suppress(discord.HTTPException):
+                    await interaction.edit_original_response(
+                        content=_COMPACT_REFRESH_ALREADY_WATCHED_MESSAGE, embed=None, view=None
+                    )
             return
         _ACTIVE_RANK_REFRESH_WATCHES.add(watch_key)
         try:
@@ -1623,9 +1675,14 @@ class AccountProfileView(discord.ui.View):
                     link.rank_last_checked_at,
                     baseline_rank_last_checked_at,
                 ):
-                    await self._edit_profile(interaction, link)
+                    await self._edit_profile(interaction, link, show_change=True)
                     return
                 presentation = _build_account_profile(self.bot, link)
+                if self.compact and presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
+                    await self._edit_presentation(
+                        interaction, presentation, link, content=_COMPACT_REFRESH_TIMEOUT_MESSAGE
+                    )
+                    return
                 await self._edit_presentation(interaction, presentation, link)
                 if presentation.state in _ACCOUNT_PROFILE_PENDING_STATES:
                     with suppress(discord.HTTPException):
@@ -1645,7 +1702,7 @@ class AccountProfileView(discord.ui.View):
                 link.rank_last_checked_at,
                 baseline_rank_last_checked_at,
             ):
-                await self._edit_profile(interaction, link)
+                await self._edit_profile(interaction, link, show_change=True)
                 return
 
             presentation = _build_account_profile(self.bot, link)
@@ -1749,7 +1806,7 @@ class AccountProfileView(discord.ui.View):
                 link.rank_last_checked_at,
                 result.baseline_rank_last_checked_at,
             ):
-                await self._edit_profile(interaction, link)
+                await self._edit_profile(interaction, link, show_change=True)
                 return
             presentation = _build_account_profile(self.bot, link)
             if result.status is RankRefreshRequestStatus.COOLDOWN:

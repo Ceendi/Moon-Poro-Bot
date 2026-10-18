@@ -13,7 +13,10 @@ from moon_poro.account_profile import (
     REFRESH_RUNNING_BUTTON_LABEL,
     AccountProfilePresentation,
     AccountProfileState,
+    RankView,
     build_account_profile,
+    rank_change_summary,
+    rank_emojis_from,
 )
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -240,7 +243,7 @@ def test_cooldown_shows_the_wait_on_the_button_and_in_the_profile() -> None:
     assert profile.refresh_button_label == "Odśwież za 11 min"
     status = profile.embed.fields[-1]
     assert status.name == "Stan odświeżania"
-    assert status.value.startswith("⏳ Kolejne odświeżenie rangi możliwe za 11 min (<t:")
+    assert status.value.startswith("Kolejne odświeżenie rangi możliwe za 11 min (o <t:")
 
 
 @pytest.mark.parametrize(
@@ -424,3 +427,74 @@ def test_naive_database_datetimes_are_treated_as_utc() -> None:
         f"<t:{int(naive_checked_at.replace(tzinfo=UTC).timestamp())}:f> • "
         f"<t:{int(naive_checked_at.replace(tzinfo=UTC).timestamp())}:R>"
     )
+
+
+EMOJIS = {
+    "GOLD": "<:rank_gold:1>",
+    "PLATINUM": "<:rank_platinum:2>",
+    "EMERALD": "<:rank_emerald:3>",
+}
+
+
+class FakeEmoji:
+    def __init__(self, name: str, text: str) -> None:
+        self.name = name
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+def test_rank_emojis_are_matched_by_name_and_missing_ones_are_skipped() -> None:
+    emojis = [
+        FakeEmoji("rank_gold", "<:rank_gold:1>"),
+        FakeEmoji("Rank_Platinum", "<:Rank_Platinum:2>"),
+        FakeEmoji("something_else", "<:x:3>"),
+    ]
+
+    assert rank_emojis_from(emojis) == {"GOLD": "<:rank_gold:1>", "PLATINUM": "<:Rank_Platinum:2>"}  # type: ignore[arg-type]
+
+
+def test_change_summary_names_the_new_rank_and_the_role_change() -> None:
+    summary = rank_change_summary(RankView("GOLD", "II", 50), RankView("PLATINUM", "IV", 0), EMOJIS)
+
+    assert summary == (
+        "<:rank_gold:1> Gold II → <:rank_platinum:2> **Platinum IV**\n"
+        "Rola zmieniona: Gold → **Platinum**"
+    )
+
+
+def test_change_summary_keeps_the_role_for_a_new_division() -> None:
+    summary = rank_change_summary(RankView("PLATINUM", "IV", 10), RankView("PLATINUM", "II", 20))
+
+    assert summary == "Platinum IV → **Platinum II**\nRola bez zmian: Platinum"
+
+
+def test_change_summary_shows_lp_when_the_rank_stays() -> None:
+    summary = rank_change_summary(
+        RankView("EMERALD", "I", 75), RankView("EMERALD", "I", 92), EMOJIS
+    )
+
+    assert summary == "<:rank_emerald:3> Ranga bez zmian: **Emerald I**, 75 → 92 LP"
+
+
+def test_change_summary_from_unranked_and_from_unknown() -> None:
+    assert rank_change_summary(RankView("UNRANKED", None, None), RankView("SILVER", "III", 0)) == (
+        "Brak rangi → **Silver III**\nRola zmieniona: Unranked → **Silver**"
+    )
+    assert rank_change_summary(None, RankView("MASTER", "I", 120)) == (
+        "Ranga: **Master**\nRola: **Master**"
+    )
+
+
+def test_profile_shows_the_rank_emoji_and_hides_apex_divisions() -> None:
+    profile = build_account_profile(
+        _link(last_known_rank="GOLD", last_known_division="II"), now=NOW, rank_emojis=EMOJIS
+    )
+    fields = {field.name: field.value for field in profile.embed.fields}
+    assert fields["Solo/Duo"] == "<:rank_gold:1> Gold II"
+
+    apex = build_account_profile(
+        _link(last_known_rank="CHALLENGER", last_known_division="I"), now=NOW
+    )
+    assert {field.name: field.value for field in apex.embed.fields}["Solo/Duo"] == "Challenger"

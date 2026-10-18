@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -17,6 +18,10 @@ REFRESH_QUEUED_BUTTON_LABEL: Final = "W kolejce…"
 REFRESH_RUNNING_BUTTON_LABEL: Final = "Odświeżanie…"
 PROFILE_REFRESH_STATUS_FIELD_NAME: Final = "Stan odświeżania"
 PROFILE_ACCOUNT_STATUS_FIELD_NAME: Final = "Stan konta"
+
+# Application emojis uploaded in the Discord Developer Portal, e.g. rank_gold.
+RANK_EMOJI_NAMES: Final = {tier: f"rank_{tier.lower()}" for tier in RANK_TO_ROLE}
+_APEX_TIERS: Final = frozenset({"MASTER", "GRANDMASTER", "CHALLENGER"})
 
 _REGION_LABELS: Final = {
     "EUN1": "EUNE",
@@ -67,10 +72,70 @@ class AccountProfilePresentation:
     refresh_enabled: bool
 
 
+def rank_emojis_from(emojis: Iterable[discord.Emoji]) -> dict[str, str]:
+    """Map Riot tiers to the bot's rank emojis found by name."""
+
+    by_name = {emoji.name.casefold(): str(emoji) for emoji in emojis}
+    return {tier: by_name[name] for tier, name in RANK_EMOJI_NAMES.items() if name in by_name}
+
+
+@dataclass(frozen=True, slots=True)
+class RankView:
+    """The rank fields of a link at one moment, for before/after messages."""
+
+    tier: str | None
+    division: str | None
+    league_points: int | None
+
+    @classmethod
+    def from_link(cls, link: VerificationLinkLike) -> RankView:
+        tier = (link.last_known_rank or "").strip().upper() or None
+        division = (link.last_known_division or "").strip().upper() or None
+        return cls(tier=tier, division=division, league_points=link.last_known_league_points)
+
+
+def rank_change_summary(
+    before: RankView | None,
+    after: RankView,
+    rank_emojis: Mapping[str, str] | None = None,
+) -> str:
+    """One or two short lines saying how the rank and rank role changed."""
+
+    emojis = rank_emojis or {}
+    after_label = f"{_emoji_prefix(after.tier, emojis)}**{_rank_text(after.tier, after.division)}**"
+    after_role = RANK_TO_ROLE.get(after.tier or "")
+    if before is None or before.tier is None:
+        role_line = f"\nRola: **{after_role}**" if after_role else ""
+        return f"Ranga: {after_label}{role_line}"
+    if (before.tier, before.division) == (after.tier, after.division):
+        line = f"{_emoji_prefix(after.tier, emojis)}Ranga bez zmian: **{_rank_text(after.tier, after.division)}**"
+        if after.tier != "UNRANKED" and after.league_points is not None:
+            if before.league_points is not None and before.league_points != after.league_points:
+                line += f", {before.league_points} → {after.league_points} LP"
+            else:
+                line += f", {after.league_points} LP"
+        return line
+    before_label = f"{_emoji_prefix(before.tier, emojis)}{_rank_text(before.tier, before.division)}"
+    before_role = RANK_TO_ROLE.get(before.tier)
+    if after_role and before_role and before_role != after_role:
+        role_line = f"Rola zmieniona: {before_role} → **{after_role}**"
+    elif after_role:
+        role_line = f"Rola bez zmian: {after_role}"
+    else:
+        role_line = ""
+    return f"{before_label} → {after_label}" + (f"\n{role_line}" if role_line else "")
+
+
+def _emoji_prefix(tier: str | None, emojis: Mapping[str, str]) -> str:
+    emoji = emojis.get(tier or "")
+    return f"{emoji} " if emoji else ""
+
+
 def build_account_profile(
     link: VerificationLinkLike | None,
     *,
     riot_id: str | None = None,
+    rank_emojis: Mapping[str, str] | None = None,
     now: datetime | None = None,
     manual_refresh_cooldown_seconds: int = 0,
     rank_refresh_claim_timeout_seconds: int = 300,
@@ -111,7 +176,7 @@ def build_account_profile(
             inline=False,
         )
     else:
-        _add_profile_fields(embed, link, riot_id=riot_id)
+        _add_profile_fields(embed, link, riot_id=riot_id, rank_emojis=rank_emojis or {})
 
     _add_state_field(embed, state)
     # A cooldown is shown on the button itself, so nobody has to read the
@@ -127,7 +192,7 @@ def build_account_profile(
         available_at = int((current_time + cooldown_remaining).timestamp())
         set_account_profile_status(
             embed,
-            f"⏳ Kolejne odświeżenie rangi możliwe za {minutes} min (<t:{available_at}:t>).",
+            f"Kolejne odświeżenie rangi możliwe za {minutes} min (o <t:{available_at}:t>).",
         )
     else:
         refresh_button_label = REFRESH_BUTTON_LABEL
@@ -195,8 +260,11 @@ def _add_profile_fields(
     link: VerificationLinkLike,
     *,
     riot_id: str | None,
+    rank_emojis: Mapping[str, str],
 ) -> None:
     rank = _rank_label(link)
+    if link.last_known_rank:
+        rank = f"{_emoji_prefix(link.last_known_rank.strip().upper(), rank_emojis)}{rank}"
     wins, losses = _valid_record(link.last_known_wins, link.last_known_losses)
 
     embed.add_field(name="Riot ID", value=_riot_id_label(riot_id), inline=True)
@@ -290,16 +358,22 @@ def _region_label(platform: str) -> str:
 
 
 def _rank_label(link: VerificationLinkLike) -> str:
-    if link.last_known_rank is None or not link.last_known_rank.strip():
+    view = RankView.from_link(link)
+    return _rank_text(view.tier, view.division)
+
+
+def _rank_text(tier: str | None, division: str | None) -> str:
+    if tier is None:
         return "Brak danych"
-    tier = link.last_known_rank.strip().upper()
     if tier == "UNRANKED":
         return "Brak rangi"
     label = RANK_TO_ROLE.get(tier, tier.replace("_", " ").title())
     if tier == "GRANDMASTER":
         label = "Grandmaster"
-    division = (link.last_known_division or "").strip().upper()
-    return f"{label} {division}".strip()
+    # Apex tiers have a single division, which Riot does not show.
+    if tier in _APEX_TIERS or not division:
+        return label
+    return f"{label} {division}"
 
 
 def _lp_label(link: VerificationLinkLike) -> str:
