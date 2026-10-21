@@ -889,36 +889,40 @@ def _html_page(title: str, body: str, *, status: int = 200) -> web.Response:
   <meta name="color-scheme" content="dark">
   <title>{html.escape(title)} · Moon Poro</title>
   <style>
-    @font-face {{ font-family:"Nunito"; font-weight:200 1000; font-display:swap; src:url("/fonts/nunito-latin.woff2") format("woff2"); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }}
-    @font-face {{ font-family:"Nunito"; font-weight:200 1000; font-display:swap; src:url("/fonts/nunito-latin-ext.woff2") format("woff2"); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }}
-    :root {{ color-scheme:dark; --night:#0d0b1e; --text:#efeaf8; --muted:#b3abcf; --quiet:#8a82aa; --moon:#ffe2a3; --pink:#ff8fae; --lavender:#b9a3f5; --line:#2f2856; }}
+    @font-face {{ font-family:"Big Shoulders"; font-weight:600 900; font-display:swap; src:url("/fonts/big-shoulders-latin.woff2") format("woff2"); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }}
+    @font-face {{ font-family:"Big Shoulders"; font-weight:600 900; font-display:swap; src:url("/fonts/big-shoulders-latin-ext.woff2") format("woff2"); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF; }}
+    @font-face {{ font-family:"Atkinson Hyperlegible Next"; font-weight:400 700; font-display:swap; src:url("/fonts/atkinson-hyperlegible-next-latin.woff2") format("woff2"); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }}
+    @font-face {{ font-family:"Atkinson Hyperlegible Next"; font-weight:400 700; font-display:swap; src:url("/fonts/atkinson-hyperlegible-next-latin-ext.woff2") format("woff2"); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF; }}
+    :root {{ color-scheme:dark; --bg:#1c1226; --surface:#2a1d38; --line:#3d2e4f; --text:#f7f3fb; --muted:#c4b6d6; --quiet:#9d8fb0; --lilac:#a98bd0; --accent:#f7f3fb; --accent-hover:#e2d6f1; --on-accent:#1c1226; --moon:#f6c04a; }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; min-height:100vh; display:grid; grid-template-rows:1fr auto; justify-items:center; padding:24px 20px; color:var(--text); background:radial-gradient(48rem 30rem at 50% -6rem, rgba(124,98,214,.34), transparent 70%), var(--night); font:17px/1.6 "Nunito",system-ui,-apple-system,"Segoe UI",sans-serif; }}
-    main {{ align-self:center; display:grid; justify-items:center; width:min(460px,100%); padding-block:32px; text-align:center; }}
-    .avatar {{ position:relative; width:96px; height:96px; margin-bottom:26px; }}
-    .avatar img {{ display:block; width:96px; height:96px; border-radius:50%; box-shadow:0 0 0 8px rgba(255,226,163,.08), 0 0 60px rgba(255,226,163,.22); }}
-    .badge {{ position:absolute; right:-6px; bottom:-4px; display:grid; place-items:center; width:36px; height:36px; border:4px solid var(--night); border-radius:50%; font-weight:900; font-size:17px; line-height:1; }}
+    body {{ margin:0; min-height:100vh; display:grid; grid-template-rows:1fr auto; justify-items:center; padding:24px 20px; color:var(--text); background:var(--bg); font:17px/1.6 "Atkinson Hyperlegible Next",system-ui,-apple-system,"Segoe UI",sans-serif; }}
+    main {{ align-self:center; display:grid; justify-items:start; width:min(460px,100%); padding-block:32px; }}
+    .avatar {{ position:relative; width:88px; height:88px; margin-bottom:32px; }}
+    .avatar img {{ display:block; width:88px; height:88px; border-radius:50%; }}
+    .badge {{ position:absolute; right:-8px; bottom:-4px; display:grid; place-items:center; width:36px; height:36px; border:4px solid var(--bg); border-radius:50%; font-weight:700; font-size:17px; line-height:1; }}
     .badge.success {{ color:#123629; background:#7ee2b0; }}
-    .badge.error {{ color:#3d1d36; background:var(--pink); }}
-    .badge.pending {{ display:flex; gap:3px; justify-content:center; align-items:center; background:var(--lavender); }}
-    .badge.pending i {{ width:5px; height:5px; border-radius:50%; background:#241a3f; animation:blink 1.2s infinite ease-in-out; }}
+    .badge.error {{ color:#3a1712; background:#ff9b8a; }}
+    .badge.pending {{ display:flex; gap:3px; justify-content:center; align-items:center; background:var(--lilac); }}
+    .badge.pending i {{ width:5px; height:5px; border-radius:50%; background:var(--bg); animation:blink 1.2s infinite ease-in-out; }}
     .badge.pending i:nth-child(2) {{ animation-delay:.2s; }} .badge.pending i:nth-child(3) {{ animation-delay:.4s; }}
     @keyframes blink {{ 0%,80%,100% {{ opacity:.25; }} 40% {{ opacity:1; }} }}
-    h1 {{ margin:0 0 12px; font-size:clamp(28px,6vw,36px); font-weight:800; line-height:1.15; text-wrap:balance; }}
-    .lead {{ margin:0 0 28px; color:var(--muted); text-wrap:pretty; }}
-    .who {{ display:grid; gap:1px; width:100%; margin:0 0 24px; overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--line); text-align:left; }}
-    .who div {{ display:flex; justify-content:space-between; gap:16px; padding:12px 16px; background:rgba(255,255,255,.03); }}
-    .who dt {{ color:var(--quiet); }}
-    .who dd {{ margin:0; font-weight:800; text-align:right; overflow-wrap:anywhere; min-width:0; }}
+    h1 {{ margin:0 0 16px; font:800 clamp(40px,9vw,56px)/.95 "Big Shoulders","Arial Narrow",sans-serif; text-wrap:balance; }}
+    .lead {{ margin:0 0 32px; color:var(--muted); text-wrap:pretty; }}
+    .who {{ display:grid; gap:1px; width:100%; margin:0 0 24px; overflow:hidden; border:1px solid var(--line); border-radius:8px; background:var(--line); }}
+    .who div {{ display:flex; justify-content:space-between; gap:16px; padding:12px 16px; background:var(--surface); }}
+    .who dt {{ color:var(--muted); }}
+    .who dd {{ margin:0; font-weight:700; text-align:right; overflow-wrap:anywhere; min-width:0; }}
     form {{ width:100%; margin:0; }}
-    button,.button {{ display:inline-flex; align-items:center; justify-content:center; width:100%; min-height:52px; padding:12px 24px; border:0; border-radius:999px; color:#241a3f; background:linear-gradient(180deg,#fff0cc,var(--moon)); box-shadow:0 6px 24px rgba(255,226,163,.18); font:800 17px "Nunito",system-ui,sans-serif; text-decoration:none; cursor:pointer; transition:transform .15s ease; }}
-    button:hover,.button:hover {{ transform:translateY(-2px); }}
-    :focus-visible {{ outline:3px solid var(--moon); outline-offset:4px; }}
-    a {{ color:var(--lavender); }}
-    .fine {{ margin:18px 0 0; color:var(--quiet); font-size:14px; }}
+    button,.button {{ display:inline-flex; align-items:center; justify-content:center; width:100%; min-height:54px; padding:10px 24px; border:2px solid var(--accent); border-radius:8px; color:var(--on-accent); background:var(--accent); font:700 22px/1 "Big Shoulders","Arial Narrow",sans-serif; letter-spacing:.01em; text-decoration:none; cursor:pointer; transition:background-color .12s ease, border-color .12s ease; }}
+    button:hover,.button:hover {{ background:var(--accent-hover); border-color:var(--accent-hover); }}
+    button:active,.button:active {{ translate:0 1px; }}
+    :focus-visible {{ outline:3px solid var(--moon); outline-offset:3px; }}
+    a {{ color:var(--text); text-decoration-color:var(--lilac); text-underline-offset:.2em; }}
+    a:hover {{ text-decoration-thickness:2px; }}
+    .fine {{ margin:20px 0 0; color:var(--quiet); font-size:14px; }}
     strong {{ color:var(--text); }}
-    footer {{ color:var(--quiet); font-size:14px; }}
-    footer a {{ color:var(--quiet); margin-left:14px; }}
+    footer {{ width:min(460px,100%); color:var(--quiet); font-size:14px; }}
+    footer a {{ display:inline-block; margin-left:16px; padding-block:10px; color:var(--muted); }}
     @media (prefers-reduced-motion:reduce) {{ * {{ transition:none!important; animation:none!important; }} }}
   </style>
 </head>
