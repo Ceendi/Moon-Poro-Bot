@@ -11,6 +11,17 @@ readonly UV="/opt/moon-poro-deploy-tools/bin/uv"
 readonly UV_RUNTIME="/opt/moon-poro-prod-runtime"
 readonly DEPLOYED_COMMIT_FILE="$UV_RUNTIME/deployed-commit"
 readonly EXPECTED_REMOTE="https://github.com/Ceendi/Moon-Poro-Bot.git"
+readonly SERVICE_USER="moon-poro-prod"
+
+assume_yes=false
+case "${1:-}" in
+    "") ;;
+    --yes) assume_yes=true ;;
+    *)
+        echo "Usage: deploy-moon-poro-prod [--yes]" >&2
+        exit 1
+        ;;
+esac
 
 if ((EUID != 0)); then
     echo "Run this deployment as root." >&2
@@ -79,6 +90,25 @@ if [[ "$current_commit" == "$target_commit" ]]; then
 elif ! git -C "$REPOSITORY" merge-base --is-ancestor "$current_commit" "$target_commit"; then
     echo "Refusing non-fast-forward deployment: $current_commit -> $target_commit" >&2
     exit 1
+else
+    # Everything on origin/master runs as root below, so show what is about to
+    # run and let the operator stop a commit they do not recognise.
+    echo "Commits to deploy ($current_commit -> $target_commit):"
+    git -C "$REPOSITORY" log --oneline --no-decorate "$current_commit..$target_commit"
+    if [[ -n "$(git -C "$REPOSITORY" diff --name-only "$current_commit" "$target_commit" -- deploy/)" ]]; then
+        echo "Files in deploy/ changed; run install-prod-automation.sh after this deployment."
+    fi
+    if [[ "$assume_yes" != true ]]; then
+        if [[ ! -t 0 ]]; then
+            echo "No terminal to confirm; rerun with --yes after checking the commits." >&2
+            exit 1
+        fi
+        read -r -p "Deploy these commits? [y/N] " answer
+        if [[ "$answer" != [yY] ]]; then
+            echo "Deployment cancelled; production was not changed."
+            exit 1
+        fi
+    fi
 fi
 
 if ! systemctl start "$BACKUP_SERVICE"; then
@@ -111,9 +141,12 @@ if [[ "$rso_enabled" == true ]]; then
     systemctl stop "$RSO_SERVICE"
 fi
 systemctl stop "$SERVICE"
+# Migrations run as the bot's system account: it can read the env file, and
+# the database login in it owns the schema, so new code never needs root here.
 if ! (
     cd -- "$REPOSITORY"
-    PYTHONDONTWRITEBYTECODE=1 "$REPOSITORY/.venv/bin/python" -m moon_poro.migrate \
+    runuser -u "$SERVICE_USER" -- env PYTHONDONTWRITEBYTECODE=1 \
+        "$REPOSITORY/.venv/bin/python" -m moon_poro.migrate \
         --env-file /etc/moon-poro/prod-bot.env
 ); then
     echo "Database migration failed; Moon Poro services remain stopped to protect data." >&2
