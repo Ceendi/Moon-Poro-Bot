@@ -5,6 +5,8 @@ After=network-online.target postgresql-moon-poro-prod.service
 Requires=postgresql-moon-poro-prod.service
 StartLimitIntervalSec=300
 StartLimitBurst=3
+# Only after systemd gives up on restarts; a deploy or reboot stop is not a failure.
+OnFailure=moon-poro-prod-alert@%n.service
 
 [Service]
 Type=simple

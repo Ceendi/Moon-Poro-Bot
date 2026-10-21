@@ -68,7 +68,9 @@ bo Debian 12 ma Caddy 2.6 z ograniczonym wsparciem bezpieczeństwa. Przed podmia
 `unattended-upgrades` codziennie instaluje poprawki Debiana, PostgreSQL z PGDG, agentów Google i
 Caddy (`/etc/apt/apt.conf.d/52moon-poro-unattended-upgrades`). Nowa główna wersja PostgreSQL nie
 przyjdzie sama, bo pakiety `postgresql`, `postgresql-client` i `postgresql-contrib` są wstrzymane.
-Aktualizacja PostgreSQL restartuje bazę, a bot i callback po chwili łączą się z nią ponownie.
+Wstrzymany jest też `google-cloud-cli`: nic na VM go nie używa, a jego aktualizacja tak obciąża
+e2-micro, że bot traci na chwilę połączenie z bazą. Aktualizacja PostgreSQL restartuje bazę, a bot
+i callback po chwili łączą się z nią ponownie.
 
 Gdy aktualizacja wymaga restartu (np. nowe jądro), VM restartuje się o 04:45 UTC, po codziennym
 backupie. Bot, callback i Caddy startują same. Ostatnie aktualizacje:
@@ -128,7 +130,10 @@ journalctl -u moon-poro-prod-restore-test.service -n 20
 ### Powiadomienia o błędach
 
 Gdy codzienny backup, backup przed wdrożeniem, kopia w Cloud Storage albo test odtworzenia skończy
-się błędem, `OnFailure=` uruchamia `moon-poro-prod-alert@<jednostka>.service`. Ta jednostka
+się błędem, `OnFailure=` uruchamia `moon-poro-prod-alert@<jednostka>.service`. To samo dzieje się,
+gdy bot albo callback RSO padnie kilka razy z rzędu i systemd przestanie go uruchamiać (bot: 3 razy,
+callback: 5 razy w ciągu 5 minut). Zatrzymanie przy wdrożeniu albo restarcie VM nie jest błędem i
+nie wysyła alertu. Ta jednostka
 wysyła przez webhook Discorda krótką wiadomość: co się nie udało, nazwę jednostki, czas i
 polecenie `journalctl`. Nie wysyła logów. Oznacza tylko osobę podaną w
 `DISCORD_ALERT_MENTION_USER_ID`, nigdy `@everyone` ani roli; bez tej linii nikogo nie oznacza.
@@ -136,7 +141,8 @@ Dopóki nie ma pliku env, alert jest pomijany.
 
 Jednorazowa konfiguracja:
 
-1. Na kanale moderacji: Ustawienia kanału, Integracje, Webhooki, nowy webhook. Skopiuj jego adres.
+1. Na prywatnym kanale, który widzisz tylko Ty (albo na kanale moderacji): Ustawienia kanału,
+   Integracje, Webhooki, nowy webhook. Skopiuj jego adres.
 2. Plik `/etc/moon-poro/prod-alert.env` (`root:root`, `0600`) z linią
    `DISCORD_ALERT_WEBHOOK_URL=<adres webhooka>`. Adres trzymaj też w menedżerze haseł; każdy, kto
    go zna, może pisać na tym kanale.

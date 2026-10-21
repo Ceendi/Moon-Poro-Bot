@@ -119,7 +119,9 @@ systemctl restart nftables
 
 # Debian's default covers only Debian packages. PostgreSQL (PGDG), the Google
 # guest agents and Caddy update on their own too; the PostgreSQL metapackages
-# stay held so a new major version never arrives unattended. A kernel update
+# stay held so a new major version never arrives unattended. google-cloud-cli
+# is held as well: nothing on the VM uses it, and its upgrade loads the
+# e2-micro hard enough to time out database connections. A kernel update
 # reboots the VM at 04:45 UTC, after the daily backup (04:15 plus up to 15 min).
 cat > /etc/apt/apt.conf.d/52moon-poro-unattended-upgrades <<'APT'
 Unattended-Upgrade::Origins-Pattern {
@@ -131,6 +133,7 @@ Unattended-Upgrade::Package-Blacklist {
 	"postgresql$";
 	"postgresql-client$";
 	"postgresql-contrib$";
+	"google-cloud-cli";
 };
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "04:45";
