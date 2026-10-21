@@ -14,6 +14,8 @@ case "$UNIT" in
     moon-poro-prod-pre-deploy-backup.service) title="backup przed wdrożeniem się nie udał" ;;
     moon-poro-prod-offsite-backup.service) title="kopia w Cloud Storage się nie udała" ;;
     moon-poro-prod-restore-test.service) title="test odtworzenia backupu się nie udał" ;;
+    moon-poro-prod.service) title="bot przestał działać" ;;
+    moon-poro-prod-rso.service) title="logowanie Riot na stronie przestało działać" ;;
     test) title="testowe powiadomienie, nic się nie stało" ;;
     *)
         echo "Usage: $0 {moon-poro-prod-*.service|test}" >&2
@@ -33,6 +35,13 @@ if [[ "$UNIT" == test ]]; then
 else
     message="⚠️ Moon Poro: $title"$'\n'"Jednostka: \`$UNIT\`"$'\n'"Czas: $now"
     message+=$'\n'"Sprawdź: \`journalctl -u $UNIT -n 50\`"
+    case "$UNIT" in
+        moon-poro-prod.service | moon-poro-prod-rso.service)
+            # systemd gave up after repeated crashes; it stays down until started again.
+            message+=$'\n'"Systemd przestał go uruchamiać po kilku nieudanych próbach."
+            message+=$'\n'"Po naprawie: \`sudo systemctl restart $UNIT\`"
+            ;;
+    esac
 fi
 
 # A bad ID only drops the ping; the alert itself still goes out.

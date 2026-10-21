@@ -180,6 +180,8 @@ def test_unattended_upgrades_cover_third_party_packages_and_reboot_after_backup(
     # A new PostgreSQL major version must never be installed unattended.
     for metapackage in ("postgresql", "postgresql-client", "postgresql-contrib"):
         assert f'"{metapackage}$";' in config
+    # Nothing on the VM uses gcloud, and its upgrade starves the e2-micro.
+    assert '"google-cloud-cli";' in config
     assert 'Unattended-Upgrade::Automatic-Reboot "true";' in config
     reboot = re.search(r'Automatic-Reboot-Time "(\d\d):(\d\d)";', config)
     timer = (ROOT / "deploy/moon-poro-prod-backup.timer").read_text(encoding="utf-8")
@@ -259,6 +261,21 @@ def test_backup_units_send_an_alert_on_failure() -> None:
     assert "/usr/local/sbin/alert-moon-poro-prod-failure" in installer
     assert "/etc/systemd/system/moon-poro-prod-alert@.service" in installer
     assert "enable --now moon-poro-prod-alert" not in installer
+
+
+def test_bot_and_rso_alert_only_after_systemd_gives_up_restarting() -> None:
+    for name, burst in (("moon-poro-prod.service", 3), ("moon-poro-prod-rso.service", 5)):
+        unit = (ROOT / "deploy" / name).read_text(encoding="utf-8")
+        unit_section = unit.split("[Service]", 1)[0]
+        assert "OnFailure=moon-poro-prod-alert@%n.service\n" in unit_section, name
+        # Without a start limit systemd restarts forever and never reports a failure.
+        assert "StartLimitIntervalSec=300\n" in unit_section, name
+        assert f"StartLimitBurst={burst}\n" in unit_section, name
+        assert "Restart=on-failure\n" in unit, name
+    script = (ROOT / "deploy/alert-prod-failure.sh").read_text(encoding="utf-8")
+    for name in ("moon-poro-prod.service", "moon-poro-prod-rso.service"):
+        assert f"    {name}) title=" in script
+    assert "sudo systemctl restart $UNIT" in script
 
 
 def test_failure_alert_keeps_the_webhook_off_command_lines_and_pings_one_person() -> None:

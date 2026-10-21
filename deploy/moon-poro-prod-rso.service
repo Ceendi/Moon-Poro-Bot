@@ -2,6 +2,11 @@
 Description=Moon Poro Riot Sign On callback (production checkout)
 After=network-online.target postgresql.service moon-poro-prod.service
 Wants=network-online.target
+# The callback only crashes at start on bad settings or code, so after five
+# quick restarts systemd gives up and sends the alert instead of looping.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=moon-poro-prod-alert@%n.service
 
 [Service]
 Type=simple
