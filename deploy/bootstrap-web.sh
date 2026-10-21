@@ -22,7 +22,22 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates caddy nftables unattended-upgrades
+apt-get install -y --no-install-recommends ca-certificates curl gnupg nftables unattended-upgrades
+
+# Caddy is the only service open to the Internet. Debian 12 ships 2.6 with
+# limited security support for Go packages, so it comes from the official
+# Caddy repository instead. An existing /etc/caddy/Caddyfile is kept.
+CADDY_KEYRING=/usr/share/keyrings/caddy-stable-archive-keyring.gpg
+caddy_key="$(mktemp)"
+curl -fsSL -o "$caddy_key" https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+gpg --dearmor --yes -o "$CADDY_KEYRING" "$caddy_key"
+rm -f "$caddy_key"
+chmod 0644 "$CADDY_KEYRING"
+printf 'deb [signed-by=%s] %s any-version main\n' "$CADDY_KEYRING" \
+	https://dl.cloudsmith.io/public/caddy/stable/deb/debian \
+	> /etc/apt/sources.list.d/caddy-stable.list
+apt-get update
+apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold caddy
 
 # A small swap file prevents a transient memory spike from killing PostgreSQL
 # or the Discord bot after they are migrated onto this 1 GB VM.
@@ -101,6 +116,25 @@ NFT
 /usr/sbin/nft -c -f /etc/nftables.conf
 systemctl enable nftables >/dev/null
 systemctl restart nftables
+
+# Debian's default covers only Debian packages. PostgreSQL (PGDG), the Google
+# guest agents and Caddy update on their own too; the PostgreSQL metapackages
+# stay held so a new major version never arrives unattended. A kernel update
+# reboots the VM at 04:45 UTC, after the daily backup (04:15 plus up to 15 min).
+cat > /etc/apt/apt.conf.d/52moon-poro-unattended-upgrades <<'APT'
+Unattended-Upgrade::Origins-Pattern {
+	"site=apt.postgresql.org";
+	"site=packages.cloud.google.com";
+	"site=dl.cloudsmith.io";
+};
+Unattended-Upgrade::Package-Blacklist {
+	"postgresql$";
+	"postgresql-client$";
+	"postgresql-contrib$";
+};
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:45";
+APT
 
 systemctl enable unattended-upgrades >/dev/null
 systemctl start unattended-upgrades

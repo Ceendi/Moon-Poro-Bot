@@ -18,7 +18,7 @@ def test_legacy_archive_report_is_read_only_and_aggregated() -> None:
 def test_static_404_fallback_uses_error_handler_without_overriding_rso_headers() -> None:
     production = (ROOT / "deploy/Caddyfile").read_text(encoding="utf-8")
     assert "try_files {path} {path}/index.html =404" in production
-    # Status-code arguments need Caddy 2.8; the distro package is 2.6.
+    # Status-code arguments need Caddy 2.8; this form also parses on older Caddy.
     assert "handle_errors 404" not in production
     assert "@not_found expression `{err.status_code} == 404`" in production
     assert "rewrite * /404.html" in production
@@ -135,11 +135,60 @@ def test_production_deploy_stops_rso_before_migrations_and_restarts_it_after_the
     assert stop_rso < migrate < start_bot < start_rso
 
 
+def test_production_deploy_shows_commits_and_migrates_without_root() -> None:
+    script = (ROOT / "deploy/deploy-prod.sh").read_text(encoding="utf-8")
+    shown = script.index('log --oneline --no-decorate "$current_commit..$target_commit"')
+    confirm = script.index('read -r -p "Deploy these commits? [y/N] " answer')
+    backup = script.index('systemctl start "$BACKUP_SERVICE"')
+    merge = script.index('merge --ff-only "$target_commit"')
+    assert shown < confirm < backup < merge
+    # Without a terminal the operator has to say --yes explicitly.
+    assert "--yes) assume_yes=true ;;" in script
+    assert "if [[ ! -t 0 ]]; then" in script
+    assert 'readonly SERVICE_USER="moon-poro-prod"' in script
+    assert (
+        'runuser -u "$SERVICE_USER" -- env PYTHONDONTWRITEBYTECODE=1 \\\n'
+        '        "$REPOSITORY/.venv/bin/python" -m moon_poro.migrate'
+    ) in script
+    assert script.count("-m moon_poro.migrate") == 1
+
+
 def test_bootstrap_validates_caddyfile_before_installing_it() -> None:
     script = (ROOT / "deploy/bootstrap-web.sh").read_text(encoding="utf-8")
     validate = script.index('caddy validate --config "$CADDY_SOURCE"')
     install = script.index('"$CADDY_SOURCE" /etc/caddy/Caddyfile')
     assert validate < install
+
+
+def test_bootstrap_installs_caddy_from_its_signed_repository() -> None:
+    script = (ROOT / "deploy/bootstrap-web.sh").read_text(encoding="utf-8")
+    keyring = script.index('gpg --dearmor --yes -o "$CADDY_KEYRING"')
+    source = script.index("> /etc/apt/sources.list.d/caddy-stable.list")
+    install = script.index("-o Dpkg::Options::=--force-confold caddy")
+    validate = script.index('caddy validate --config "$CADDY_SOURCE"')
+    assert keyring < source < install < validate
+    assert "printf 'deb [signed-by=%s] %s any-version main\\n'" in script
+    assert "https://dl.cloudsmith.io/public/caddy/stable/deb/debian" in script
+    assert "unattended-upgrades caddy" not in script
+
+
+def test_unattended_upgrades_cover_third_party_packages_and_reboot_after_backup() -> None:
+    script = (ROOT / "deploy/bootstrap-web.sh").read_text(encoding="utf-8")
+    config = script.split("<<'APT'\n", 1)[1].split("\nAPT\n", 1)[0]
+    for site in ("apt.postgresql.org", "packages.cloud.google.com", "dl.cloudsmith.io"):
+        assert f'"site={site}";' in config
+    # A new PostgreSQL major version must never be installed unattended.
+    for metapackage in ("postgresql", "postgresql-client", "postgresql-contrib"):
+        assert f'"{metapackage}$";' in config
+    assert 'Unattended-Upgrade::Automatic-Reboot "true";' in config
+    reboot = re.search(r'Automatic-Reboot-Time "(\d\d):(\d\d)";', config)
+    timer = (ROOT / "deploy/moon-poro-prod-backup.timer").read_text(encoding="utf-8")
+    backup = re.search(r"OnCalendar=\*-\*-\* (\d\d):(\d\d):00", timer)
+    delay = re.search(r"RandomizedDelaySec=(\d+)m", timer)
+    assert reboot and backup and delay
+    reboot_minute = int(reboot[1]) * 60 + int(reboot[2])
+    latest_backup_start = int(backup[1]) * 60 + int(backup[2]) + int(delay[1])
+    assert reboot_minute >= latest_backup_start + 10
 
 
 def test_monthly_restore_test_runs_offline_and_keeps_backups_read_only() -> None:

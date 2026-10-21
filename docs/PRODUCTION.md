@@ -37,9 +37,12 @@ Po zielonym CI i scaleniu PR do `master`:
 sudo /usr/local/sbin/deploy-moon-poro-prod
 ```
 
-Skrypt odmawia przy lokalnych zmianach i aktualizacji innej niż fast-forward. Przed zmianą kodu
-robi zweryfikowany backup, potem zatrzymuje callback, uruchamia migracje, startuje bota, a na końcu
-callback. Zapisuje ostatni uruchomiony commit i bezpiecznie wznawia przerwane wdrożenie.
+Skrypt odmawia przy lokalnych zmianach i aktualizacji innej niż fast-forward. Najpierw pokazuje
+commity do wdrożenia i pyta o potwierdzenie (`y`). Sprawdź, czy znasz każdy z nich: wszystko z
+`master` działa potem na VM. Bez terminala, np. przez `gcloud compute ssh --command`, potwierdź
+flagą `--yes`. Przed zmianą kodu robi zweryfikowany backup, potem zatrzymuje callback, uruchamia
+migracje na koncie `moon-poro-prod` (nie jako root), startuje bota, a na końcu callback. Zapisuje
+ostatni uruchomiony commit i bezpiecznie wznawia przerwane wdrożenie.
 
 Gdy zmienią się pliki w `deploy/`, zainstaluj pomocników jeszcze raz:
 
@@ -55,9 +58,21 @@ wypisze polecenie restartu, a nowe ustawienia zadziałają po restarcie bota.
 Strony logowania Riot ładują z niej `/fonts/*` i `/moon-poro.png`, więc nowy build wgrywaj razem
 ze zmianami w kodzie RSO.
 
-**Caddy** pochodzi z pakietu Debiana (2.6). Przed podmianą `/etc/caddy/Caddyfile` uruchom
-`sudo caddy validate --config <plik> --adapter caddyfile`, a potem `sudo systemctl restart caddy`.
-`reload` nie działa, bo Caddyfile ma `admin off`.
+**Caddy** pochodzi z oficjalnego repozytorium Caddy (`/etc/apt/sources.list.d/caddy-stable.list`),
+bo Debian 12 ma Caddy 2.6 z ograniczonym wsparciem bezpieczeństwa. Przed podmianą
+`/etc/caddy/Caddyfile` uruchom `sudo caddy validate --config <plik> --adapter caddyfile`, a potem
+`sudo systemctl restart caddy`. `reload` nie działa, bo Caddyfile ma `admin off`.
+
+## Aktualizacje systemu
+
+`unattended-upgrades` codziennie instaluje poprawki Debiana, PostgreSQL z PGDG, agentów Google i
+Caddy (`/etc/apt/apt.conf.d/52moon-poro-unattended-upgrades`). Nowa główna wersja PostgreSQL nie
+przyjdzie sama, bo pakiety `postgresql`, `postgresql-client` i `postgresql-contrib` są wstrzymane.
+Aktualizacja PostgreSQL restartuje bazę, a bot i callback po chwili łączą się z nią ponownie.
+
+Gdy aktualizacja wymaga restartu (np. nowe jądro), VM restartuje się o 04:45 UTC, po codziennym
+backupie. Bot, callback i Caddy startują same. Ostatnie aktualizacje:
+`tail /var/log/unattended-upgrades/unattended-upgrades.log`.
 
 ## Kopie zapasowe
 
@@ -189,7 +204,8 @@ dalej synchronizuje role istniejących powiązań.
 Potrzebne: Debian 12, domena z rekordem `A` na stały adres IP, firewall GCP z dostępem z Internetu
 tylko do TCP 80 i 443 oraz SSH tylko przez IAP. Porty 5433 i 8080 nie mogą być publiczne.
 
-1. `sudo deploy/bootstrap-web.sh <site-dist> <Caddyfile>`: pakiety, swap, SSH, nftables i Caddy.
+1. `sudo deploy/bootstrap-web.sh <site-dist> <Caddyfile>`: pakiety, Caddy z oficjalnego
+   repozytorium, swap, SSH, nftables i automatyczne aktualizacje.
 2. PostgreSQL 18 z repozytorium PGDG i klaster `18/moon-poro-prod` na porcie 5433
    (`pg_createcluster --port 5433 18 moon-poro-prod`). Login bota (`moon_poro_prod`) musi być
    właścicielem schematu, bo bot uruchamia migracje przy starcie.
