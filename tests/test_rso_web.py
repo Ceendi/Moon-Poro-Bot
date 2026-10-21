@@ -419,7 +419,7 @@ async def test_landing_identifies_discord_target_before_riot_button(
         assert "<dd>ID 456</dd>" in document
         assert "<dd>ID 123</dd>" in document
     assert 'src="/moon-poro.png"' in document
-    assert "/fonts/nunito-latin.woff2" in document
+    assert "/fonts/big-shoulders-latin.woff2" in document
 
 
 async def test_complete_browser_flow_from_landing_to_result(

@@ -1,0 +1,38 @@
+---
+interface Props {
+  caption: string;
+}
+
+const { caption } = Astro.props;
+// Order and names exactly as on the server, from the top role down.
+const ranks = [
+  ["challenger", "Challenger"],
+  ["grandmaster", "GrandMaster"],
+  ["master", "Master"],
+  ["diamond", "Diamond"],
+  ["emerald", "Emerald"],
+  ["platinum", "Platinum"],
+  ["gold", "Gold"],
+  ["silver", "Silver"],
+  ["bronze", "Bronze"],
+  ["iron", "Iron"],
+  ["unranked", "Unranked"],
+];
+---
+
+<figure class="ladder">
+  <div class="ladder-steps">
+    <ol>
+      {ranks.map(([key, name]) => <li class={key}>{name}</li>)}
+    </ol>
+    <svg class="ladder-moon" viewBox="0 0 100 100" width="112" height="112" aria-hidden="true">
+      <circle class="moon-disc" cx="50" cy="50" r="50" />
+      <circle class="moon-crater" cx="33" cy="34" r="9" />
+      <circle class="moon-crater" cx="66" cy="27" r="5" />
+      <circle class="moon-crater" cx="68" cy="62" r="12" />
+      <circle class="moon-crater" cx="44" cy="74" r="4" />
+    </svg>
+    <span class="ladder-poro" aria-hidden="true"><img src="/moon-poro.png" alt="" width="84" height="84" /></span>
+  </div>
+  <figcaption>{caption}</figcaption>
+</figure>

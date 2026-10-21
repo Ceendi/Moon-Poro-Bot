@@ -32,6 +32,38 @@ Nazwy po angielsku, dokładnie jak na serwerze, w tej kolejności i z tymi kolor
 | Iron | `#8b8078` |
 | Unranked | `#9f9e9b` |
 
+## Wygląd strony
+
+Motyw to śliwkowa noc, biel i złoty księżyc, a na stronie głównej wspinaczka po rangach. Ten sam wygląd mają strona i strony logowania Riot w `moon_poro/rso_web.py`.
+
+- Logo Moon Poro (`/moon-poro.png`) zostaje na każdej stronie.
+- Kolory mają nazwy ról (`--bg`, `--text`, `--accent`...) w `site/src/styles/global.css`. W stronach i komponentach nie wpisuj gołych kolorów, tylko te zmienne.
+
+  | Rola | Kolor | Do czego |
+  |---|---|---|
+  | `--bg` | `#1c1226` | tło |
+  | `--surface` | `#2a1d38` | wyróżnione pola, kod |
+  | `--line` | `#3d2e4f` | linie podziału |
+  | `--line-strong` | `#8d7aa8` | ramka drugiego przycisku (min. 3:1 do tła) |
+  | `--text` | `#f7f3fb` | tekst i nagłówki |
+  | `--muted` | `#c4b6d6` | tekst drugiego planu |
+  | `--quiet` | `#9d8fb0` | stopka, daty |
+  | `--lilac` | `#a98bd0` | podkreślenia linków, znaczniki list, aktywna strona w menu |
+  | `--accent` | `#f7f3fb` | główny przycisk (biały, tekst `--on-accent`) |
+  | `--band` | `#f7f3fb` | jasny pas z najważniejszą treścią |
+  | `--moon` | `#f6c04a` | księżyc, fazy księżyca i obwódka fokusu |
+
+- Każda nowa para kolorów musi mieć kontrast min. 4,5:1 dla tekstu i 3:1 dla dużego tekstu i ramek (WCAG 2.2 AA).
+- Odstępy tylko ze skali 8px (`--space-1` do `--space-8`). Od nagłówka do treści 48px, między sekcjami 96px.
+- Klikalne elementy mają min. 44px wysokości (menu, stopka, przyciski). Na jednym widoku jest jeden wypełniony przycisk.
+
+- Fonty: Big Shoulders do nagłówków, przycisków i nazw rang, Atkinson Hyperlegible Next do tekstu. Pliki są w `site/public/fonts` razem z licencjami OFL. Każdy font musi mieć polskie znaki (Fredoka nie ma ą, ę, ż). W Big Shoulders cyfra 1 wygląda jak „l”, więc numerowane nagłówki w politykach mają font tekstu.
+- Najważniejszy element to drabinka rang na górze strony głównej (`site/src/components/RankLadder.astro`). Przy wejściu schodki wjeżdżają od dołu, Poro skacze po nich na szczyt i wschodzi księżyc. Po najechaniu na rangę Poro przeskakuje na jej schodek. Wszystkie schodki mają tę samą wysokość i odstęp, bo od tego zależy, gdzie ląduje Poro. Reszta strony ma być spokojna.
+- Bez gradientów, poświat, cieni i kształtu pigułki. Poza drabinką ruch jest tylko w odpowiedzi na działanie (najechanie, rozwinięcie pytania).
+- Zaokrąglenia zależą od roli: 4px dla rang i kodu, 8px dla przycisków i ramek.
+- Kroki oznaczamy fazami księżyca (od nowiu do pełni), nie numerami w kółkach. Pytania mają sierp, gdy są zwinięte, i pełnię, gdy są rozwinięte.
+- Nie kopiujemy wyglądu okien Discorda. Przyciski Discorda pokazujemy tylko jako małe etykiety, żeby było wiadomo, co kliknąć.
+
 ## Strona i polityki muszą zgadzać się z kodem
 
 - Każde zdanie na stronie, w polityce prywatności i w warunkach sprawdzaj z kodem. Jeśli zmieniasz zapisywane dane, ciasteczka albo czas przechowywania, popraw też politykę (PL i EN).
@@ -41,7 +73,6 @@ Nazwy po angielsku, dokładnie jak na serwerze, w tej kolejności i z tymi kolor
   - logi wyjścia, wyrzucenia i bana z serwera są włączone;
   - ochrona przed multikontami jest wyłączona, ale admin może ją włączyć komendą `/multikonta`.
 - Strona działa pod ścisłym CSP z Caddy (bez inline skryptów, stylów i fontów `data:`). Dlatego w `astro.config.mjs` są `inlineStylesheets: "never"` i `assetsInlineLimit: 0`.
-- Font to Nunito z `site/public/fonts`. Font musi mieć polskie znaki (Fredoka nie ma ą, ę, ż).
 
 ## Git i PR
 

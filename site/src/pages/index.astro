@@ -1,5 +1,6 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
+import RankLadder from "../components/RankLadder.astro";
 import { siteConfig } from "../config";
 ---
 
@@ -13,56 +14,36 @@ import { siteConfig } from "../config";
         <a class="button ghost" href="#jak">Jak się zweryfikować</a>
       </div>
     </div>
-    <div class="hero-visual" aria-hidden="true">
-      <div class="moon"></div>
-      <img class="poro" src="/moon-poro.png" alt="" width="128" height="128" />
-      <span class="sparkle one"></span>
-      <span class="sparkle two"></span>
-      <span class="sparkle three"></span>
-    </div>
+    <RankLadder caption="Każda ranga ma swoją rolę. Jeśli nie masz jeszcze rangi w Solo/Duo, dostaniesz rolę Unranked." />
   </section>
 
-  <section class="section" id="jak">
+  <section class="section steps-section" id="jak">
     <h2>Jak się zweryfikować</h2>
     <ol class="steps">
       <li>
+        <span class="phase phase-1" aria-hidden="true"></span>
         <h3>Kliknij „Zweryfikuj konto”</h3>
         <p>Przycisk jest pod panelem weryfikacji na serwerze. Bot wyśle Ci prywatny link.</p>
       </li>
       <li>
+        <span class="phase phase-2" aria-hidden="true"></span>
         <h3>Otwórz link</h3>
         <p>Kliknij „Zaloguj się przez Riot”. Sprawdź, czy strona pokazuje Twoje konto Discord, i kliknij „Przejdź do logowania Riot”. Link działa tylko raz i przez 10 minut.</p>
       </li>
       <li>
+        <span class="phase phase-3" aria-hidden="true"></span>
         <h3>Zaloguj się na konto Riot</h3>
         <p>Logujesz się na stronie Riot Games tym samym kontem, co w grze. Riot przekazuje nam Twoje Riot ID i region.</p>
       </li>
       <li>
+        <span class="phase phase-4" aria-hidden="true"></span>
         <h3>Gotowe</h3>
         <p>Wróć do Discorda. Masz już role „Zweryfikowany” i „Użytkownik” oraz role regionu i rangi. Jeśli Riot akurat nie odpowiada, rolę rangi bot doda trochę później.</p>
       </li>
     </ol>
   </section>
 
-  <section class="section">
-    <h2>Każda ranga ma swoją rolę</h2>
-    <p class="section-lead">Od Irona do Challengera. Jeśli nie masz jeszcze rangi w Solo/Duo, dostaniesz rolę Unranked.</p>
-    <ul class="ranks">
-      <li class="challenger">Challenger</li>
-      <li class="grandmaster">GrandMaster</li>
-      <li class="master">Master</li>
-      <li class="diamond">Diamond</li>
-      <li class="emerald">Emerald</li>
-      <li class="platinum">Platinum</li>
-      <li class="gold">Gold</li>
-      <li class="silver">Silver</li>
-      <li class="bronze">Bronze</li>
-      <li class="iron">Iron</li>
-      <li class="unranked">Unranked</li>
-    </ul>
-  </section>
-
-  <section class="section">
+  <section class="section features-section">
     <h2>Po weryfikacji</h2>
     <ul class="features">
       <li>
@@ -80,9 +61,9 @@ import { siteConfig } from "../config";
     </ul>
   </section>
 
-  <section class="section">
-    <div class="callout">
-      <img src="/moon-poro.png" alt="" width="72" height="72" />
+  <section class="band">
+    <div class="band-inner">
+      <img src="/moon-poro.png" alt="" width="104" height="104" />
       <div>
         <h2>Hasło wpisujesz tylko u Riot</h2>
         <p>Logowanie odbywa się na stronie riotgames.com. Moon Poro nie widzi Twojego hasła, a bot nigdy nie zapyta o nie na Discordzie. Poro woli Poro-Snaxy. Jeśli ktoś prosi Cię o hasło „w imieniu Moon Poro”, to oszustwo. Zgłoś to moderacji.</p>
@@ -92,7 +73,7 @@ import { siteConfig } from "../config";
     </div>
   </section>
 
-  <section class="section">
+  <section class="section faq-section">
     <h2>Częste pytania</h2>
     <div class="faq">
       <details>

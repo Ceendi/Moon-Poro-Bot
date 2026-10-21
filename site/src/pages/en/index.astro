@@ -1,5 +1,6 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import RankLadder from "../../components/RankLadder.astro";
 import { siteConfig } from "../../config";
 ---
 
@@ -13,56 +14,36 @@ import { siteConfig } from "../../config";
         <a class="button ghost" href="#how">How to verify</a>
       </div>
     </div>
-    <div class="hero-visual" aria-hidden="true">
-      <div class="moon"></div>
-      <img class="poro" src="/moon-poro.png" alt="" width="128" height="128" />
-      <span class="sparkle one"></span>
-      <span class="sparkle two"></span>
-      <span class="sparkle three"></span>
-    </div>
+    <RankLadder caption="Every rank has its role. If you're not ranked in Solo/Duo yet, you get the Unranked role." />
   </section>
 
-  <section class="section" id="how">
+  <section class="section steps-section" id="how">
     <h2>How to verify</h2>
     <ol class="steps">
       <li>
+        <span class="phase phase-1" aria-hidden="true"></span>
         <h3>Click “Zweryfikuj konto”</h3>
         <p>That's “Verify account”, under the verification panel on the server. The bot sends you a private link.</p>
       </li>
       <li>
+        <span class="phase phase-2" aria-hidden="true"></span>
         <h3>Open the link</h3>
         <p>Click “Zaloguj się przez Riot” (“Sign in with Riot”), check that the page shows your Discord account, then click “Przejdź do logowania Riot” (“Go to Riot sign-in”). The link works once, for 10 minutes.</p>
       </li>
       <li>
+        <span class="phase phase-3" aria-hidden="true"></span>
         <h3>Sign in to your Riot account</h3>
         <p>You sign in on the Riot Games website with the same account you play on. Riot shares your Riot ID and region with us.</p>
       </li>
       <li>
+        <span class="phase phase-4" aria-hidden="true"></span>
         <h3>Done</h3>
         <p>Go back to Discord. You now have the “Zweryfikowany” (Verified) and “Użytkownik” (Member) roles plus region and rank roles. If Riot isn't responding right then, the bot adds the rank role a bit later.</p>
       </li>
     </ol>
   </section>
 
-  <section class="section">
-    <h2>Every rank has its role</h2>
-    <p class="section-lead">From Iron to Challenger. If you're not ranked in Solo/Duo yet, you get the Unranked role.</p>
-    <ul class="ranks">
-      <li class="challenger">Challenger</li>
-      <li class="grandmaster">GrandMaster</li>
-      <li class="master">Master</li>
-      <li class="diamond">Diamond</li>
-      <li class="emerald">Emerald</li>
-      <li class="platinum">Platinum</li>
-      <li class="gold">Gold</li>
-      <li class="silver">Silver</li>
-      <li class="bronze">Bronze</li>
-      <li class="iron">Iron</li>
-      <li class="unranked">Unranked</li>
-    </ul>
-  </section>
-
-  <section class="section">
+  <section class="section features-section">
     <h2>After verifying</h2>
     <ul class="features">
       <li>
@@ -80,9 +61,9 @@ import { siteConfig } from "../../config";
     </ul>
   </section>
 
-  <section class="section">
-    <div class="callout">
-      <img src="/moon-poro.png" alt="" width="72" height="72" />
+  <section class="band">
+    <div class="band-inner">
+      <img src="/moon-poro.png" alt="" width="104" height="104" />
       <div>
         <h2>Your password goes to Riot only</h2>
         <p>You sign in on riotgames.com. Moon Poro never sees your password, and the bot will never ask for it on Discord. Poros prefer Poro-Snax. If someone asks for your password “on behalf of Moon Poro”, it's a scam. Report it to the moderators.</p>
@@ -92,7 +73,7 @@ import { siteConfig } from "../../config";
     </div>
   </section>
 
-  <section class="section">
+  <section class="section faq-section">
     <h2>FAQ</h2>
     <div class="faq">
       <details>
