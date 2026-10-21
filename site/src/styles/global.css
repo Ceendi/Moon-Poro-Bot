@@ -151,8 +151,9 @@
   .ladder-moon { position: absolute; top: calc(var(--poro) * -1 - 40px); left: calc(60cqw + 20px); width: var(--moon-size); height: var(--moon-size); }
   .ladder-moon .moon-disc { fill: var(--moon); }
   .ladder-moon .moon-crater { fill: var(--moon-shade); }
-  /* --at is the rung the poro stands on: 0 is Challenger, 10 is Unranked. */
-  .ladder-poro { position: absolute; top: calc(var(--poro) * -1); left: calc(60cqw + 24px - var(--poro) / 2); width: var(--poro); height: var(--poro); translate: calc(var(--at) * -6cqw) calc(var(--at) * var(--pitch)); transition: --at 1200ms cubic-bezier(0.4, 0, 0.3, 1) 500ms; pointer-events: none; }
+  /* --at is the rung the poro stands on: 0 is Challenger, 10 is Unranked.
+     will-change gives the poro its own layer; repainting it on the background left a faint trail of its ring along the stairs. */
+  .ladder-poro { position: absolute; top: calc(var(--poro) * -1); left: calc(60cqw + 24px - var(--poro) / 2); width: var(--poro); height: var(--poro); translate: calc(var(--at) * -6cqw) calc(var(--at) * var(--pitch)); transition: --at 1200ms cubic-bezier(0.4, 0, 0.3, 1) 500ms; pointer-events: none; will-change: translate; }
   .ladder-poro img { width: 100%; height: 100%; border-radius: 50%; }
   /* Point at a rank and the poro hops onto it quickly. Back at the top it climbs slowly, after a short pause. */
   .ladder-steps:has(li:hover) .ladder-poro { transition: --at 280ms cubic-bezier(0.3, 0.7, 0.3, 1); }
