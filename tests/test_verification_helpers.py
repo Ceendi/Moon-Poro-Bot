@@ -21,6 +21,7 @@ from moon_poro.cogs.verification import (
 from moon_poro.rank_refresh import RankRefreshDecision
 from moon_poro.repositories import VerificationLinkIdentity
 from moon_poro.riot import RiotAPINotFound, RiotAuthBreaker
+from moon_poro.verification_confirmations import ConfirmationResponses
 from moon_poro.verification_sessions import CreatedVerificationSession
 
 
@@ -378,9 +379,11 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
             rso_base_url="https://bot.example.com",
         ),
         verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_confirmations=ConfirmationResponses(),
         verification_sessions=SimpleNamespace(
             create=AsyncMock(
                 return_value=CreatedVerificationSession(
+                    session_id=7,
                     token="a" * 43,
                     expires_at=verification.discord.utils.utcnow(),
                 )
@@ -418,7 +421,11 @@ async def test_verification_start_creates_one_time_rso_link() -> None:
         "Moon Poro nie zobaczy Twojego hasła. Link jest przypisany do Twojego konta Discord i wygaśnie za 10 min. Nie przekazuj go nikomu."
     )
     assert "token" not in sent_embed.description.lower()
+    assert sent_embed.footer.text == "Po zalogowaniu potwierdzenie pojawi się pod tą wiadomością."
     assert interaction.edit_original_response.await_args.kwargs["content"] is None
+    pending = bot.verification_confirmations.get(7)
+    assert pending is not None and pending.interaction is interaction
+    assert pending.ready.is_set()
 
 
 async def test_verification_start_is_rate_limited() -> None:
@@ -436,9 +443,11 @@ async def test_verification_start_is_rate_limited() -> None:
             rso_base_url="https://bot.example.com",
         ),
         verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_confirmations=ConfirmationResponses(),
         verification_sessions=SimpleNamespace(
             create=AsyncMock(
                 return_value=CreatedVerificationSession(
+                    session_id=7,
                     token="a" * 43,
                     expires_at=verification.discord.utils.utcnow(),
                 )
@@ -1447,9 +1456,8 @@ async def test_rso_completion_uses_shared_snapshot_and_role_sync_pipeline(
         expected_created_at=link.created_at,
     )
     cog._publish_rso_audit.assert_awaited_once_with(record)
-    member.send.assert_awaited_once_with(
-        "Twoje konto Riot jest połączone. Na serwerze **Test** masz już role regionu i rangi."
-    )
+    # The confirmation is queued by publish_audit and sent by its own worker.
+    member.send.assert_not_awaited()
 
 
 async def test_rso_completion_retries_if_rank_worker_owns_the_snapshot(
@@ -1620,7 +1628,7 @@ async def test_rso_discord_retry_reuses_cached_snapshot_without_second_riot_call
     assert verifications.retry_rank_role_sync.await_count == (failure_stage == "roles")
     sessions.retry_discord.assert_awaited_once()
     assert cog._publish_rso_audit.await_count == (1 if failure_stage == "roles" else 2)
-    member.send.assert_awaited_once()
+    member.send.assert_not_awaited()
 
 
 async def test_cancelled_rso_completion_uses_versioned_marker_compensation(
@@ -1890,9 +1898,7 @@ async def test_riot_outage_completes_verification_without_a_rank(
     cog.bot.verification_sessions.retry_discord.assert_not_awaited()
     verifications.schedule_rank_refresh_now.assert_awaited_once_with(123, 101)
     cog._publish_rso_audit.assert_awaited_once_with(record)
-    message = member.send.await_args.args[0]
-    assert "rolę rangi bot doda" in message
-    assert "\u2014" not in message and "\u2013" not in message
+    member.send.assert_not_awaited()
 
 
 async def test_rankless_completion_keeps_the_snapshot_fence(
@@ -2156,9 +2162,11 @@ async def test_rso_start_clears_an_orphan_verified_role_and_continues(
             rso_base_url="https://bot.example.com",
         ),
         verifications=SimpleNamespace(get_by_user=AsyncMock(return_value=None)),
+        verification_confirmations=ConfirmationResponses(),
         verification_sessions=SimpleNamespace(
             create=AsyncMock(
                 return_value=CreatedVerificationSession(
+                    session_id=7,
                     token="a" * 43,
                     expires_at=verification.discord.utils.utcnow(),
                 )

@@ -20,6 +20,7 @@ from moon_poro.cogs.verification_legacy import (
     _riot_id_validation_error,
 )
 from moon_poro.riot import RiotAPIUnavailable, RiotAuthBreaker
+from moon_poro.verification_confirmations import ConfirmationResponses
 from moon_poro.verification_sessions import LinkReservationResult
 
 
@@ -59,7 +60,8 @@ def _modal_bot() -> SimpleNamespace:
             verification_cooldown=30,
             verification_icon_check_cooldown=5,
             view_timeout=180,
-        )
+        ),
+        verification_confirmations=ConfirmationResponses(),
     )
 
 
@@ -1122,6 +1124,7 @@ async def test_legacy_confirmation_reserves_durable_work_and_fences_snapshot_gen
             rank_refresh_rollout_percent=0,
         ),
         verifications=verifications,
+        verification_confirmations=ConfirmationResponses(),
         verification_sessions=SimpleNamespace(
             get_by_start_token=AsyncMock(side_effect=[record, reserved_record]),
             reserve_link=AsyncMock(side_effect=reserve_link),
@@ -1174,7 +1177,9 @@ async def test_legacy_confirmation_reserves_durable_work_and_fences_snapshot_gen
     )
     if replacement is None:
         record_leagues.assert_awaited_once_with(bot, link, leagues, expected_claimed_at=None)
-        assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
+        assert "kończy nadawanie ról" in followup.send.await_args.args[0]
+        # The followup confirmation may now go below this reply.
+        assert bot.verification_confirmations.get(1).ready.is_set()
     elif replacement in ("newer_snapshot", "snapshot_after_read"):
         if replacement == "newer_snapshot":
             record_leagues.assert_not_awaited()
@@ -1189,10 +1194,13 @@ async def test_legacy_confirmation_reserves_durable_work_and_fences_snapshot_gen
         assert current_link.created_at == reserved_record.verification_link_created_at
         assert current_link.rank_last_checked_at == checked_at
         assert current_link.last_known_rank == "DIAMOND"
-        assert "dokończy nadawanie ról" in followup.send.await_args.args[0]
+        assert "kończy nadawanie ról" in followup.send.await_args.args[0]
+        # The followup confirmation may now go below this reply.
+        assert bot.verification_confirmations.get(1).ready.is_set()
     else:
         record_leagues.assert_not_awaited()
         assert "Powiązanie konta zmieniło się" in followup.send.await_args.args[0]
+        assert bot.verification_confirmations.get(1) is None
         assert current_link is not link
         if replacement == "removed":
             assert current_link is None

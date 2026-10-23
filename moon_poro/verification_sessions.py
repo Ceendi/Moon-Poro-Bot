@@ -72,6 +72,7 @@ class LinkReservationResult(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CreatedVerificationSession:
+    session_id: int
     token: str
     expires_at: datetime
 
@@ -172,7 +173,10 @@ class VerificationSessionRepository:
                 )
             )
             session.add(record)
-        return CreatedVerificationSession(token=token, expires_at=record.expires_at)
+            await session.flush()
+        return CreatedVerificationSession(
+            session_id=record.id, token=token, expires_at=record.expires_at
+        )
 
     async def get_by_start_token(self, token: str) -> VerificationSession | None:
         token_hash = hash_secret(token)
@@ -471,8 +475,11 @@ class VerificationSessionRepository:
             record.updated_at = now
             return False
 
-    async def resume_paused_for_user(self, guild_id: int, user_id: int) -> bool:
-        """Resume only the paused completion that owns the current reserved link."""
+    async def resume_paused_for_user(self, guild_id: int, user_id: int) -> int | None:
+        """Resume only the paused completion that owns the current reserved link.
+
+        Returns the resumed session ID, or None when nothing was resumed.
+        """
 
         async with self._sessions.begin() as session:
             records = list(
@@ -489,18 +496,18 @@ class VerificationSessionRepository:
                 )
             )
             if not records:
-                return False
+                return None
             link = await session.get(VerificationLink, (guild_id, user_id), with_for_update=True)
             now = datetime.now(UTC)
-            resumed = False
+            resumed: int | None = None
             for record in records:
-                if not resumed and self._link_identity_matches(record, link):
+                if resumed is None and self._link_identity_matches(record, link):
                     record.status = VerificationSessionStatus.VERIFIED_PENDING_DISCORD.value
                     record.completion_attempts = 0
                     record.next_attempt_at = now
                     record.error_code = None
                     record.completed_at = None
-                    resumed = True
+                    resumed = record.id
                 else:
                     record.status = VerificationSessionStatus.CANCELLED.value
                     record.error_code = "VERIFICATION_LINK_CHANGED"
@@ -605,6 +612,8 @@ class VerificationSessionRepository:
                 record.status = VerificationSessionStatus.COMPLETED.value
                 record.error_code = None
                 record.completed_at = now
+                # Queued in the completing transaction, so a crash cannot lose it.
+                record.confirmation_due_at = now
             elif record.status not in TERMINAL_SESSION_STATUSES:
                 record.status = VerificationSessionStatus.CANCELLED.value
                 record.error_code = "VERIFICATION_LINK_CHANGED"
@@ -612,6 +621,49 @@ class VerificationSessionRepository:
             record.audit_pending_channel_id = None
             record.updated_at = now
             return active
+
+    async def claim_confirmations(
+        self, *, limit: int, lease_seconds: int
+    ) -> list[tuple[VerificationSession, VerificationLink]]:
+        """Claim due confirmations together with the link they confirm.
+
+        A claim only moves the due time forward, so an abandoned delivery comes
+        back after the lease. Confirmations whose link changed are dropped here.
+        """
+
+        now = datetime.now(UTC)
+        claimed: list[tuple[VerificationSession, VerificationLink]] = []
+        async with self._sessions.begin() as session:
+            records = list(
+                await session.scalars(
+                    select(VerificationSession)
+                    .where(VerificationSession.confirmation_due_at <= now)
+                    .order_by(VerificationSession.confirmation_due_at)
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            for record in records:
+                link = await session.get(
+                    VerificationLink, (record.guild_id, record.discord_user_id)
+                )
+                if (
+                    record.status != VerificationSessionStatus.COMPLETED.value
+                    or not self._link_identity_matches(record, link)
+                ):
+                    record.confirmation_due_at = None
+                    continue
+                record.confirmation_due_at = now + timedelta(seconds=lease_seconds)
+                claimed.append((record, cast(VerificationLink, link)))
+        return claimed
+
+    async def finish_confirmation(self, session_id: int) -> None:
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(VerificationSession)
+                .where(VerificationSession.id == session_id)
+                .values(confirmation_due_at=None)
+            )
 
     async def complete_discord(
         self,

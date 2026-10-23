@@ -37,6 +37,7 @@ from moon_poro.repositories import (
     VerificationDeletionRequestStatus,
     VerificationLinkIdentity,
 )
+from moon_poro.verification_confirmations import ConfirmationResponses
 
 
 class FakeMember:
@@ -62,6 +63,7 @@ def _panel_bot() -> SimpleNamespace:
         riot_auth_breaker=SimpleNamespace(
             snapshot=Mock(return_value=SimpleNamespace(blocked=False))
         ),
+        verification_confirmations=ConfirmationResponses(),
     )
 
 
@@ -324,7 +326,7 @@ async def test_rso_start_defers_before_slow_database_and_session_creation(
         response.defer.assert_awaited_once()
         assert kwargs["discord_username"] == str(member)
         assert kwargs["discord_guild_name"] == "Moon Poro"
-        return SimpleNamespace(token="a" * 43)
+        return SimpleNamespace(session_id=7, token="a" * 43)
 
     bot.verifications = SimpleNamespace(get_by_user=AsyncMock(side_effect=slow_read))
     bot.verification_sessions = SimpleNamespace(create=AsyncMock(side_effect=create))
@@ -359,9 +361,9 @@ async def test_public_start_resumes_paused_completion_without_new_authentication
     )
     response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock())
 
-    async def resume(*_args: object) -> bool:
+    async def resume(*_args: object) -> int:
         response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
-        return True
+        return 9
 
     bot.verification_sessions = SimpleNamespace(
         resume_paused_for_user=AsyncMock(side_effect=resume),
@@ -384,8 +386,12 @@ async def test_public_start_resumes_paused_completion_without_new_authentication
     await view.begin_verification(interaction)
     bot.verification_sessions.resume_paused_for_user.assert_awaited_once_with(123, 101)
     interaction.edit_original_response.assert_awaited_once_with(
-        content="Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
+        content="Wznawiamy weryfikację. Wynik pojawi się pod tą wiadomością."
     )
+    # The resumed completion confirms to this click, after its own reply.
+    pending = bot.verification_confirmations.get(9)
+    assert pending is not None and pending.interaction is interaction
+    assert pending.ready.is_set()
     bot.verification_sessions.create.assert_not_awaited()
     response.send_modal.assert_not_awaited()
     response.send_message.assert_not_awaited()

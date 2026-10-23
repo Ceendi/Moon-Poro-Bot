@@ -26,8 +26,8 @@ i baza, każde z osobnym loginem.
 | Strona | `/opt/moon-poro/site/dist`, serwowana przez Caddy (`deploy/Caddyfile`) |
 | Backupy | `/var/backups/moon-poro-prod/{daily,pre-deploy}` i bucket Cloud Storage |
 
-Jednostka bota, obie jednostki backupu i test odtworzenia wymagają jednostki klastra. Pliki env mają tryb `0600`
-i należą do kont, które z nich korzystają.
+Jednostka bota, obie jednostki backupu i test odtworzenia wymagają jednostki klastra. Pliki env
+mają tryb `0600` i należą do kont, które z nich korzystają.
 
 ## Wdrażanie zmian
 
@@ -53,12 +53,37 @@ sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh
 Instalator nie restartuje bota. Jeśli zmieniła się jednostka `deploy/moon-poro-prod.service`,
 wypisze polecenie restartu, a nowe ustawienia zadziałają po restarcie bota.
 
-**Strona** nie jest częścią tego skryptu. Zbuduj ją na innym komputerze (w `site/`: `npm ci` i
-`npm run build` z wszystkimi wartościami `PUBLIC_*`) i podmień `/opt/moon-poro/site/dist`.
-Strony logowania Riot ładują z niej `/fonts/*` i `/moon-poro.png`, więc nowy build wgrywaj razem
-ze zmianami w kodzie RSO.
+### Strona
 
-**Caddy** pochodzi z oficjalnego repozytorium Caddy (`/etc/apt/sources.list.d/caddy-stable.list`),
+Strona nie jest częścią skryptu wdrożenia. Wgrywaj ją po scaleniu PR, gdy zmienił się `site/`, i
+zawsze razem ze zmianami w kodzie RSO, bo strony logowania Riot ładują z niej `/fonts/*` i
+`/moon-poro.png`. Na VM nie ma Node.js, więc buduj ją na swoim komputerze:
+
+1. W czystym checkoucie `master`, w `site/`: plik `.env.production` z wszystkimi wartościami
+   `PUBLIC_*`, potem `npm ci` i `npm run build`.
+2. `tar --owner=0 --group=0 -czf site-dist.tar.gz -C dist .` i skopiuj paczkę na VM do `/tmp`
+   (`gcloud compute scp`).
+3. Na VM rozpakuj ją obok obecnej strony, sprawdź i podmień. Poprzednia wersja zostaje w
+   `dist.previous`:
+
+   ```bash
+   cd /opt/moon-poro/site
+   sudo mkdir dist.new
+   sudo tar -xzf /tmp/site-dist.tar.gz -C dist.new
+   sudo find dist.new -type d -exec chmod 0755 {} +
+   sudo find dist.new -type f -exec chmod 0644 {} +
+   test -f dist.new/index.html && test -d dist.new/fonts
+   sudo rm -rf dist.previous
+   sudo mv dist dist.previous
+   sudo mv dist.new dist
+   ```
+
+Caddy nie wymaga restartu. Powrót do poprzedniej wersji: zamień nazwy `dist` i `dist.previous`.
+
+### Caddy
+
+
+Caddy pochodzi z oficjalnego repozytorium Caddy (`/etc/apt/sources.list.d/caddy-stable.list`),
 bo Debian 12 ma Caddy 2.6 z ograniczonym wsparciem bezpieczeństwa. Przed podmianą
 `/etc/caddy/Caddyfile` uruchom `sudo caddy validate --config <plik> --adapter caddyfile`, a potem
 `sudo systemctl restart caddy`. `reload` nie działa, bo Caddyfile ma `admin off`.
@@ -133,9 +158,8 @@ Gdy codzienny backup, backup przed wdrożeniem, kopia w Cloud Storage albo test 
 się błędem, `OnFailure=` uruchamia `moon-poro-prod-alert@<jednostka>.service`. To samo dzieje się,
 gdy bot albo callback RSO padnie kilka razy z rzędu i systemd przestanie go uruchamiać (bot: 3 razy,
 callback: 5 razy w ciągu 5 minut). Zatrzymanie przy wdrożeniu albo restarcie VM nie jest błędem i
-nie wysyła alertu. Ta jednostka
-wysyła przez webhook Discorda krótką wiadomość: co się nie udało, nazwę jednostki, czas i
-polecenie `journalctl`. Nie wysyła logów. Oznacza tylko osobę podaną w
+nie wysyła alertu. Alert to krótka wiadomość przez webhook Discorda: co się nie udało, nazwa
+jednostki, czas i polecenie `journalctl`. Nie zawiera logów. Oznacza tylko osobę podaną w
 `DISCORD_ALERT_MENTION_USER_ID`, nigdy `@everyone` ani roli; bez tej linii nikogo nie oznacza.
 Dopóki nie ma pliku env, alert jest pomijany.
 
@@ -163,9 +187,10 @@ journalctl -u moon-poro-prod -u moon-poro-prod-rso --since today
 
 Publicznie `/readyz` zwraca 404; sprawdzenie bazy jest dostępne tylko lokalnie.
 
-Po zmianach w weryfikacji sprawdź na prywatnym kanale: sukces, odmowę w Riot, link po 10 minutach,
-ponowne użycie linku, dwa konta Discord dla jednego PUUID, ponowne kliknięcie, wyjście z serwera w
-trakcie, brak DM, chwilowy błąd Riot lub Discorda, `/usun_weryfikacje` i ponowne wejście na serwer.
+Po zmianach w weryfikacji sprawdź na prywatnym kanale: sukces z potwierdzeniem pod wiadomością z
+linkiem, odmowę w Riot, link po 10 minutach, ponowne użycie linku, dwa konta Discord dla jednego
+PUUID, ponowne kliknięcie, wyjście z serwera w trakcie, chwilowy błąd Riot lub Discorda,
+`/usun_weryfikacje` i ponowne wejście na serwer.
 
 ### Monitoring Riot API
 

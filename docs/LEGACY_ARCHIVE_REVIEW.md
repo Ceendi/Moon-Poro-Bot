@@ -1,36 +1,33 @@
-# Kontrola dawnego archiwum weryfikacji
+# Dawne archiwum weryfikacji
 
-Migracja `20260810_0001` zachowała dawną tabelę jako `legacy_zweryfikowani`.
-Obecne usuwanie powiązania nie zmienia tej tabeli. Najpierw należy ustalić,
-czy archiwum nadal istnieje w konkretnej instalacji; nie zakładamy tego na podstawie kodu.
+Migracja `20260810_0001` zostawiła starą tabelę weryfikacji jako `legacy_zweryfikowani`.
+Usuwanie powiązania jej nie zmienia, więc mogą w niej zostać dane osób, które usunęły powiązanie.
+Zanim cokolwiek zrobisz, sprawdź, czy ta tabela jest w danej bazie.
 
-## Raport bez zmiany danych
+## Raport tylko do odczytu
 
-Właściwy identyfikator serwera Discord zastępuje `ID_SERWERA`. Polecenie musi
-wskazywać świadomie wybraną bazę; poniższy przykład dotyczy produkcyjnej nazwy bazy.
-Nie uruchamiać go jako części automatycznej migracji ani wdrożenia.
+Wpisz ID serwera Discord zamiast `ID_SERWERA` i upewnij się, że to właściwa baza (przykład jest
+dla produkcji). Nie uruchamiaj raportu w migracji ani we wdrożeniu.
 
 ```bash
 sudo -u postgres psql --dbname=moon_poro_prod --set=guild_id=ID_SERWERA \
   --file=/opt/moon-poro-prod/deploy/inspect-legacy-verification-archive.psql
 ```
 
-Raport działa w transakcji `READ ONLY`, wypisuje nazwę bazy i same liczności.
-Nie wypisuje identyfikatorów graczy ani kont Discord. Brak tabeli jest poprawnym wynikiem.
-Rekord archiwum bez aktualnego powiązania może oznaczać wcześniejsze usunięcie przez
-użytkownika; inny PUUID może oznaczać ponowną weryfikację. Żadna z tych kategorii nie
-jest podstawą do automatycznego modyfikowania `verification_links`.
+Raport działa w transakcji tylko do odczytu i wypisuje nazwę bazy oraz liczby, bez ID graczy i
+kont Discord. Brak tabeli to poprawny wynik. Wpis w archiwum bez aktualnego powiązania zwykle
+znaczy, że ta osoba usunęła powiązanie, a inny PUUID, że zweryfikowała się ponownie. Żaden z tych
+wyników nie jest powodem do zmiany `verification_links`.
 
-## Co dalej, jeśli archiwum istnieje
+## Jeśli archiwum istnieje
 
-1. Potwierdzić zgodność migracji i potrzebne dane w aktualnych tabelach. Różnic nie
-   wyrównywać przez ponowne kopiowanie dawnego archiwum: przywróciłoby to usunięte powiązania.
-2. Potwierdzić gotowy backup, możliwość odtworzenia i obowiązującą retencję 90 dni.
-3. Uzyskać osobne zatwierdzenie usunięcia wyłącznie dawnego archiwum z aktywnej bazy.
-   Nie zmieniać wykonanej migracji `0001`; potrzebna jest osobna, kontrolowana operacja.
-4. Po jej zatwierdzeniu sprawdzić, że liczba i zawartość aktualnych powiązań nie zmieniły się.
+1. Sprawdź, czy aktualne tabele mają wszystkie potrzebne dane. Nie kopiuj niczego z archiwum, bo
+   przywróciłoby to usunięte powiązania.
+2. Sprawdź, czy jest świeży backup i czy da się go odtworzyć.
+3. Usunięcie archiwum wymaga osobnej zgody właściciela i osobnej operacji. Nie zmieniaj migracji
+   `0001`.
+4. Po usunięciu sprawdź, czy aktualne powiązania się nie zmieniły.
 
-Usunięcie archiwum ograniczy możliwość cofnięcia do schematu sprzed `0001`; odtworzenie
-tego schematu będzie wymagało backupu. Dane archiwalne mogą jeszcze pozostawać w kopiach
-do końca ich retencji. Nie wolno traktować przywrócenia archiwum jako ponownej zgody
-użytkownika na aktywne powiązanie.
+Po usunięciu archiwum powrót do schematu sprzed `0001` wymaga backupu. Dane z archiwum zostają w
+kopiach do końca ich przechowywania (90 dni). Przywrócenie archiwum nie jest zgodą na ponowne
+powiązanie konta.

@@ -344,6 +344,43 @@ def _state_colour(state: AccountProfileState) -> discord.Colour:
     return discord.Colour.light_grey()
 
 
+def build_verification_confirmation(
+    link: VerificationLinkLike,
+    *,
+    riot_id: str | None,
+    rank_emojis: Mapping[str, str] | None = None,
+    guild_name: str | None = None,
+) -> discord.Embed:
+    """Short result of a finished verification, shown privately or sent by DM.
+
+    A DM passes ``guild_name`` so the message says which server it is about.
+    """
+
+    rank = RankView.from_link(link)
+    server = "na serwerze"
+    if guild_name:
+        server = f"na serwerze **{discord.utils.escape_markdown(guild_name)}**"
+    if rank.tier is None:
+        rank_label = "Czekamy na Riot"
+        description = (
+            f"Rolę regionu masz już {server}. Rolę rangi bot doda, gdy Riot potwierdzi rangę."
+        )
+    else:
+        rank_label = (
+            f"{_emoji_prefix(rank.tier, rank_emojis or {})}{_rank_text(rank.tier, rank.division)}"
+        )
+        description = f"Role regionu i rangi masz już {server}."
+    embed = discord.Embed(
+        title="Weryfikacja udana",
+        description=description,
+        colour=discord.Colour.green(),
+    )
+    embed.add_field(name="Riot ID", value=_riot_id_label(riot_id), inline=True)
+    embed.add_field(name="Region", value=_region_label(link.platform), inline=True)
+    embed.add_field(name="Solo/Duo", value=rank_label, inline=True)
+    return embed
+
+
 def _riot_id_label(riot_id: str | None) -> str:
     if riot_id is None or not riot_id.strip():
         return "Brak danych"
