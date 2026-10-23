@@ -100,6 +100,7 @@ uv run pip-audit --skip-editable
 - Testy z Postgresem wymagają zmiennych `TEST_POSTGRES_*`. Bez nich są pomijane, więc uruchamiaj je z bazą.
 - Wyścigi i blokady wierszy testuj na Postgresie. SQLite ignoruje `FOR UPDATE`, więc testy na nim nie wykażą takich błędów.
 - Zmiany strony sprawdzaj przez `npm run build` w `site/` (wymaga zmiennych `PUBLIC_*`).
+- Test na prawdziwym Discordzie (bot testowy, lokalna baza, weryfikacja bez logowania Riot) jest opisany w `.local-cache/README.md`. Ten katalog jest tylko na laptopie właściciela, nie ma go w repo.
 
 ## Wdrożenie
 
