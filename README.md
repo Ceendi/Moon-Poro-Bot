@@ -67,6 +67,7 @@ npm run dev
 CI runs the same commands:
 
 ```bash
+bash -n deploy/*.sh
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy moon_poro

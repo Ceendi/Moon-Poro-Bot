@@ -105,7 +105,11 @@ uv run pip-audit --skip-editable
 ## Wdrożenie
 
 - Wdrożenie produkcji jest tylko ręczne: `sudo /usr/local/sbin/deploy-moon-poro-prod` na VM `moon-poro-web`. Uruchamiaj je tylko na wyraźne polecenie właściciela.
+- Kolejność: zielone CI i scalenie PR do `master`, potem skrypt wdrożenia, potem strona (jeśli zmienił się `site/` albo kod RSO), na końcu „Kontrola działania”. Szczegóły są w `docs/PRODUCTION.md`.
+- Na VM pracujesz tylko za zgodą właściciela w tej sesji. Każde polecenie pokaż przed uruchomieniem. Nie czytaj, nie wypisuj i nie kopiuj na laptopa sekretów (`/etc/moon-poro/*.env`, adres webhooka).
+- Dane dostępu do VM (projekt GCP, strefa, polecenie `gcloud`) są w lokalnym `DEPLOYMENT.md` na laptopie właściciela, nie w repo.
 - Wdrożenie pokazuje commity i pyta o potwierdzenie. Przez `gcloud compute ssh --command` nie ma terminala, więc trzeba dodać `--yes`, ale tylko gdy właściciel zobaczył listę commitów.
+- Gdy zmienią się pliki w `deploy/`, po wdrożeniu uruchom jeszcze `sudo /opt/moon-poro-prod/deploy/install-prod-automation.sh`.
 - Caddy na VM pochodzi z oficjalnego repozytorium Caddy i aktualizuje się sam. Przed instalacją Caddyfile zawsze uruchom `caddy validate --adapter caddyfile`.
 - Po zmianie Caddyfile użyj `systemctl restart caddy`. `reload` nie działa, bo Caddyfile ma `admin off`.
 - Strony logowania Riot ładują `/fonts/*` i `/moon-poro.png` ze strony statycznej, więc nowy `site/dist` wgrywaj razem z kodem RSO.

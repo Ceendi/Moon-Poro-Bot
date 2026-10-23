@@ -62,6 +62,13 @@ zapisuje błąd w logu. Powiązanie i zamiary audytu zostają. Po naprawie upraw
 konfiguracji osoba może kliknąć „Zweryfikuj konto”, żeby dokończyć tę samą weryfikację bez nowego
 logowania Riot. Usunięcie powiązania anuluje tę pracę.
 
+Po zakończeniu weryfikacji bot wysyła potwierdzenie (Riot ID, region, ranga Solo/Duo) prywatnie
+pod wiadomością z linkiem. Zamiar wysyłki to kolumna `confirmation_due_at`, ustawiana w tej samej
+transakcji, która kończy sesję, więc restart go nie gubi. Token interakcji Discorda jest tylko w
+pamięci bota i działa 15 minut. Po jego wygaśnięciu albo po restarcie potwierdzenie idzie DM-em,
+najpóźniej godzinę po zakończeniu weryfikacji. Wznowienie i weryfikacja ikoną podpinają swoje
+kliknięcie, a potwierdzenie czeka, aż bot wyśle własną odpowiedź na to kliknięcie.
+
 Usuwanie powiązania najpierw zapisuje stan oczekującego usunięcia, który blokuje nowe odświeżenia i
 synchronizację ról. Bot zdejmuje rolę Zweryfikowany, sprząta wiadomość audytu i dopiero wtedy usuwa
 rekord. Błąd Discorda jest ponawiany po restarcie, więc powiązanie nie zostaje w połowie usunięte.
