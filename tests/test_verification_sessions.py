@@ -695,8 +695,8 @@ async def test_retry_cap_pauses_once_retains_link_and_requires_explicit_resume(
         assert await session.get(VerificationLink, (123, 456)) is not None
     with pytest.raises(SessionAlreadyUsed):
         await restarted.create(guild_id=123, user_id=456, ttl_seconds=600)
-    assert not await restarted.resume_paused_for_user(123, 999)
-    assert await restarted.resume_paused_for_user(123, 456)
+    assert await restarted.resume_paused_for_user(123, 999) is None
+    assert await restarted.resume_paused_for_user(123, 456) == claimed.id
     assert not await restarted.resume_paused_for_user(123, 456)
     stored = await restarted.get_by_start_token(created.token)
     assert stored is not None and stored.status == "VERIFIED_PENDING_DISCORD"
@@ -994,3 +994,83 @@ async def test_fail_with_expected_status_never_overwrites_reserved_link(
         "FAILED",
         "INTERNAL_ERROR",
     )
+
+
+async def _publish_completed(
+    repository: VerificationSessionRepository,
+) -> tuple[CreatedVerificationSession, VerificationSession]:
+    created, claimed = await reserve_completion(repository)
+
+    async def publish(_record: VerificationSession, active: bool) -> list[int]:
+        assert active
+        return [987]
+
+    assert await repository.publish_audit(claimed.id, channel_id=654, operation=publish)
+    return created, claimed
+
+
+async def test_completion_queues_one_confirmation_and_lease_hides_it(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created, claimed = await _publish_completed(session_repository)
+    assert created.session_id == claimed.id
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.status == "COMPLETED"
+    assert stored.confirmation_due_at is not None
+
+    due = await session_repository.claim_confirmations(limit=5, lease_seconds=30)
+    assert [(record.id, link.puuid) for record, link in due] == [(claimed.id, "puuid")]
+    # A delivery in progress keeps the row until its lease runs out.
+    assert await session_repository.claim_confirmations(limit=5, lease_seconds=30) == []
+
+    await session_repository.finish_confirmation(claimed.id)
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.confirmation_due_at is None
+
+
+async def test_abandoned_confirmation_claim_returns_after_its_lease(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    _created, claimed = await _publish_completed(session_repository)
+    first = await session_repository.claim_confirmations(limit=5, lease_seconds=0)
+    restarted = VerificationSessionRepository(session_repository._sessions)
+    second = await restarted.claim_confirmations(limit=5, lease_seconds=30)
+    assert [record.id for record, _link in first] == [record.id for record, _link in second]
+    assert [record.id for record, _link in second] == [claimed.id]
+
+
+@pytest.mark.parametrize("changed", ["deleting", "generation", "absent"])
+async def test_confirmation_is_dropped_when_the_link_changed(
+    session_repository: VerificationSessionRepository,
+    changed: str,
+) -> None:
+    created, _claimed = await _publish_completed(session_repository)
+    async with session_repository._sessions.begin() as session:
+        link = await session.get(VerificationLink, (123, 456))
+        assert link is not None
+        if changed == "deleting":
+            link.deletion_requested_at = datetime.now(UTC)
+        elif changed == "generation":
+            link.created_at += timedelta(seconds=1)
+        else:
+            await session.delete(link)
+
+    assert await session_repository.claim_confirmations(limit=5, lease_seconds=0) == []
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.confirmation_due_at is None
+
+
+async def test_cancelled_completion_queues_no_confirmation(
+    session_repository: VerificationSessionRepository,
+) -> None:
+    created, claimed = await reserve_completion(session_repository)
+    await session_repository.cancel_for_user(123, 456, created_at_or_before=claimed.created_at)
+
+    async def publish(_record: VerificationSession, active: bool) -> list[int]:
+        assert not active
+        return []
+
+    assert not await session_repository.publish_audit(claimed.id, channel_id=654, operation=publish)
+    stored = await session_repository.get_by_start_token(created.token)
+    assert stored is not None and stored.confirmation_due_at is None
+    assert await session_repository.claim_confirmations(limit=5, lease_seconds=0) == []

@@ -228,7 +228,8 @@ async def test_paused_completion_expiry_and_audit_deadline_against_postgres(
             ),
             timeout=3,
         )
-        assert sorted(resumed) == [False, True]
+        # Exactly one concurrent resume wins and returns the session ID.
+        assert sorted(resumed, key=lambda value: value is not None) == [None, paused.id]
 
         assert len(await repository.claim_pending()) == 1
         monkeypatch.setattr(
@@ -287,7 +288,7 @@ async def test_paused_completion_expiry_and_audit_deadline_against_postgres(
                 policy=VerificationDeletionPolicy.USER,
             )
             assert deleted.status is VerificationDeletionRequestStatus.REQUESTED
-        assert not await asyncio.wait_for(waiting_resume, timeout=3)
+        assert await asyncio.wait_for(waiting_resume, timeout=3) is None
         saved = await repository.get_by_start_token(second.token)
         assert saved is not None and saved.status == VerificationSessionStatus.CANCELLED.value
         retained = await links.get_by_user(guild_id, 3)
@@ -2515,4 +2516,69 @@ async def test_rso_shutdown_finishes_pending_failure_update_on_postgres(
         assert (stored.status, stored.error_code) == ("FAILED", "INTERNAL_ERROR")
     finally:
         await _stop_rso_web_against_postgres(guild_id, database, client)
+        await database.close()
+
+
+async def test_concurrent_confirmation_claims_deliver_once_on_postgres(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    guild_id = time.time_ns() % 9_000_000_000_000_000_000
+    settings = settings_factory(
+        postgres_user=os.getenv("TEST_POSTGRES_USER", "moon_poro_test"),
+        postgres_password=os.getenv(
+            "TEST_POSTGRES_PASSWORD", "audit-password"
+        ),  # pragma: allowlist secret
+        postgres_host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=int(os.environ["TEST_POSTGRES_PORT"]),
+        postgres_db=os.getenv("TEST_POSTGRES_DB", "moon_poro_test"),
+        guild_id=guild_id,
+    )
+    await upgrade_database(settings)
+    database = Database(settings)
+    repository = VerificationSessionRepository(database.session_factory)
+    peer = VerificationSessionRepository(database.session_factory)
+    try:
+        created = await repository.create(guild_id=guild_id, user_id=456, ttl_seconds=600)
+        await repository.begin_oauth(token=created.token, state="state", browser_token="browser")
+        record = await repository.claim_callback("state", browser_token="browser")
+        assert record.id == created.session_id
+        assert (
+            await repository.reserve_link(
+                session_id=record.id,
+                platform="EUN1",
+                puuid=f"confirm-{guild_id}",
+                game_name="Moon",
+                tag_line="EUNE",
+            )
+            == LinkReservationResult.RESERVED
+        )
+        assert len(await repository.claim_pending()) == 1
+
+        async def publish(_record, active):
+            assert active
+            return [987]
+
+        assert await repository.publish_audit(record.id, channel_id=654, operation=publish)
+        claims = await asyncio.wait_for(
+            asyncio.gather(
+                repository.claim_confirmations(limit=50, lease_seconds=30),
+                peer.claim_confirmations(limit=50, lease_seconds=30),
+            ),
+            timeout=5,
+        )
+        owners = [
+            index
+            for index, claimed in enumerate(claims)
+            for claimed_record, _link in claimed
+            if claimed_record.id == record.id
+        ]
+        assert len(owners) == 1
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM verification_links WHERE guild_id=:guild"), {"guild": guild_id}
+            )
+            await connection.execute(
+                text("DELETE FROM verification_sessions WHERE guild_id=:guild"), {"guild": guild_id}
+            )
         await database.close()

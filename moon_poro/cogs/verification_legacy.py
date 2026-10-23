@@ -26,6 +26,7 @@ from moon_poro.cogs.verification import (
     _record_leagues,
     _request_rank_refresh_from_panel,
     _restore_cached_roles_on_join,
+    _resume_paused_verification,
     _show_account_profile,
     _show_delete_confirmation,
     _verification_legal_links,
@@ -247,17 +248,13 @@ class LegacyVerificationStartView(discord.ui.View):
             )
             return
         if existing_link is not None:
-            resumed = await self.bot.verification_sessions.resume_paused_for_user(
-                interaction.guild_id, interaction.user.id
-            )
-            await interaction.edit_original_response(
-                content=(
-                    "Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
-                    if resumed
-                    else "Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
+            if not await _resume_paused_verification(
+                self.bot, interaction, self.bot.settings.guild_id
+            ):
+                await interaction.edit_original_response(
+                    content="Masz już połączone konto Riot. Aby połączyć inne, najpierw usuń "
                     "obecne powiązanie w sekcji „Moje konto”."
                 )
-            )
             return
         orphan_verified_role = member_has_role(
             interaction.user,
@@ -715,6 +712,8 @@ class LegacyIconConfirmationView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        confirmations = self.bot.verification_confirmations
+        session_id = 0
         try:
             record = await self.bot.verification_sessions.get_by_start_token(self.session_token)
             if (
@@ -726,20 +725,40 @@ class LegacyIconConfirmationView(discord.ui.View):
                 or as_utc(record.expires_at) <= datetime.now(UTC)
             ):
                 raise SessionAlreadyUsed
+            session_id = record.id
+            # Completion can finish seconds after the reservation, so register first.
+            confirmations.register(session_id, interaction)
             result = await self.bot.verification_sessions.reserve_link(
-                session_id=record.id,
+                session_id=session_id,
                 platform=self.platform,
                 puuid=self.puuid,
                 game_name=self.game_name,
                 tag_line=self.tag_line,
             )
         except SessionError:
+            confirmations.discard(session_id, interaction)
             await interaction.followup.send(
                 "Ta weryfikacja wygasła albo została zastąpiona nową. Zacznij jeszcze raz.",
                 ephemeral=True,
             )
             return
+        try:
+            await self._finish_reserved_proof(interaction, button, result, leagues, session_id)
+        finally:
+            # The confirmation followup waits for this, so it lands below these replies.
+            confirmations.mark_ready(session_id, interaction)
+
+    async def _finish_reserved_proof(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[LegacyIconConfirmationView],
+        result: LinkReservationResult,
+        leagues: list[RiotPayload],
+        session_id: int,
+    ) -> None:
+        confirmations = self.bot.verification_confirmations
         if result != LinkReservationResult.RESERVED:
+            confirmations.discard(session_id, interaction)
             await interaction.followup.send(
                 "To konto mogło zostać już połączone. Sprawdź „Moje konto”.", ephemeral=True
             )
@@ -751,7 +770,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         if self.rate_limiter._challenges.get(self.challenge_key) is self:
             del self.rate_limiter._challenges[self.challenge_key]
         record = await self.bot.verification_sessions.get_by_start_token(self.session_token)
-        link = await self.bot.verifications.get_by_user(interaction.guild_id, self.owner_id)
+        link = await self.bot.verifications.get_by_user(self.bot.settings.guild_id, self.owner_id)
         if (
             record is None
             or link is None
@@ -763,6 +782,7 @@ class LegacyIconConfirmationView(discord.ui.View):
             or link.platform != record.platform
             or as_utc(link.created_at) != as_utc(record.verification_link_created_at)
         ):
+            confirmations.discard(session_id, interaction)
             await interaction.followup.send(
                 "Powiązanie konta zmieniło się podczas weryfikacji. Sprawdź aktualne "
                 "dane w sekcji „Moje konto”.",
@@ -778,7 +798,7 @@ class LegacyIconConfirmationView(discord.ui.View):
         with suppress(discord.HTTPException):
             await interaction.edit_original_response(view=self)
         await interaction.followup.send(
-            "Konto Riot zostało zweryfikowane. Bot dokończy nadawanie ról automatycznie.",
+            "Konto Riot zostało zweryfikowane. Bot kończy nadawanie ról, wynik pojawi się poniżej.",
             ephemeral=True,
         )
 
@@ -802,12 +822,14 @@ class LegacyVerificationCog(VerificationCog):
         self.refresh_verified.start()
         self.reconcile_verification_audits.start()
         self.complete_legacy_verifications.start()
+        self.deliver_verification_confirmations.start()
         self.verification_maintenance.start()
         self.report_riot_monitoring.start()
 
     async def cog_unload(self) -> None:
         self.rate_limiter.clear_challenges()
         self.complete_legacy_verifications.cancel()
+        self.deliver_verification_confirmations.cancel()
         self.refresh_verified.cancel()
         self.reconcile_verification_audits.cancel()
         self.verification_maintenance.cancel()

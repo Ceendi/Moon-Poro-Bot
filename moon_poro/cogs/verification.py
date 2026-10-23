@@ -6,8 +6,10 @@ import math
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.app_commands import Choice
@@ -19,6 +21,7 @@ from moon_poro.account_profile import (
     AccountProfileState,
     RankView,
     build_account_profile,
+    build_verification_confirmation,
     rank_change_summary,
 )
 from moon_poro.bot import MoonPoroBot
@@ -54,9 +57,18 @@ from moon_poro.riot import (
 )
 from moon_poro.roles import find_role, member_has_role, member_roles_named
 from moon_poro.time_utils import timestamps_match
-from moon_poro.verification_sessions import SessionAlreadyUsed
+from moon_poro.verification_confirmations import PendingResponse
+from moon_poro.verification_sessions import SessionAlreadyUsed, as_utc
 
 logger = logging.getLogger("moon_poro.verification")
+
+CONFIRMATION_LEASE_SECONDS = 30
+CONFIRMATION_READY_TIMEOUT_SECONDS = 5
+CONFIRMATION_SEND_TIMEOUT_SECONDS = 10
+CONFIRMATION_FOLLOWUP_ATTEMPTS = 2
+CONFIRMATION_DM_WINDOW = timedelta(hours=1)
+# Invalid webhook token, unknown webhook, unknown message: the token is gone.
+_EXPIRED_INTERACTION_CODES = frozenset({50027, 10015, 10008})
 
 # Members whose rank refresh is already followed by a private reply.
 _ACTIVE_RANK_REFRESH_WATCHES: set[tuple[int, int]] = set()
@@ -2165,6 +2177,28 @@ class AdminDeleteVerificationConfirmationView(discord.ui.View):
         )
 
 
+async def _resume_paused_verification(
+    bot: MoonPoroBot, interaction: discord.Interaction, guild_id: int
+) -> bool:
+    """Resume a paused completion; its confirmation goes to this interaction."""
+
+    session_id = await bot.verification_sessions.resume_paused_for_user(
+        guild_id, interaction.user.id
+    )
+    if session_id is None:
+        return False
+    # The first click's token has long expired, so this click gets the result.
+    confirmations = bot.verification_confirmations
+    confirmations.register(session_id, interaction)
+    try:
+        await interaction.edit_original_response(
+            content="Wznawiamy weryfikację. Wynik pojawi się pod tą wiadomością."
+        )
+    finally:
+        confirmations.mark_ready(session_id, interaction)
+    return True
+
+
 class VerificationStartView(discord.ui.View):
     def __init__(self, bot: MoonPoroBot) -> None:
         super().__init__(timeout=None)
@@ -2224,15 +2258,9 @@ class VerificationStartView(discord.ui.View):
                 content="Najpierw usuń poprzednie powiązanie w sekcji „Moje konto”.",
             )
             return
-        if (
-            existing_link is not None
-            and await self.bot.verification_sessions.resume_paused_for_user(
-                interaction.guild.id, interaction.user.id
-            )
+        if existing_link is not None and await _resume_paused_verification(
+            self.bot, interaction, interaction.guild.id
         ):
-            await interaction.edit_original_response(
-                content="Wznawiamy weryfikację. Bot jeszcze raz spróbuje nadać role."
-            )
             return
         already_linked = existing_link is not None
         if not already_linked and member_has_role(
@@ -2281,8 +2309,16 @@ class VerificationStartView(discord.ui.View):
             ),
             colour=discord.Colour.from_rgb(116, 211, 224),
         )
-        embed.set_footer(text="Po zalogowaniu wróć do Discorda, role pojawią się same.")
-        await interaction.edit_original_response(content=None, embed=embed, view=link_view)
+        embed.set_footer(text="Po zalogowaniu potwierdzenie pojawi się pod tą wiadomością.")
+        # Registered before the link is shown, so the confirmation always finds it.
+        confirmations = self.bot.verification_confirmations
+        confirmations.register(session.session_id, interaction)
+        try:
+            await interaction.edit_original_response(content=None, embed=embed, view=link_view)
+        except BaseException:
+            confirmations.discard(session.session_id, interaction)
+            raise
+        confirmations.mark_ready(session.session_id, interaction)
 
     @discord.ui.button(
         label="Moje konto",
@@ -2329,6 +2365,55 @@ class VerificationStartView(discord.ui.View):
         await _show_delete_confirmation(self.bot, interaction)
 
 
+class _FollowupOutcome(Enum):
+    SENT = "sent"
+    RETRY = "retry"
+    FALLBACK = "fallback"
+
+
+def _session_riot_id(record: VerificationSession) -> str | None:
+    if record.riot_game_name and record.riot_tag_line:
+        return f"{record.riot_game_name}#{record.riot_tag_line}"
+    return None
+
+
+async def _send_confirmation_followup(
+    pending: PendingResponse, embed: discord.Embed
+) -> _FollowupOutcome:
+    if not pending.ready.is_set():
+        with suppress(TimeoutError):
+            await asyncio.wait_for(pending.ready.wait(), CONFIRMATION_READY_TIMEOUT_SECONDS)
+        if not pending.ready.is_set():
+            # The handler's own reply is still on its way. A followup now would
+            # replace its "thinking" message and be overwritten a moment later.
+            return _FollowupOutcome.RETRY if pending.usable() else _FollowupOutcome.FALLBACK
+    if not pending.usable():
+        return _FollowupOutcome.FALLBACK
+    pending.attempts += 1
+    try:
+        async with asyncio.timeout(CONFIRMATION_SEND_TIMEOUT_SECONDS):
+            await pending.interaction.followup.send(
+                embed=embed,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+    except (TimeoutError, OSError, aiohttp.ClientError, discord.DiscordServerError):
+        # The followup may have arrived anyway, so retry once and accept a rare
+        # duplicate rather than no confirmation at all.
+        if pending.attempts < CONFIRMATION_FOLLOWUP_ATTEMPTS and pending.usable():
+            return _FollowupOutcome.RETRY
+        return _FollowupOutcome.FALLBACK
+    except discord.HTTPException as error:
+        if error.status != 401 and error.code not in _EXPIRED_INTERACTION_CODES:
+            logger.warning(
+                "Verification confirmation followup rejected (HTTP %s, code %s)",
+                error.status,
+                error.code,
+            )
+        return _FollowupOutcome.FALLBACK
+    return _FollowupOutcome.SENT
+
+
 class VerificationCog(commands.Cog):
     def __init__(self, bot: MoonPoroBot) -> None:
         self.bot = bot
@@ -2348,6 +2433,7 @@ class VerificationCog(commands.Cog):
         self.reconcile_verification_audits.start()
         self.verification_maintenance.start()
         self.complete_rso_verifications.start()
+        self.deliver_verification_confirmations.start()
         self.report_riot_monitoring.start()
 
     async def cog_unload(self) -> None:
@@ -2355,6 +2441,7 @@ class VerificationCog(commands.Cog):
         self.reconcile_verification_audits.cancel()
         self.verification_maintenance.cancel()
         self.complete_rso_verifications.cancel()
+        self.deliver_verification_confirmations.cancel()
         self.report_riot_monitoring.cancel()
 
     async def apply_verified_roles(
@@ -2548,19 +2635,7 @@ class VerificationCog(commands.Cog):
                 observed_current=current,
             )
             return
-        if role_leagues is None:
-            message = (
-                "Twoje konto Riot jest połączone. "
-                f"Na serwerze **{guild.name}** masz już rolę regionu, "
-                "a rolę rangi bot doda, gdy Riot ją potwierdzi."
-            )
-        else:
-            message = (
-                "Twoje konto Riot jest połączone. "
-                f"Na serwerze **{guild.name}** masz już role regionu i rangi."
-            )
-        with suppress(discord.Forbidden, discord.HTTPException):
-            await member.send(message)
+        # publish_audit queued the confirmation; deliver_verification_confirmations sends it.
 
     async def _publish_rso_audit(self, record: VerificationSession) -> bool:
         channel_id = record.audit_pending_channel_id or self.bot.settings.zweryfikowani_channel_id
@@ -2665,6 +2740,83 @@ class VerificationCog(commands.Cog):
                 error_code,
             )
 
+    @tasks.loop(seconds=3, reconnect=True)
+    async def deliver_verification_confirmations(self) -> None:
+        try:
+            self.bot.verification_confirmations.prune()
+            claimed = await self.bot.verification_sessions.claim_confirmations(
+                limit=5, lease_seconds=CONFIRMATION_LEASE_SECONDS
+            )
+            await asyncio.gather(
+                *(self._deliver_confirmation_safely(record, link) for record, link in claimed)
+            )
+        except Exception:
+            logger.exception("Verification confirmation worker error; next run will retry")
+
+    async def _deliver_confirmation_safely(
+        self, record: VerificationSession, link: VerificationLink
+    ) -> None:
+        # An unexpected error leaves the claim to expire, so a later run retries.
+        try:
+            await self._deliver_confirmation(record, link)
+        except Exception:
+            logger.exception(
+                "Could not deliver verification confirmation for session %s", record.id
+            )
+
+    async def _deliver_confirmation(
+        self, record: VerificationSession, link: VerificationLink
+    ) -> None:
+        confirmations = self.bot.verification_confirmations
+        sessions = self.bot.verification_sessions
+        riot_id = _session_riot_id(record)
+        pending = confirmations.get(record.id)
+        if pending is not None:
+            embed = build_verification_confirmation(
+                link, riot_id=riot_id, rank_emojis=self.bot.rank_emojis
+            )
+            outcome = await _send_confirmation_followup(pending, embed)
+            if outcome is _FollowupOutcome.RETRY:
+                return
+            confirmations.discard(record.id, pending.interaction)
+            if outcome is _FollowupOutcome.SENT:
+                await sessions.finish_confirmation(record.id)
+                return
+
+        # No usable interaction: its token expired or the bot restarted.
+        completed_at = record.completed_at
+        if (
+            completed_at is None
+            or datetime.now(UTC) - as_utc(completed_at) > CONFIRMATION_DM_WINDOW
+        ):
+            logger.info("Verification confirmation for session %s is too old for a DM", record.id)
+            await sessions.finish_confirmation(record.id)
+            return
+        guild = self.bot.get_guild(record.guild_id)
+        embed = build_verification_confirmation(
+            link,
+            riot_id=riot_id,
+            rank_emojis=self.bot.rank_emojis,
+            guild_name=guild.name if guild is not None else record.discord_guild_name,
+        )
+        try:
+            async with asyncio.timeout(CONFIRMATION_SEND_TIMEOUT_SECONDS):
+                user = self.bot.get_user(record.discord_user_id) or await self.bot.fetch_user(
+                    record.discord_user_id
+                )
+                # The nonce stops a duplicate when a retry follows a lost response.
+                await user.send(
+                    embed=embed,
+                    nonce=f"verified:{record.id}",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except (discord.Forbidden, discord.NotFound):
+            logger.info("Verification confirmation for session %s cannot be sent by DM", record.id)
+        except (discord.HTTPException, TimeoutError, OSError, aiohttp.ClientError):
+            logger.warning("Verification confirmation DM for session %s will retry", record.id)
+            return
+        await sessions.finish_confirmation(record.id)
+
     @tasks.loop(seconds=10, reconnect=True)
     async def reconcile_verification_audits(self) -> None:
         try:
@@ -2722,6 +2874,10 @@ class VerificationCog(commands.Cog):
 
     @reconcile_verification_audits.before_loop
     async def before_audit_reconciliation(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @deliver_verification_confirmations.before_loop
+    async def before_confirmation_delivery(self) -> None:
         await self.bot.wait_until_ready()
 
     @verification_maintenance.before_loop

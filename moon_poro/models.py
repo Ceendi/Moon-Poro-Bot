@@ -145,6 +145,7 @@ class VerificationSession(Base):
             "next_attempt_at",
             "updated_at",
         ),
+        Index("ix_verification_sessions_confirmation_due", "confirmation_due_at"),
         UniqueConstraint("start_token_hash", name="uq_verification_sessions_start_token_hash"),
         UniqueConstraint("oauth_state_hash", name="uq_verification_sessions_oauth_state_hash"),
     )
@@ -176,6 +177,8 @@ class VerificationSession(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when completion commits; cleared once the user got the confirmation.
+    confirmation_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class VerificationAuditCleanup(Base):
