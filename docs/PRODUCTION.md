@@ -215,8 +215,12 @@ odpowiedzi 2xx (`last_successful_riot_response_utc`). Częstotliwość ustawia
 | PostgreSQL | 120-220 MB | ustawienia klastra |
 | Caddy i system | 80-160 MB | brak |
 
-`bootstrap-web.sh` zakłada 1 GB swapu jako zabezpieczenie przed OOM. Pula połączeń bota to
-najwyżej 10 (domyślnie 5 + 5), callbacku 2.
+`bootstrap-web.sh` zakłada 1 GB swapu jako zabezpieczenie przed OOM.
+
+Pula połączeń bota z bazą to na produkcji 3 + 2 (`DATABASE_POOL_SIZE=3` i
+`DATABASE_MAX_OVERFLOW=2` w `prod-bot.env`): 3 połączenia otwarte cały czas i najwyżej 2
+dodatkowe w szczycie. Domyślne 5 + 5 z kodu to za dużo na 1 GB RAM, a przy 2 + 1 pętle bota
+czekały na wolne połączenie, gdy maszyna była obciążona. Callback ma najwyżej 2 połączenia.
 
 ## Awaryjny powrót do weryfikacji ikoną
 
@@ -244,7 +248,8 @@ tylko do TCP 80 i 443 oraz SSH tylko przez IAP. Porty 5433 i 8080 nie mogą być
    (`useradd --system --no-create-home --shell /usr/sbin/nologin <konto>`).
 4. Checkout repozytorium w `/opt/moon-poro-prod` (`root:root`), pliki
    `/etc/moon-poro/prod-bot.env` z `.env.example` i `/etc/moon-poro/prod-rso.env` z
-   `.env.rso.example`, oba z `POSTGRES_PORT=5433` i `POSTGRES_DB=moon_poro_prod`.
+   `.env.rso.example`, oba z `POSTGRES_PORT=5433` i `POSTGRES_DB=moon_poro_prod`. W
+   `prod-bot.env` ustaw pulę 3 + 2 (sekcja „Pamięć”).
 5. Baza z kopii (sekcja „Kopie zapasowe”) albo pusta. Migracje bez łączenia z Discordem:
    `sudo -u moon-poro-prod /opt/moon-poro-prod/.venv/bin/python -m moon_poro.migrate --env-file /etc/moon-poro/prod-bot.env`.
    Nie używaj samego `alembic upgrade head`, bo migracje potrzebują ustawień bota.
